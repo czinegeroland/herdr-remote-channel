@@ -1,0 +1,100 @@
+name: Build and test
+
+# The PRD traceability workflow runs on `pull_request_target` so it can
+# execute trusted base-branch code (PRD decision DEC-014). This workflow
+# compiles and runs pull-request code, so it deliberately uses the untrusted
+# `pull_request` trigger with a read-only token instead.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-and-test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Registry dependencies build with `--cap-lints allow`, so this denies
+  # warnings in workspace crates only.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  lint:
+    name: Format and lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Cache cargo registry and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-lint-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-lint-${{ runner.os }}-
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: Build and test (${{ matrix.os }})
+    # PRD acceptance suite AC-RUST-FOUNDATION requires the workspace to build
+    # and the CLI contract tests to pass on Windows, macOS, and Linux.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Cache cargo registry and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-test-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-test-${{ runner.os }}-
+
+      - name: Build the workspace
+        run: cargo build --workspace --all-targets --locked
+
+      - name: Run the test suite
+        run: cargo test --workspace --locked
+
+      - name: Smoke-test the hrc executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --locked --quiet --bin hrc -- --version
+          cargo run --locked --quiet --bin hrc -- --help > /dev/null

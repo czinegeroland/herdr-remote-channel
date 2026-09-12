@@ -1,0 +1,11 @@
+[package]
+name = "hrc-crypto"
+description = "Signing, encryption, and hashing primitives for Herdr Remote Channel."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
