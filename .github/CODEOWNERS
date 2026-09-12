@@ -1,0 +1,6 @@
+# Protect the product contract and its enforcement mechanism.
+/docs/PRD.md @czinegeroland
+/.github/pull_request_template.md @czinegeroland
+/.github/scripts/check-prd-traceability.ps1 @czinegeroland
+/.github/workflows/prd-traceability.yml @czinegeroland
+/.github/CODEOWNERS @czinegeroland
