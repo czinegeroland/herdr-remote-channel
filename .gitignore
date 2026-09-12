@@ -1,0 +1,47 @@
+# Rust build output
+/target/
+**/*.rs.bk
+*.pdb
+
+# cargo-dist output
+/dist/
+
+# Coverage and profiling
+*.profraw
+*.profdata
+/coverage/
+
+# Local HRC state. Never commit keys, databases, or decrypted content.
+/.hrc/
+*.hrc-state
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
+
+# Secrets and credentials. See PRD sections 14.1, 20.2, and 29.
+*.age
+*.key
+*.pem
+*.p12
+*.pfx
+.env
+.env.*
+!.env.example
+secrets/
+
+# Editor and OS noise
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local scratch
+/tmp/
+/scratch/
+*.log

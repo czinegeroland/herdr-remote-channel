@@ -1,0 +1,38 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/hrc-protocol",
+    "crates/hrc-crypto",
+    "crates/hrc-storage",
+    "crates/hrc-transport",
+    "crates/hrc-transport-git",
+    "crates/hrc-core",
+    "crates/hrc-herdr",
+    "crates/hrc-tui",
+    "crates/hrc-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/czinegeroland/herdr-remote-channel"
+
+[workspace.dependencies]
+hrc-protocol = { path = "crates/hrc-protocol" }
+hrc-crypto = { path = "crates/hrc-crypto" }
+hrc-storage = { path = "crates/hrc-storage" }
+hrc-transport = { path = "crates/hrc-transport" }
+hrc-transport-git = { path = "crates/hrc-transport-git" }
+hrc-core = { path = "crates/hrc-core" }
+hrc-herdr = { path = "crates/hrc-herdr" }
+hrc-tui = { path = "crates/hrc-tui" }
+
+clap = { version = "4", features = ["derive"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
