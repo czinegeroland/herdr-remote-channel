@@ -11,6 +11,10 @@
 //!   returns, prints, serializes, or logs secret material; [`SigningKey`]
 //!   has no accessor for its bytes and its `Debug` output is a placeholder.
 
+pub mod encryption;
+
+pub use encryption::{DeviceIdentity, DeviceRecipient, encrypt_to};
+
 use ed25519_dalek::{Signer as _, Verifier as _};
 use hrc_protocol::canonical;
 use hrc_protocol::signed::{SignedObject, Signer};
@@ -46,6 +50,45 @@ pub enum CryptoError {
     SignatureInvalid {
         /// Domain the verification was attempted under.
         domain: &'static str,
+    },
+
+    /// A recipient string was not a valid age X25519 recipient.
+    #[error("value is not a valid age X25519 recipient")]
+    Recipient,
+
+    /// An identity string was not a valid age X25519 identity.
+    #[error("value is not a valid age X25519 identity")]
+    Identity,
+
+    /// A message was addressed to no recipients at all.
+    #[error("refusing to encrypt to an empty recipient set")]
+    NoRecipients,
+
+    /// The ciphertext was malformed, truncated, or altered.
+    #[error("ciphertext is malformed or has been altered")]
+    Ciphertext,
+
+    /// No local identity could open the ciphertext.
+    ///
+    /// This is the expected outcome for a device outside the recipient set,
+    /// including one revoked before the message was written.
+    #[error("no local device identity can decrypt this ciphertext")]
+    NotARecipient,
+
+    /// The ciphertext exceeded the size limit before decryption.
+    #[error("ciphertext of {size} bytes exceeds the {limit} byte limit")]
+    CiphertextTooLarge {
+        /// Size of the rejected ciphertext.
+        size: usize,
+        /// The configured limit.
+        limit: usize,
+    },
+
+    /// The plaintext exceeded the size limit during decryption.
+    #[error("decrypted content exceeds the {limit} byte limit")]
+    PlaintextTooLarge {
+        /// The configured limit.
+        limit: usize,
     },
 
     /// The payload could not be canonicalized.

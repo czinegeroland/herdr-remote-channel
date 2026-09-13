@@ -50,6 +50,13 @@ pub enum ProtocolError {
         expected: u32,
     },
 
+    /// A message addressed nobody.
+    ///
+    /// An empty recipient set would produce ciphertext no one can read while
+    /// still looking like a valid message, so it is rejected at construction.
+    #[error("a message must have at least one intended recipient device")]
+    EmptyRecipientSet,
+
     /// A derived identifier did not match the one carried by the object.
     ///
     /// A device ID is a hash of its own descriptor, so a mismatch means the

@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-13T02:41:00+02:00 |
+| Last updated | 2026-09-13T02:58:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -611,7 +611,7 @@ The Herdr plugin must expose:
 | HRC-TECH-003 | Use Tokio for asynchronous scheduling, process management, polling, and cancellation. | Must | Approved | Decision DEC-015 |
 | HRC-TECH-004 | Use Clap for the public CLI and stable machine-readable command contracts. | Must | In progress | `crates/hrc-cli/src/cli.rs`, `crates/hrc-cli/src/exit.rs`, `crates/hrc-cli/tests/command_contract.rs` |
 | HRC-TECH-005 | Use Serde/serde_json and a pinned RFC 8785 implementation with protocol test vectors. | Must | In progress | `crates/hrc-protocol/src/canonical.rs`, `crates/hrc-protocol/tests/rfc8785_vectors.rs` |
-| HRC-TECH-006 | Use maintained Rust cryptography crates, including `age` and `ed25519-dalek`, without custom cryptographic primitives. | Must | In progress | `crates/hrc-crypto/src/lib.rs` (Ed25519); `age` encryption pending |
+| HRC-TECH-006 | Use maintained Rust cryptography crates, including `age` and `ed25519-dalek`, without custom cryptographic primitives. | Must | Implemented | `crates/hrc-crypto/src/lib.rs` (Ed25519), `crates/hrc-crypto/src/encryption.rs` (age X25519) |
 | HRC-TECH-007 | Store durable local state in SQLite using `rusqlite` with WAL mode and transactional allocation. | Must | Approved | Decision DEC-015 |
 | HRC-TECH-008 | Use `ratatui` and `crossterm` for the trusted inbox and approval TUI. | Must | Approved | Decision DEC-015 |
 | HRC-TECH-009 | Use a cross-platform local IPC abstraction supporting Unix-domain sockets and Windows named pipes. | Must | Approved | Pending compatibility spike |
@@ -1500,6 +1500,9 @@ boundary.
 
 ### 20.3 Limits
 
+The ciphertext and plaintext hard maxima are enforced in
+`crates/hrc-crypto/src/encryption.rs`, before decryption rather than after.
+
 | Object | Default | Hard maximum |
 |---|---:|---:|
 | Message plaintext | 256 KiB | 1 MiB |
@@ -1892,7 +1895,7 @@ npx skills add <owner>/herdr-remote-channel `
 | ID | Requirement | Status | Evidence |
 |---|---|---|---|
 | HRC-SEC-001 | Private keys never leave their device. | Approved | Pending |
-| HRC-SEC-002 | Messages are encrypted to explicit active recipient devices. | Approved | Pending |
+| HRC-SEC-002 | Messages are encrypted to explicit active recipient devices. | In progress | `crates/hrc-crypto/src/encryption.rs`; roster-derived recipient selection pending |
 | HRC-SEC-003 | Every message is authenticated by a valid sender-device signature. | Approved | Pending |
 | HRC-SEC-004 | Roster changes are signed and hash chained. | Approved | Pending |
 | HRC-SEC-005 | Removed devices cannot receive future-epoch messages. | Approved | Pending |
@@ -1906,7 +1909,7 @@ npx skills add <owner>/herdr-remote-channel `
 | HRC-SEC-013 | Messages from stale epochs or devices revoked before object introduction are rejected. | Approved | Pending |
 | HRC-SEC-014 | Pending bodies and approval capabilities are unavailable through agent-safe CLI and JSON surfaces. | Approved | Pending |
 | HRC-SEC-015 | Control entries use control-only publications, and merge or mixed control/data publications are rejected. | Approved | Pending |
-| HRC-SEC-016 | Every signed message commits to the canonical intended recipient-device list used by the sender's encryption builder. | Approved | Pending |
+| HRC-SEC-016 | Every signed message commits to the canonical intended recipient-device list used by the sender's encryption builder. | In progress | `crates/hrc-protocol/src/recipients.rs`; binding into the message envelope pending |
 
 ### 25.1 Threats
 
@@ -2232,7 +2235,7 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 | HRC-GOV-001 through HRC-GOV-003, HRC-GOV-005 | M0 | `AC-PRD-CI`: representative pull-request fixtures fail when the PRD, ledger, update timestamp, exact requirement-row changes, or a valid no-progress rationale are missing; validation executes base-branch code. | `.github/scripts/check-prd-traceability.ps1`, `.github/workflows/prd-traceability.yml` |
 | HRC-GOV-004 | All | `AC-EVIDENCE`: every status transition to `Verified` includes a stable evidence reference in this registry or the primary requirement table. | Pending |
 | HRC-TECH-001, HRC-TECH-004 | M1 | `AC-RUST-FOUNDATION`: the Rust 2024 Cargo workspace builds and its Clap CLI passes command-contract tests on Windows, macOS, and Linux CI. | Partial: `.github/workflows/build-and-test.yml` builds, lints, and tests the workspace on all three platforms; `crates/hrc-cli/tests/command_contract.rs` covers the command surface and the section 22.7 boundary. Remaining: command behavior beyond the contract. |
-| HRC-TECH-005, HRC-TECH-006 | M1 | `AC-RUST-PROTOCOL`: RFC 8785 vectors, signatures, age encryption, malformed-input cases, and cross-platform deterministic fixtures pass. | Partial: `crates/hrc-protocol/tests/rfc8785_vectors.rs` covers canonicalization, and `crates/hrc-crypto/src/lib.rs` pins an OpenSSL-derived Ed25519 vector plus malformed-key, malformed-signature, wrong-domain, and tampered-payload cases. Remaining: age encryption. |
+| HRC-TECH-005, HRC-TECH-006 | M1 | `AC-RUST-PROTOCOL`: RFC 8785 vectors, signatures, age encryption, malformed-input cases, and cross-platform deterministic fixtures pass. | `crates/hrc-protocol/tests/rfc8785_vectors.rs` (canonicalization), `crates/hrc-crypto/src/lib.rs` (OpenSSL-derived Ed25519 vector, malformed-key, malformed-signature, wrong-domain, tampered-payload), `crates/hrc-crypto/src/encryption.rs` (age round trip, non-recipient, tampered, truncated, oversized). Verified on Linux, macOS, and Windows CI. |
 | HRC-TECH-009 | M1 | `AC-RUST-IPC`: the selected IPC implementation exchanges framed requests over Unix-domain sockets and Windows named pipes with reconnect and permission tests. | Pending |
 | HRC-TECH-003, HRC-TECH-007, HRC-TECH-010 | M2 | `AC-RUST-DAEMON`: Tokio daemon, WAL-backed SQLite state, transactional allocation, and system-Git synchronization pass crash/retry integration tests. | Pending |
 | HRC-TECH-008 | M3 | `AC-RUST-TUI`: ratatui/crossterm inbox and approval flows pass terminal interaction tests on supported platforms. | Pending |
@@ -2252,7 +2255,7 @@ Every implementation PR must update this table.
 | Milestone | Completion | Current state | Last PR | Evidence / next step |
 |---|---:|---|---|---|
 | M0 Product and protocol | 40% | Detailed PRD, Rust stack, and traceability enforcement validated | Initial branch | Obtain product-owner approval and complete dependency spikes |
-| M1 Secure foundation | 20% | Adds canonical JSON, the signed-object envelope, device-ID derivation, and Ed25519 signing to the workspace and CLI contract | Protocol canonicalization and signing primitives | Add age encryption, then principal/device key storage and the signed genesis and roster |
+| M1 Secure foundation | 30% | Complete cryptographic layer: canonical JSON, signed envelopes, device-ID derivation, Ed25519 signing, age encryption, and the signed recipient-device commitment | age encryption and recipient commitment | Persist principal and device keys through the OS keychain, then build the signed genesis and roster |
 | M2 Git messaging | 0% | Not started | N/A | Define adapter fixtures and concurrent-push tests |
 | M3 Herdr integration | 0% | Not started | N/A | Verify Herdr long-lived plugin process capabilities |
 | M4 Context/delegation | 0% | Not started | N/A | Finalize context package schema |
