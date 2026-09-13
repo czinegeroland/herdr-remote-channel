@@ -435,6 +435,9 @@ struct DaemonBroker {
     device_id: String,
     checks: Vec<(String, bool)>,
     audit: Vec<String>,
+    /// Where the database lives, so a decision can be appended durably
+    /// rather than held in memory until the daemon exits.
+    database_path: std::path::PathBuf,
 }
 
 impl DaemonBroker {
@@ -489,6 +492,7 @@ impl DaemonBroker {
             device_id,
             checks,
             audit,
+            database_path: context.paths.database(),
         })
     }
 }
@@ -548,11 +552,31 @@ impl Broker for DaemonBroker {
             .unwrap_or_else(|_| "local human".into())
     }
 
-    fn record_decision(
+    fn record_decision_record(
         &mut self,
-        _message_id: &str,
-        _decision: &hrc_core::gate::Decision,
+        record: &hrc_core::DecisionRecord,
     ) -> hrc_core::Result<()> {
+        // Written through to the append-only audit log rather than kept in
+        // memory: a decision that a restart erased would not be evidence of
+        // anything (PRD requirement HRC-GATE-004).
+        let database = Database::open(&self.database_path)
+            .map_err(|error| hrc_core::CoreError::Transport(error.to_string()))?;
+
+        database
+            .append_decision(&hrc_storage::DecisionRecord {
+                channel_id: record.channel_id.clone(),
+                message_id: record.message_id.clone(),
+                action: record.action.to_owned(),
+                original_content: record.original_content.clone(),
+                edited_content: record.edited_content.clone(),
+                content_hash: record.content_hash.clone(),
+                edited_hash: record.edited_hash.clone(),
+                agent: record.agent.clone(),
+                decided_by: record.decided_by.clone(),
+                occurred_at: record.occurred_at.clone(),
+            })
+            .map_err(|error| hrc_core::CoreError::Transport(error.to_string()))?;
+
         Ok(())
     }
 

@@ -323,20 +323,116 @@ pub fn provenance_banner(
     )
 }
 
+/// What a decision produced: the content, and the record of having made it.
+///
+/// Returned together so that recording is not a separate step a caller can
+/// skip. An approval that reached an agent without leaving a trace is the
+/// one an audit exists to catch (PRD requirement HRC-GATE-004).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Delivery {
+    /// The framed content handed to the agent.
+    pub framed: String,
+    /// The record to append to the local audit log.
+    pub record: DecisionRecord,
+}
+
+/// One decision, in the form the audit log preserves.
+///
+/// Carries content rather than only digests, because the question asked
+/// afterwards is what the human changed, and a digest cannot answer that.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionRecord {
+    /// The channel the message belongs to.
+    pub channel_id: String,
+    /// The message decided on.
+    pub message_id: String,
+    /// What was decided.
+    pub action: &'static str,
+    /// The content as it arrived.
+    pub original_content: String,
+    /// What was delivered instead, when the human edited it.
+    pub edited_content: Option<String>,
+    /// Digest of the original.
+    pub content_hash: String,
+    /// Digest of the edit.
+    pub edited_hash: Option<String>,
+    /// The local agent the human chose.
+    pub agent: Option<String>,
+    /// The local human who decided.
+    pub decided_by: String,
+    /// When.
+    pub occurred_at: String,
+}
+
+/// Records a decision that delivers nothing.
+///
+/// Keeping something in the inbox, declining it, or letting it expire are
+/// decisions too. An audit that only recorded approvals would show a channel
+/// in which nothing was ever refused.
+pub fn record_decision(
+    message: &QuarantinedMessage,
+    decision: &Decision,
+    original: &str,
+    decided_by: &str,
+    now: &str,
+) -> DecisionRecord {
+    DecisionRecord {
+        channel_id: message.envelope.channel_id.clone(),
+        message_id: message.envelope.message_id.clone(),
+        action: decision.as_str(),
+        original_content: original.to_owned(),
+        edited_content: None,
+        content_hash: canonical::sha256_hex(original.as_bytes()),
+        edited_hash: None,
+        agent: None,
+        decided_by: decided_by.to_owned(),
+        occurred_at: now.to_owned(),
+    }
+}
+
+/// Everything a human's decision supplies at delivery time.
+///
+/// Grouped rather than passed loose because `body` and `original` are both
+/// strings and mixing them up would deliver the unedited content while the
+/// audit recorded the edit — a mistake a positional argument list invites
+/// and a named field does not.
+#[derive(Debug, Clone, Copy)]
+pub struct Approval<'a> {
+    /// What to deliver: the original, or the human's edit of it.
+    pub body: &'a str,
+    /// The content as it arrived, for the audit record.
+    pub original: &'a str,
+    /// Locally chosen channel name, for the provenance banner.
+    pub channel_local_name: &'a str,
+    /// The local human who approved.
+    pub approved_by: &'a str,
+    /// Now, by the local clock.
+    pub now: &'a str,
+}
+
 /// Frames approved content for delivery to an agent.
 ///
 /// Takes the authorization by value: delivering twice from one approval
 /// would defeat single use, and the type system says so rather than a
 /// comment.
+///
+/// `original` is the content as it arrived, which is not always what is
+/// delivered: an edited approval delivers `body` while the audit preserves
+/// both, so a reviewer can see what the human removed.
 pub fn deliver(
     authorization: Authorization,
     ledger: &mut AuthorizationLedger,
     message: &QuarantinedMessage,
-    body: &str,
-    channel_local_name: &str,
-    approved_by: &str,
-    now: &str,
-) -> Result<String> {
+    approval: Approval<'_>,
+) -> Result<Delivery> {
+    let Approval {
+        body,
+        original,
+        channel_local_name,
+        approved_by,
+        now,
+    } = approval;
+
     ledger.consume(&authorization, message, now)?;
 
     if !authorization.decision.reaches_an_agent() {
@@ -360,7 +456,28 @@ pub fn deliver(
         approved_by,
     );
 
-    Ok(format!("{banner}{body}"))
+    let edited = matches!(authorization.decision, Decision::DeliverEdited { .. });
+
+    Ok(Delivery {
+        framed: format!("{banner}{body}"),
+        record: DecisionRecord {
+            channel_id: message.envelope.channel_id.clone(),
+            message_id: message.envelope.message_id.clone(),
+            action: authorization.decision.as_str(),
+            original_content: original.to_owned(),
+            edited_content: edited.then(|| body.to_owned()),
+            content_hash: canonical::sha256_hex(original.as_bytes()),
+            edited_hash: edited.then(|| canonical::sha256_hex(body.as_bytes())),
+            agent: match &authorization.decision {
+                Decision::DeliverToAgent { agent } | Decision::DeliverEdited { agent, .. } => {
+                    Some(agent.clone())
+                }
+                _ => None,
+            },
+            decided_by: approved_by.to_owned(),
+            occurred_at: now.to_owned(),
+        },
+    })
 }
 
 #[cfg(test)]

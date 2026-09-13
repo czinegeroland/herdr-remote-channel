@@ -23,7 +23,9 @@ pub use context::{ContextItem, ContextPackage, ContextPreview};
 pub use delegation::{Delegation, Party};
 pub use enrollment::{PendingJoin, admit, request_join, review_join};
 pub use error::{CoreError, Result};
-pub use gate::{AgentView, Authorization, AuthorizationLedger, Decision};
+pub use gate::{
+    AgentView, Approval, Authorization, AuthorizationLedger, Decision, DecisionRecord, Delivery,
+};
 pub use message::{QuarantinedMessage, open, seal};
 pub use receipt::{SentMessage, VerifiedReceipt, accept_receipt, correlate_answer};
 pub use roster::{DeviceStatus, InviteState, Roster, RosterDevice, RosterMember};
