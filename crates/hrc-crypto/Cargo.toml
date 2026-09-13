@@ -12,6 +12,8 @@ age = { workspace = true }
 ed25519-dalek = { workspace = true }
 hrc-protocol = { workspace = true }
 getrandom = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

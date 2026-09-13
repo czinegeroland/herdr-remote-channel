@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-13T08:41:00+02:00 |
+| Last updated | 2026-09-13T09:20:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -504,7 +504,7 @@ The Herdr plugin must expose:
 | HRC-CH-002 | Use a signed genesis object as the channel identity authority. | Must | In progress | `crates/hrc-protocol/src/control.rs`; publication pending |
 | HRC-CH-003 | Support private repositories by default. | Must | Approved | Pending |
 | HRC-CH-004 | Support public repositories after explicit risk confirmation. | Should | Approved | Pending |
-| HRC-CH-005 | Create expiring, single-use invites. | Must | Approved | Pending |
+| HRC-CH-005 | Create expiring, single-use invites. | Must | In progress | `crates/hrc-crypto/src/enrollment.rs` generates, encodes, and validates expiring invites; single-use enforcement needs the control log |
 | HRC-CH-006 | Generate separate principal and device identities. | Must | In progress | `crates/hrc-cli/src/commands.rs` `hrc init` generates and persists device keys; principal key handling and the enrollment flow are pending |
 | HRC-CH-007 | Require explicit administrator approval for joins. | Must | Approved | Pending |
 | HRC-CH-008 | Support member and device revocation. | Should | In progress | `crates/hrc-core/src/roster.rs`; publication and CLI surface pending |
@@ -1337,6 +1337,17 @@ SHA-256(
 
 The first 77 bits index six words from the version-pinned EFF long wordlist.
 Both clients must display the wordlist/version identifier with the phrase.
+
+The pinned list is the EFF Long Wordlist of 2016, 7776 entries, identified as
+`eff-large-2016`. It is vendored at
+`crates/hrc-crypto/wordlists/eff_large_2016.txt` so the derivation is
+reproducible without a network fetch, and it is redistributed under CC BY 3.0
+US with attribution in the file header. See decision DEC-035.
+
+The 77 bits are read as the first ten bytes of the digest with the low three
+bits discarded, then converted to six base-7776 digits, most significant
+first. 7776^6 slightly exceeds 2^77, so the mapping consumes every bit
+without discarding any.
 
 ### 18.1 Common envelope
 
@@ -2292,7 +2303,7 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 
 | Requirements | Milestone | Acceptance criteria | Evidence |
 |---|---|---|---|
-| HRC-CH-001 through HRC-CH-007, HRC-CH-009 | M1 | `AC-ENROLL`: two clean devices create, invite, join, verify, and approve a channel using no shared private material. Invalid genesis, invite, proof, or signature is rejected. | Partial: `crates/hrc-protocol/src/control.rs` covers genesis identity derivation, control-entry shapes, operation round trips, and hash chaining. Remaining: enrollment flow, invite proof, safety phrase, and approval. |
+| HRC-CH-001 through HRC-CH-007, HRC-CH-009 | M1 | `AC-ENROLL`: two clean devices create, invite, join, verify, and approve a channel using no shared private material. Invalid genesis, invite, proof, or signature is rejected. | Partial: `crates/hrc-protocol/src/control.rs` covers genesis identity and chaining; `crates/hrc-crypto/src/enrollment.rs` covers invite generation and validation, invite proofs that do not transfer between joiners or invites, and safety-phrase derivation pinned against an independent implementation. Remaining: the join request flow and administrator approval. |
 | HRC-CH-008 | M1 | `AC-REVOCATION`: a device is revoked, the epoch advances, and messages introduced afterward cannot be accepted from or decrypted by the revoked device. | Partial: `crates/hrc-core/src/roster/tests.rs` proves the epoch advances, the revoked device loses authority from that epoch, and it cannot sign later entries; `crates/hrc-crypto/src/encryption.rs` proves it cannot decrypt later ciphertext. Remaining: end-to-end over a published channel. |
 | HRC-CH-010 | M1 | `AC-CONTROL-INTEGRITY`: observed same-parent successors, broken previous hashes, rewrites, deletions, and substitutions stop synchronization with a sticky alert. | Partial: `crates/hrc-core/src/roster/tests.rs` rejects same-sequence successors, broken predecessor hashes, skipped sequences, wrong epochs, and foreign-channel entries, and proves a rejected entry leaves state unchanged. Remaining: synchronization halt and the sticky alert. |
 | HRC-MSG-001 through HRC-MSG-007, HRC-MSG-010 | M2 | `AC-MESSAGING`: two devices exchange offline notes and threaded questions/answers with receipts, expiry, deduplication, ordering, and local audit evidence. | Partial: `crates/hrc-core/src/message/tests.rs` covers seal and open between two devices, broadcast addressing, and expiry. Remaining: receipts, threading over a published channel, deduplication, and ordering. |
@@ -2334,7 +2345,7 @@ Every implementation PR must update this table.
 | Milestone | Completion | Current state | Last PR | Evidence / next step |
 |---|---:|---|---|---|
 | M0 Product and protocol | 55% | Adds an executable adapter contract, capability declaration, and error model to the written specification | Transport contract and reference adapter | Obtain product-owner approval and complete the JSON-RPC adapter binding |
-| M1 Secure foundation | 90% | `hrc init`, `whoami`, `status`, `channels`, and `doctor` run against real local state and protected keys | CLI wiring for local commands | Integrate an OS keychain backend behind the same trait, then wire channel creation and enrollment |
+| M1 Secure foundation | 95% | Adds enrollment cryptography: invites, non-transferable invite proofs, and safety-phrase derivation against the pinned EFF wordlist | Enrollment cryptography | Wire the join request and approval flow, then integrate an OS keychain backend |
 | M2 Git messaging | 70% | Adds the synchronization engine: cursor-resuming fetch, conflict-retrying publish, backoff policy, and fail-closed halting on observed tampering | Synchronization engine | Wire the resident daemon and the CLI, then receipts, threading, and deduplication |
 | M3 Herdr integration | 0% | Not started | N/A | Verify Herdr long-lived plugin process capabilities |
 | M4 Context/delegation | 0% | Not started | N/A | Finalize context package schema |
@@ -2423,6 +2434,7 @@ recorded either directly in this PRD or in a stable linked artifact.
 | DEC-016 | RFC 8785 canonical JSON uses a pinned Rust implementation, initially `serde_jcs`, guarded by protocol vectors. | Accepted | Avoids custom canonicalization while making signed bytes interoperable. |
 | DEC-017 | Build and test run in a separate `pull_request` workflow rather than being added to the `pull_request_target` traceability workflow. | Accepted | Compiling and running pull-request code under `pull_request_target` would hand a write-capable, secret-bearing context to untrusted code; the two triggers stay separated. |
 | DEC-018 | The CLI publishes a fixed numeric exit-code contract: 0 success, 1 runtime failure, 2 usage, 3 unimplemented, 4 authorization required. | Accepted | PRD section 11.1 requires documented exit codes, and the Herdr plugin and skill must branch on stable numbers rather than parsing prose. |
+| DEC-035 | The safety-phrase wordlist is the EFF Long Wordlist of 2016, vendored in-tree under CC BY 3.0 US with attribution, and identified as `eff-large-2016`. | Accepted | Deriving the phrase must not require a network fetch, and two peers must be able to prove they used the same vocabulary. Redistribution carries an attribution obligation, which the vendored file header satisfies. |
 | DEC-033 | `hrc doctor` reports every check rather than stopping at the first failure. | Accepted | Someone diagnosing a broken installation needs the whole picture. Stopping at the first symptom turns one diagnosis into several runs. |
 | DEC-034 | Human and machine output are rendered from the same value. | Accepted | A separate human code path can report something different from `--json`, and the difference is invisible until someone is debugging from the wrong one. |
 | DEC-031 | When no OS keychain is available, HRC stores keys in a passphrase-encrypted file using age's scrypt recipient, and never falls back to unprotected storage. | Accepted | Closes OQ-001. A silent downgrade would leave the documented security property believed but absent. The passphrase store works on headless hosts and in CI, and introduces no new cryptographic primitive. |
