@@ -1,0 +1,149 @@
+name: Release
+
+# Builds the prebuilt binaries of PRD section 13.2 and requirement
+# HRC-TECH-011, with a checksum for each, and attaches them to a release.
+#
+# This is the one workflow that deliberately pays for the full platform
+# matrix: a release must carry a Windows, a Linux, and both macOS artifacts,
+# and no amount of cost pressure makes a missing artifact acceptable. It runs
+# per tag rather than per change, so it is rare.
+#
+# The toolchain is pinned rather than tracked (open question OQ-012, answered
+# in PRD decision DEC-050). `RUSTUP_TOOLCHAIN` is used rather than editing
+# `rust-toolchain.toml`, because it takes precedence over that file and so
+# leaves everyday development on `stable` while making a release rebuildable
+# from its tag.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build artifacts for
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # The exact compiler a release is built with. Bumping this is a deliberate,
+  # reviewable change, and the version a released binary was built with is
+  # therefore recoverable from the tag.
+  RUSTUP_TOOLCHAIN: 1.90.0
+
+jobs:
+  artifacts:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install the pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup target add "${{ matrix.target }}" --toolchain "$RUSTUP_TOOLCHAIN"
+          rustc --version
+          cargo --version
+
+      - name: Build the executable
+        run: cargo build --locked --profile dist --target ${{ matrix.target }} --bin hrc
+
+      # Packaged and checksummed here rather than by a release action, so the
+      # digest is produced from the same bytes that were just built and the
+      # archive layout is the one `scripts/install.sh` expects.
+      - name: Package and checksum
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          version="${{ inputs.tag || github.ref_name }}"
+          staging="hrc-${version}-${TARGET}"
+          mkdir -p "dist/${staging}"
+
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/${TARGET}/dist/hrc.exe" "dist/${staging}/"
+          else
+            cp "target/${TARGET}/dist/hrc" "dist/${staging}/"
+          fi
+          cp LICENSE README.md "dist/${staging}/" 2>/dev/null || true
+
+          cd dist
+          tar -czf "${staging}.tar.gz" "${staging}"
+          # A checksum file per artifact, so verifying one does not mean
+          # fetching a manifest covering every platform.
+          if command -v sha256sum > /dev/null; then
+            sha256sum "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
+          else
+            shasum -a 256 "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
+          fi
+          cat "${staging}.tar.gz.sha256"
+
+      - name: Upload the artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hrc-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    needs: artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect every artifact
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Check that every required target is present
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for target in x86_64-pc-windows-msvc x86_64-unknown-linux-gnu \
+                        x86_64-apple-darwin aarch64-apple-darwin; do
+            if ! ls dist/*"${target}".tar.gz > /dev/null 2>&1; then
+              echo "missing artifact for ${target}"
+              missing=1
+            fi
+          done
+          # PRD section 13.2 lists four required targets. Publishing a release
+          # that silently omits one leaves those users with no way to install.
+          [ "$missing" -eq 0 ] || exit 1
+          ls -la dist
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          fail_on_unmatched_files: true
