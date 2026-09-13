@@ -134,6 +134,7 @@ pub enum InviteAction {
     /// Revoke an outstanding invite.
     Revoke {
         /// Invite ID to revoke.
+        #[arg(allow_hyphen_values = true)]
         id: String,
     },
 }
@@ -157,11 +158,13 @@ pub enum JoinAction {
     /// Approve a join request after comparing the safety phrase.
     Approve {
         /// Join request ID.
+        #[arg(allow_hyphen_values = true)]
         id: String,
     },
     /// Reject a join request.
     Reject {
         /// Join request ID.
+        #[arg(allow_hyphen_values = true)]
         id: String,
     },
 }

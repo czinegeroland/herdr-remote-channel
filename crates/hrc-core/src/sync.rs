@@ -251,7 +251,7 @@ pub fn fetch_once<T: Transport>(
     }
 
     verify_chain(&page.publications, channel.sync_cursor.as_deref())
-        .map_err(|error| halt_with(database, channel_id, error, now))?;
+        .map_err(|error| halt_synchronization(database, channel_id, error, now))?;
 
     let mut outcome = FetchOutcome {
         publications: page.publications.len(),
@@ -314,7 +314,7 @@ fn verify_chain(publications: &[Publication], after: Option<&str>) -> Result<()>
 
 /// Halts a channel and returns the error that caused it.
 fn halt(database: &Database, channel_id: &str, error: TransportError, now: &str) -> CoreError {
-    halt_with(
+    halt_synchronization(
         database,
         channel_id,
         CoreError::Transport(error.to_string()),
@@ -323,7 +323,16 @@ fn halt(database: &Database, channel_id: &str, error: TransportError, now: &str)
 }
 
 /// Halts a channel for an already-built core error.
-fn halt_with(database: &Database, channel_id: &str, error: CoreError, now: &str) -> CoreError {
+///
+/// Transport integrations call this when validation outside the generic
+/// fetch loop finds an integrity failure. Keeping the state transition here
+/// ensures every halt is sticky and audited in the same way.
+pub fn halt_synchronization(
+    database: &Database,
+    channel_id: &str,
+    error: CoreError,
+    now: &str,
+) -> CoreError {
     let reason = error.to_string();
 
     // The halt itself must be recorded even if the audit write fails, so

@@ -41,14 +41,6 @@ fn peer(root: &Path, name: &str, remote: &Path) -> GitTransport {
     GitTransport::open(root.join(name), remote.to_str().unwrap()).unwrap()
 }
 
-fn control(sequence: u32) -> PublishObject {
-    PublishObject {
-        name: format!("control/log/{sequence:08}.json"),
-        class: ObjectClass::Control,
-        bytes: format!("control-entry-{sequence}").into_bytes(),
-    }
-}
-
 fn message(name: &str) -> PublishObject {
     PublishObject {
         name: format!("messages/2026/09/{name}.age"),
@@ -360,25 +352,17 @@ fn sync_once_fetches_only_when_the_remote_head_changed() {
     let remote = directory.path().join("remote.git");
     bare_remote(&remote);
 
+    let created = create(&context, remote.to_str().unwrap(), Some("Test channel")).unwrap();
+    let channel_id = created["channelId"].as_str().unwrap();
     let mut publisher = peer(directory.path(), "publisher", &remote);
-    let genesis = publisher.create_group(vec![control(0)]).unwrap();
+    publisher.sync_from_remote().unwrap();
+    let genesis = publisher.open_group().unwrap();
     let message = publisher
         .publish(PublishRequest {
-            expected_revision: Some(genesis.revision.clone()),
+            expected_revision: genesis.revision.clone(),
             class: PublicationClass::Data,
             objects: vec![message("msg-1")],
         })
-        .unwrap();
-
-    let database = Database::open(context.paths.database()).unwrap();
-    database
-        .insert_channel(
-            "channel-1",
-            "git",
-            remote.to_str().unwrap(),
-            "Test channel",
-            "2026-09-13T00:00:00Z",
-        )
         .unwrap();
 
     let first = sync_once(&context).unwrap();
@@ -388,7 +372,7 @@ fn sync_once_fetches_only_when_the_remote_head_changed() {
     assert_eq!(
         Database::open(context.paths.database())
             .unwrap()
-            .channel("channel-1")
+            .channel(channel_id)
             .unwrap()
             .unwrap()
             .sync_cursor
@@ -409,25 +393,19 @@ fn sync_once_publishes_queued_messages() {
     let remote = directory.path().join("remote.git");
     bare_remote(&remote);
 
-    let mut publisher = peer(directory.path(), "publisher", &remote);
-    let genesis = publisher.create_group(vec![control(0)]).unwrap();
+    let created = create(&context, remote.to_str().unwrap(), Some("Test channel")).unwrap();
+    let channel_id = created["channelId"].as_str().unwrap();
+    let publisher = peer(directory.path(), "publisher", &remote);
+    publisher.sync_from_remote().unwrap();
+    let genesis = publisher.open_group().unwrap();
 
     let mut database = Database::open(context.paths.database()).unwrap();
     database
-        .insert_channel(
-            "channel-1",
-            "git",
-            remote.to_str().unwrap(),
-            "Test channel",
-            "2026-09-13T00:00:00Z",
-        )
-        .unwrap();
-    database
-        .set_sync_cursor("channel-1", &genesis.revision)
+        .set_sync_cursor(channel_id, genesis.revision.as_deref().unwrap())
         .unwrap();
     database
         .allocate_outgoing(
-            "channel-1",
+            channel_id,
             "device-1",
             "01ARZ3NDEKTSV4RRFFQ69G5FAV",
             1,
@@ -459,7 +437,7 @@ fn sync_once_publishes_queued_messages() {
 
     let reader = peer(directory.path(), "reader", &remote);
     reader.sync_from_remote().unwrap();
-    let page = reader.fetch(Some(&genesis.revision), 100).unwrap();
+    let page = reader.fetch(genesis.revision.as_deref(), 100).unwrap();
     assert_eq!(page.publications.len(), 1);
     let object = &page.publications[0].objects[0];
     assert_eq!(
@@ -491,19 +469,10 @@ fn daemon_tick_degrades_one_channel_without_skipping_the_rest() {
     let remote = directory.path().join("remote.git");
     bare_remote(&remote);
 
-    let mut publisher = peer(directory.path(), "publisher", &remote);
-    publisher.create_group(vec![control(0)]).unwrap();
+    let created = create(&context, remote.to_str().unwrap(), Some("OK")).unwrap();
+    let channel_id = created["channelId"].as_str().unwrap().to_owned();
 
     let database = Database::open(context.paths.database()).unwrap();
-    database
-        .insert_channel(
-            "ok-channel",
-            "git",
-            remote.to_str().unwrap(),
-            "OK",
-            "2026-09-13T00:00:00Z",
-        )
-        .unwrap();
     database
         .insert_channel(
             "bad-channel",
@@ -521,7 +490,7 @@ fn daemon_tick_degrades_one_channel_without_skipping_the_rest() {
     assert!(
         channels
             .iter()
-            .any(|channel| channel["channelId"] == "ok-channel" && channel["status"].is_null())
+            .any(|channel| channel["channelId"] == channel_id && channel["status"].is_null())
     );
     assert!(
         channels

@@ -12,7 +12,7 @@ use hrc_ipc::{
     endpoint::{Endpoint, Interface},
 };
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 
 /// Documented exit codes, mirrored from `crates/hrc-cli/src/exit.rs`. A test
 /// that reads the constant from the binary would not notice a value change,
@@ -473,6 +473,258 @@ fn channel_fixture() -> (tempfile::TempDir, tempfile::TempDir) {
         .success();
 
     (home, remote)
+}
+
+fn git_in_bare(remote: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(remote)
+        .env("GIT_AUTHOR_NAME", "test")
+        .env("GIT_AUTHOR_EMAIL", "test@localhost")
+        .env("GIT_COMMITTER_NAME", "test")
+        .env("GIT_COMMITTER_EMAIL", "test@localhost")
+        .args(args)
+        .output()
+        .expect("git should run");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn forge_remote_change(remote: &std::path::Path, path: &str, bytes: Option<&[u8]>) {
+    let index = remote.join("forge-index");
+    let head = git_in_bare(remote, &["rev-parse", "hrc"]);
+
+    git_in_bare_with_index(remote, &index, &["read-tree", &head], None);
+    match bytes {
+        Some(bytes) => {
+            let blob = git_in_bare_with_index(
+                remote,
+                &index,
+                &["hash-object", "-w", "--stdin"],
+                Some(bytes),
+            );
+            git_in_bare_with_index(
+                remote,
+                &index,
+                &[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    &format!("100644,{blob},{path}"),
+                ],
+                None,
+            );
+        }
+        None => {
+            let removal = format!("0 {}	{path}\n", "0".repeat(40));
+            git_in_bare_with_index(
+                remote,
+                &index,
+                &["update-index", "--index-info"],
+                Some(removal.as_bytes()),
+            );
+        }
+    }
+
+    let tree = git_in_bare_with_index(remote, &index, &["write-tree"], None);
+    let commit = git_in_bare(
+        remote,
+        &["commit-tree", &tree, "-p", &head, "-m", "forged history"],
+    );
+    git_in_bare(remote, &["update-ref", "refs/heads/hrc", &commit]);
+}
+
+fn git_in_bare_with_index(
+    remote: &std::path::Path,
+    index: &std::path::Path,
+    args: &[&str],
+    input: Option<&[u8]>,
+) -> String {
+    let mut command = std::process::Command::new("git");
+    command
+        .arg("--git-dir")
+        .arg(remote)
+        .env("GIT_INDEX_FILE", index)
+        .env("GIT_AUTHOR_NAME", "test")
+        .env("GIT_AUTHOR_EMAIL", "test@localhost")
+        .env("GIT_COMMITTER_NAME", "test")
+        .env("GIT_COMMITTER_EMAIL", "test@localhost")
+        .args(args)
+        .stdout(std::process::Stdio::piped());
+
+    if input.is_some() {
+        command.stdin(std::process::Stdio::piped());
+    }
+
+    let mut child = command.spawn().expect("git should run");
+    if let Some(input) = input {
+        child
+            .stdin
+            .take()
+            .expect("stdin should be piped")
+            .write_all(input)
+            .expect("git should read input");
+    }
+
+    let output = child.wait_with_output().expect("git should finish");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn assert_sync_halts(home: &std::path::Path) {
+    hrc_in(home)
+        .args(["sync", "--once", "--json"])
+        .assert()
+        .failure();
+
+    assert_channel_is_halted(home);
+}
+
+fn assert_channel_is_halted(home: &std::path::Path) {
+    let status = hrc_in(home)
+        .args(["status", "--json"])
+        .output()
+        .expect("status should run");
+    let status: Value = serde_json::from_slice(&status.stdout).expect("stdout should be JSON");
+    assert!(
+        status["channels"][0]["haltedReason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "the halt must retain its reason: {status}"
+    );
+
+    let repeated = hrc_in(home)
+        .args(["sync", "--once", "--json"])
+        .output()
+        .expect("sync should run");
+    assert!(!repeated.status.success());
+    let repeated: Value = serde_json::from_slice(&repeated.stdout).expect("stdout should be JSON");
+    assert!(
+        repeated["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("synchronization is halted"),
+        "a halt must be sticky: {repeated}"
+    );
+}
+
+#[test]
+fn a_remote_history_rewrite_halts_synchronization() {
+    let (home, remote) = channel_fixture();
+    let principal = principal_of(home.path(), remote.path());
+
+    hrc_in(home.path())
+        .args(["send", &principal, "establish a trusted cursor", "--json"])
+        .assert()
+        .success();
+    hrc_in(home.path())
+        .args(["sync", "--once", "--json"])
+        .assert()
+        .success();
+
+    let prior = git_in_bare(remote.path(), &["rev-parse", "hrc^"]);
+    git_in_bare(remote.path(), &["update-ref", "refs/heads/hrc", &prior]);
+
+    hrc()
+        .env("HRC_HOME", home.path())
+        .env_remove("HRC_PASSPHRASE")
+        .args(["sync", "--once", "--json"])
+        .assert()
+        .failure();
+    assert_channel_is_halted(home.path());
+}
+
+#[test]
+fn deleting_a_published_object_halts_synchronization() {
+    let (home, remote) = channel_fixture();
+    hrc_in(home.path())
+        .args(["sync", "--once", "--json"])
+        .assert()
+        .success();
+
+    let genesis_path = git_in_bare(remote.path(), &["ls-tree", "-r", "--name-only", "hrc"]);
+    forge_remote_change(remote.path(), genesis_path.lines().next().unwrap(), None);
+
+    assert_sync_halts(home.path());
+}
+
+#[test]
+fn substituting_a_published_object_halts_synchronization() {
+    let (home, remote) = channel_fixture();
+    hrc_in(home.path())
+        .args(["sync", "--once", "--json"])
+        .assert()
+        .success();
+
+    let genesis_path = git_in_bare(remote.path(), &["ls-tree", "-r", "--name-only", "hrc"]);
+    forge_remote_change(
+        remote.path(),
+        genesis_path.lines().next().unwrap(),
+        Some(b"substituted genesis"),
+    );
+
+    assert_sync_halts(home.path());
+}
+
+#[test]
+fn a_conflicting_control_successor_halts_synchronization() {
+    let (home, remote) = channel_fixture();
+    hrc_in(home.path())
+        .args(["invite", "create", "--github-user", "bob"])
+        .assert()
+        .success();
+    hrc_in(home.path())
+        .args(["sync", "--once", "--json"])
+        .assert()
+        .success();
+
+    let paths = git_in_bare(remote.path(), &["ls-tree", "-r", "--name-only", "hrc"]);
+    let control = paths
+        .lines()
+        .find(|path| path.starts_with("control/log/00000001-"))
+        .expect("the invite control entry");
+    let bytes = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(remote.path())
+        .args(["show", &format!("hrc:{control}")])
+        .output()
+        .expect("git should show the control entry");
+    assert!(bytes.status.success());
+
+    forge_remote_change(
+        remote.path(),
+        "control/log/00000002-conflict.json",
+        Some(&bytes.stdout),
+    );
+
+    hrc()
+        .env("HRC_HOME", home.path())
+        .env_remove("HRC_PASSPHRASE")
+        .args(["sync", "--once", "--json"])
+        .assert()
+        .failure();
+    assert_channel_is_halted(home.path());
+}
+
+#[test]
+fn deleting_the_remote_channel_branch_halts_synchronization() {
+    let (home, remote) = channel_fixture();
+    hrc_in(home.path())
+        .args(["sync", "--once", "--json"])
+        .assert()
+        .success();
+
+    git_in_bare(remote.path(), &["update-ref", "-d", "refs/heads/hrc"]);
+
+    assert_sync_halts(home.path());
 }
 
 #[test]
