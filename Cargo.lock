@@ -972,6 +972,10 @@ dependencies = [
 [[package]]
 name = "hrc-transport"
 version = "0.1.0"
+dependencies = [
+ "hrc-protocol",
+ "thiserror 2.0.20",
+]
 
 [[package]]
 name = "hrc-transport-git"
