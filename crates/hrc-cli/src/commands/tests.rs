@@ -408,7 +408,7 @@ fn sync_once_publishes_queued_messages() {
             channel_id,
             "device-1",
             "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            1,
+            0,
             "hash",
             "2026-09-13T00:00:00Z",
         )
