@@ -10,10 +10,13 @@ use rusqlite::Connection;
 use crate::error::{Result, StorageError};
 
 /// The schema version this build expects.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Migrations in order. Index zero moves version 0 to version 1.
-const MIGRATIONS: &[&str] = &[include_str!("migrations/001_initial.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("migrations/001_initial.sql"),
+    include_str!("migrations/002_inbound_order.sql"),
+];
 
 /// Brings a connection up to [`SCHEMA_VERSION`].
 ///

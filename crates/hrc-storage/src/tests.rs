@@ -572,3 +572,342 @@ fn the_outbox_rejects_states_outside_the_lifecycle() {
 
     assert!(insert.is_err(), "an invented outbox state must be rejected");
 }
+
+// --- Inbound ordering and deduplication (PRD sections 18.1, 12.2) ---
+
+const SENDER: &str = "sender-device";
+
+/// One arriving message from `SENDER` at `sequence`.
+///
+/// Chain links are derived the same way the sender derives them, so the
+/// test exercises the real linkage rather than a stand-in for it.
+struct Arrival {
+    message_id: String,
+    chain_id: String,
+    previous_chain_id: Option<String>,
+    device_sequence: u64,
+    digest: String,
+    thread_id: Option<String>,
+    in_reply_to: Option<String>,
+}
+
+fn arrival(sequence: u64) -> Arrival {
+    let message_id = format!("msg-{sequence}");
+    let chain_id = chain_id_for(CHANNEL, SENDER, sequence, &message_id).unwrap();
+    let previous_chain_id = (sequence > 1).then(|| {
+        chain_id_for(
+            CHANNEL,
+            SENDER,
+            sequence - 1,
+            &format!("msg-{}", sequence - 1),
+        )
+        .unwrap()
+    });
+
+    Arrival {
+        digest: format!("digest-{sequence}"),
+        message_id,
+        chain_id,
+        previous_chain_id,
+        device_sequence: sequence,
+        thread_id: Some("thread-1".into()),
+        in_reply_to: None,
+    }
+}
+
+impl Arrival {
+    fn message(&self) -> InboundMessage<'_> {
+        InboundMessage {
+            channel_id: CHANNEL,
+            message_id: &self.message_id,
+            sender_principal: "alice",
+            sender_device: SENDER,
+            device_sequence: self.device_sequence,
+            chain_id: &self.chain_id,
+            previous_chain_id: self.previous_chain_id.as_deref(),
+            kind: "note",
+            thread_id: self.thread_id.as_deref(),
+            in_reply_to: self.in_reply_to.as_deref(),
+            roster_epoch: 1,
+            endpoint: None,
+            ciphertext_bytes: 1024,
+            plaintext_bytes: 512,
+            ciphertext_sha256: &self.digest,
+            created_at: NOW,
+            expires_at: None,
+            body: b"quarantined body",
+            ciphertext: b"ciphertext",
+        }
+    }
+}
+
+#[test]
+fn messages_are_accepted_in_sequence_and_numbered_by_arrival() {
+    let mut database = database();
+
+    for sequence in 1..=3 {
+        let arrival = arrival(sequence);
+        let outcome = database.record_inbound(&arrival.message(), NOW).unwrap();
+
+        assert_eq!(
+            outcome,
+            InboundOutcome::Accepted {
+                arrival_sequence: sequence,
+                released: Vec::new()
+            }
+        );
+    }
+
+    let entries = database.inbox_entries(CHANNEL).unwrap();
+    let ids: Vec<&str> = entries
+        .iter()
+        .map(|entry| entry.message_id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["msg-1", "msg-2", "msg-3"]);
+}
+
+#[test]
+fn a_repeated_delivery_is_recognized_rather_than_stored_twice() {
+    // At-least-once delivery is the transport's contract, so a repeat is
+    // ordinary traffic and not an error (HRC-MSG-006).
+    let mut database = database();
+    let first = arrival(1);
+
+    database.record_inbound(&first.message(), NOW).unwrap();
+    let again = database.record_inbound(&first.message(), NOW).unwrap();
+
+    assert_eq!(again, InboundOutcome::Duplicate);
+    assert_eq!(database.inbox_entries(CHANNEL).unwrap().len(), 1);
+}
+
+#[test]
+fn the_same_id_with_different_ciphertext_is_a_substitution() {
+    // The distinction that makes deduplication safe: a genuine repeat is
+    // identical by construction, so differing bytes mean the object under
+    // that ID was replaced.
+    let mut database = database();
+    let first = arrival(1);
+    database.record_inbound(&first.message(), NOW).unwrap();
+
+    let mut swapped = arrival(1);
+    swapped.digest = "a different digest".into();
+
+    let error = database
+        .record_inbound(&swapped.message(), NOW)
+        .unwrap_err();
+    assert!(matches!(error, StorageError::InboundSubstituted { .. }));
+}
+
+#[test]
+fn an_out_of_order_message_waits_for_its_predecessor() {
+    // Lazy and partial fetching mean the predecessor may still be in
+    // flight, so the message is neither dropped nor accepted early.
+    let mut database = database();
+    let second = arrival(2);
+
+    let outcome = database.record_inbound(&second.message(), NOW).unwrap();
+    assert!(matches!(outcome, InboundOutcome::Held { .. }));
+
+    assert_eq!(database.held_inbound(CHANNEL).unwrap(), vec!["msg-2"]);
+    assert!(
+        database.inbox_entries(CHANNEL).unwrap().is_empty(),
+        "a held message must not appear in the inbox yet"
+    );
+}
+
+#[test]
+fn a_gap_that_fills_releases_everything_behind_it_in_order() {
+    let mut database = database();
+
+    // Three and two arrive first, both stuck behind one.
+    database.record_inbound(&arrival(3).message(), NOW).unwrap();
+    database.record_inbound(&arrival(2).message(), NOW).unwrap();
+    assert_eq!(database.held_inbound(CHANNEL).unwrap().len(), 2);
+
+    let outcome = database.record_inbound(&arrival(1).message(), NOW).unwrap();
+
+    assert_eq!(
+        outcome,
+        InboundOutcome::Accepted {
+            arrival_sequence: 1,
+            released: vec!["msg-2".into(), "msg-3".into()],
+        }
+    );
+    assert!(database.held_inbound(CHANNEL).unwrap().is_empty());
+
+    let ids: Vec<String> = database
+        .inbox_entries(CHANNEL)
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.message_id)
+        .collect();
+    assert_eq!(ids, vec!["msg-1", "msg-2", "msg-3"]);
+}
+
+#[test]
+fn a_sender_reusing_a_sequence_number_is_a_fork() {
+    // The per-device equivalent of a rewritten control log: two different
+    // messages claiming one position in the same history.
+    let mut database = database();
+    database.record_inbound(&arrival(1).message(), NOW).unwrap();
+
+    let mut forked = arrival(1);
+    forked.message_id = "msg-1-other".into();
+    forked.chain_id = chain_id_for(CHANNEL, SENDER, 1, "msg-1-other").unwrap();
+    forked.digest = "other digest".into();
+
+    let error = database.record_inbound(&forked.message(), NOW).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            StorageError::InboundForked {
+                device_sequence: 1,
+                ..
+            }
+        ),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn claiming_to_be_a_first_message_after_others_is_a_fork() {
+    let mut database = database();
+    database.record_inbound(&arrival(1).message(), NOW).unwrap();
+
+    let mut restart = arrival(2);
+    restart.previous_chain_id = None;
+
+    let error = database
+        .record_inbound(&restart.message(), NOW)
+        .unwrap_err();
+    assert!(matches!(error, StorageError::InboundForked { .. }));
+}
+
+#[test]
+fn a_message_naming_an_unknown_predecessor_is_held_not_accepted() {
+    // A fabricated predecessor and a genuinely missing one look identical
+    // from here. Holding is correct for both: the liar cannot produce the
+    // link it invented, so its message never gets in.
+    let mut database = database();
+    database.record_inbound(&arrival(1).message(), NOW).unwrap();
+
+    let mut invented = arrival(2);
+    invented.previous_chain_id = Some("a link that was never sent".into());
+
+    let outcome = database.record_inbound(&invented.message(), NOW).unwrap();
+    assert!(matches!(outcome, InboundOutcome::Held { .. }));
+    assert_eq!(database.inbox_entries(CHANNEL).unwrap().len(), 1);
+}
+
+#[test]
+fn a_thread_reads_in_arrival_order_not_sender_order() {
+    // `created_at` is chosen by the sender, so ordering a conversation by it
+    // would let a remote peer place its message anywhere in someone else's
+    // reading of it.
+    let mut database = database();
+
+    let mut first = arrival(1);
+    first.thread_id = Some("thread-1".into());
+    database.record_inbound(&first.message(), NOW).unwrap();
+
+    let mut backdated = arrival(2);
+    backdated.thread_id = Some("thread-1".into());
+    backdated.in_reply_to = Some("msg-1".into());
+    let mut message = backdated.message();
+    message.created_at = "2020-01-01T00:00:00Z";
+    database.record_inbound(&message, NOW).unwrap();
+
+    let thread = database.thread_entries(CHANNEL, "thread-1").unwrap();
+    let ids: Vec<&str> = thread
+        .iter()
+        .map(|entry| entry.message_id.as_str())
+        .collect();
+
+    assert_eq!(
+        ids,
+        vec!["msg-1", "msg-2"],
+        "a backdated message reordered the thread"
+    );
+    assert_eq!(thread[1].in_reply_to.as_deref(), Some("msg-1"));
+}
+
+#[test]
+fn threads_do_not_leak_into_each_other() {
+    let mut database = database();
+
+    let mut first = arrival(1);
+    first.thread_id = Some("thread-1".into());
+    database.record_inbound(&first.message(), NOW).unwrap();
+
+    let mut second = arrival(2);
+    second.thread_id = Some("thread-2".into());
+    database.record_inbound(&second.message(), NOW).unwrap();
+
+    assert_eq!(
+        database.thread_entries(CHANNEL, "thread-1").unwrap().len(),
+        1
+    );
+    assert_eq!(
+        database.thread_entries(CHANNEL, "thread-2").unwrap().len(),
+        1
+    );
+    assert_eq!(database.inbox_entries(CHANNEL).unwrap().len(), 2);
+}
+
+#[test]
+fn held_messages_survive_reopening() {
+    // A gap that outlives the process must not silently resolve into an
+    // out-of-order accept after a restart.
+    let directory = tempfile::tempdir().unwrap();
+
+    {
+        let mut database = file_database(&directory);
+        database.record_inbound(&arrival(2).message(), NOW).unwrap();
+    }
+
+    let mut database = file_database(&directory);
+    assert_eq!(database.held_inbound(CHANNEL).unwrap(), vec!["msg-2"]);
+
+    let outcome = database.record_inbound(&arrival(1).message(), NOW).unwrap();
+    assert_eq!(
+        outcome,
+        InboundOutcome::Accepted {
+            arrival_sequence: 1,
+            released: vec!["msg-2".into()],
+        }
+    );
+}
+
+#[test]
+fn two_sender_devices_have_independent_chains() {
+    // One device being ahead must not hold up another's messages.
+    let mut database = database();
+    database.record_inbound(&arrival(1).message(), NOW).unwrap();
+
+    let other_chain = chain_id_for(CHANNEL, "other-device", 1, "other-1").unwrap();
+    let other = InboundMessage {
+        channel_id: CHANNEL,
+        message_id: "other-1",
+        sender_principal: "bob",
+        sender_device: "other-device",
+        device_sequence: 1,
+        chain_id: &other_chain,
+        previous_chain_id: None,
+        kind: "note",
+        thread_id: Some("thread-1"),
+        in_reply_to: None,
+        roster_epoch: 1,
+        endpoint: None,
+        ciphertext_bytes: 10,
+        plaintext_bytes: 5,
+        ciphertext_sha256: "other-digest",
+        created_at: NOW,
+        expires_at: None,
+        body: b"body",
+        ciphertext: b"ciphertext",
+    };
+
+    let outcome = database.record_inbound(&other, NOW).unwrap();
+    assert!(matches!(outcome, InboundOutcome::Accepted { .. }));
+    assert_eq!(database.inbox_entries(CHANNEL).unwrap().len(), 2);
+}

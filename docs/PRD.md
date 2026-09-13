@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-13T18:30:00+02:00 |
+| Last updated | 2026-09-13T20:15:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -517,11 +517,11 @@ The Herdr plugin must expose:
 |---|---|---:|---|---|
 | HRC-MSG-001 | Send encrypted notes. | Must | In progress | `crates/hrc-core/src/message.rs` seals and opens notes; the CLI and transport wiring are pending |
 | HRC-MSG-002 | Send questions and correlated answers. | Must | Approved | Pending |
-| HRC-MSG-003 | Maintain threaded conversations. | Must | Approved | Pending |
+| HRC-MSG-003 | Maintain threaded conversations. | Must | In progress | `crates/hrc-storage/src/lib.rs` `thread_entries` reads a thread in local arrival order rather than sender-declared order; composing replies into a thread from the CLI is pending |
 | HRC-MSG-004 | Produce delivery and optional read receipts. | Must | Approved | Pending |
 | HRC-MSG-005 | Support message expiration. | Must | In progress | `crates/hrc-core/src/message.rs` refuses expired messages on open; expiry display and sweeping are pending |
-| HRC-MSG-006 | Deduplicate at-least-once deliveries. | Must | Approved | Pending |
-| HRC-MSG-007 | Preserve per-device message ordering. | Must | Approved | Pending |
+| HRC-MSG-006 | Deduplicate at-least-once deliveries. | Must | Implemented | `crates/hrc-storage/src/lib.rs` `record_inbound` treats a repeat of the same message ID and ciphertext digest as ordinary traffic, and the same ID with a different digest as a substitution rather than a repeat |
+| HRC-MSG-007 | Preserve per-device message ordering. | Must | Implemented | `crates/hrc-storage/src/lib.rs` accepts a message only when it follows the last chain link recorded for its sender device, holds one whose predecessor has not arrived, releases held messages in sequence when the gap fills, and rejects a device that forks its own chain |
 | HRC-MSG-008 | Support structured task/delegation messages without execution. | Should | Approved | Pending |
 | HRC-MSG-009 | Support progress and result messages. | Should | Approved | Pending |
 | HRC-MSG-010 | Retain a local audit record of communication decisions. | Must | In progress | `crates/hrc-storage/src/lib.rs` keeps an append-only audit table and `crates/hrc-cli/src/commands.rs` / `src/main.rs` surface it through `hrc audit`; recording prompt and messaging decisions is still pending |
@@ -1449,6 +1449,20 @@ Receipts use the same signed-and-encrypted message format and contain the
 referenced message IDs, receipt state, optional rejection code, and receiver
 timestamp.
 
+A receiver accepts a message only when it follows the last chain link
+recorded for that sender device. One whose predecessor has not arrived is
+*held* rather than dropped or accepted early: lazy and partial fetching are
+supported, so the predecessor may still be in flight, while per-device order
+is a guarantee others rely on. Held messages are released in sequence when
+the gap fills. A device that reuses a sequence number, or names a predecessor
+other than the one recorded, has forked its own history; that is the
+per-device form of a rewritten control log and it fails closed.
+
+Conversation order is local arrival order, not `createdAt`. The sender
+chooses that timestamp, so ordering a thread by it would let a remote peer
+place its message anywhere in someone else's reading of the conversation.
+See decision DEC-042.
+
 ### 18.3 Delivery lifecycle
 
 ```text
@@ -2362,7 +2376,7 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 | HRC-CH-001 through HRC-CH-007, HRC-CH-009 | M1 | `AC-ENROLL`: two clean devices create, invite, join, verify, and approve a channel using no shared private material. Invalid genesis, invite, proof, or signature is rejected. | Partial: `crates/hrc-core/src/enrollment/tests.rs` drives request, review, and admission end to end with real keys and real age encryption, and rejects a replayed request, a forged or transferred invite proof, a certificate swapped after the proof, a certificate signed by a stranger, a tampered request, a foreign channel, an expired or revoked invite, an admission naming an invite the log never opened, a second enrollment by an existing member, an ordinary member trying to read a pending join, and a non-administrator trying to admit. Both sides derive the same safety phrase, and a substituted key changes it. Remaining: publication over a transport and the CLI surface. |
 | HRC-CH-008 | M1 | `AC-REVOCATION`: a device is revoked, the epoch advances, and messages introduced afterward cannot be accepted from or decrypted by the revoked device. | Partial: `crates/hrc-core/src/roster/tests.rs` proves the epoch advances, the revoked device loses authority from that epoch, and it cannot sign later entries; `crates/hrc-crypto/src/encryption.rs` proves it cannot decrypt later ciphertext. Remaining: end-to-end over a published channel. |
 | HRC-CH-010 | M1 | `AC-CONTROL-INTEGRITY`: observed same-parent successors, broken previous hashes, rewrites, deletions, and substitutions stop synchronization with a sticky alert. | Partial: `crates/hrc-core/src/roster/tests.rs` rejects same-sequence successors, broken predecessor hashes, skipped sequences, wrong epochs, and foreign-channel entries, and proves a rejected entry leaves state unchanged. Remaining: synchronization halt and the sticky alert. |
-| HRC-MSG-001 through HRC-MSG-007, HRC-MSG-010 | M2 | `AC-MESSAGING`: two devices exchange offline notes and threaded questions/answers with receipts, expiry, deduplication, ordering, and local audit evidence. | Partial: `crates/hrc-core/src/message/tests.rs` covers seal and open between two devices, broadcast addressing, and expiry. Remaining: receipts, threading over a published channel, deduplication, and ordering. |
+| HRC-MSG-001 through HRC-MSG-007, HRC-MSG-010 | M2 | `AC-MESSAGING`: two devices exchange offline notes and threaded questions/answers with receipts, expiry, deduplication, ordering, and local audit evidence. | Partial: `crates/hrc-core/src/message/tests.rs` covers seal and open between two devices, broadcast addressing, and expiry. `crates/hrc-storage/src/tests.rs` covers deduplication, a substituted ciphertext under a reused message ID, out-of-order arrival held and then released in sequence, a gap that survives a restart, a sender forking its own chain by reusing a sequence or restarting it, a fabricated predecessor that never gets in, independent chains per sender device, and a backdated message that cannot reorder a thread. Remaining: receipts and threading over a published channel. |
 | HRC-MSG-008 and HRC-MSG-009 | M4 | `AC-DELEGATION-MESSAGES`: task, accept/decline, progress, and result states are exchanged without local execution. | Pending |
 | HRC-GATE-001 through HRC-GATE-008 | M3 | `AC-PROMPT-GATE`: pending bodies are unavailable through agent-safe interfaces; trusted UI issues a one-use digest-bound authorization; reuse, modification, and wrong-target delivery fail. | Partial: `crates/hrc-core/src/gate/tests.rs` proves reuse, wrong-message use, ciphertext substitution under an approval, expiry, and edited-content mismatch all fail, and that hostile endpoint and kind strings never reach the agent view; `crates/hrc-core/src/rpc/tests.rs` proves the daemon boundary; `crates/hrc-cli/tests/command_contract.rs` proves the resident daemon binds separate agent-safe and trusted listeners and still refuses trusted methods on the agent-safe endpoint. Remaining: the trusted UI and the audit record of approvals. |
 | HRC-CTX-001 through HRC-CTX-007 | M4 | `AC-CONTEXT`: supported context items round-trip with previews and verified hashes; excluded paths, detected secrets, oversized objects, and malformed archives are blocked. | Partial: `crates/hrc-core/src/context/tests.rs` covers all six item kinds, digest verification, seven token shapes, credential assignments, twelve excluded paths, and false-positive resistance on placeholders and ordinary code. Remaining: git-ignored path checking, attachment size limits, and archive handling. |
@@ -2402,7 +2416,7 @@ Every implementation PR must update this table.
 |---|---:|---|---|---|
 | M0 Product and protocol | 55% | Adds an executable adapter contract, capability declaration, and error model to the written specification | Transport contract and reference adapter | Obtain product-owner approval and complete the JSON-RPC adapter binding |
 | M1 Secure foundation | 99% | Adds the framed local IPC layer, verified against a Unix socket and a Windows named pipe on CI, closing the compatibility spike | Local IPC | Persist the principal key, then integrate an OS keychain backend |
-| M2 Git messaging | 80% | Adds the synchronization engine plus real `hrc sync --once`, `hrc daemon`, `hrc audit`, and live daemon IPC hosting over the local store and Git transport | Daemon IPC hosting | Add receipts, threading, deduplication, end-to-end restart coverage, and audit decision recording |
+| M2 Git messaging | 85% | Adds the synchronization engine plus real `hrc sync --once`, `hrc daemon`, `hrc audit`, and live daemon IPC hosting over the local store and Git transport | Daemon IPC hosting | Add receipts, threading, deduplication, end-to-end restart coverage, and audit decision recording |
 | M3 Herdr integration | 55% | Adds the daemon's two local interfaces as two request and response types, and now hosts them from the resident daemon so agent-safe callers still cannot name a pending body | Live daemon boundary | Build the trusted approval TUI, then the Herdr inbox UI |
 | M4 Context/delegation | 30% | Context packages with previews, digest verification, default path exclusions, and blocking secret scanning | Context packages | Add git-ignored path checking and attachment limits, then structured delegation messages |
 | M5 Provider ecosystem | 0% | Not started | N/A | Deferred until core protocol stabilizes |
@@ -2490,6 +2504,7 @@ recorded either directly in this PRD or in a stable linked artifact.
 | DEC-016 | RFC 8785 canonical JSON uses a pinned Rust implementation, initially `serde_jcs`, guarded by protocol vectors. | Accepted | Avoids custom canonicalization while making signed bytes interoperable. |
 | DEC-017 | Build and test run in a separate `pull_request` workflow rather than being added to the `pull_request_target` traceability workflow. | Accepted | Compiling and running pull-request code under `pull_request_target` would hand a write-capable, secret-bearing context to untrusted code; the two triggers stay separated. |
 | DEC-018 | The CLI publishes a fixed numeric exit-code contract: 0 success, 1 runtime failure, 2 usage, 3 unimplemented, 4 authorization required. | Accepted | PRD section 11.1 requires documented exit codes, and the Herdr plugin and skill must branch on stable numbers rather than parsing prose. |
+| DEC-042 | Inbound messages are ordered by local arrival, and a message whose predecessor is missing is held rather than dropped or accepted early. | Accepted | `createdAt` is sender-chosen, so a backdated message could otherwise be placed anywhere in a recipient's view of a thread. Holding rather than dropping keeps lazy and partial fetching workable; holding rather than accepting keeps per-device order a guarantee. A fabricated predecessor and a genuinely missing one are indistinguishable at the receiver, and holding is the correct answer to both: whoever invented a link cannot produce it. |
 | DEC-041 | Local IPC lives in its own `hrc-ipc` crate, and a connection's authority comes from the endpoint that accepted it. | Accepted | Both the daemon and the trusted UI need the transport, and `hrc-core` is the only crate they share — putting it there would pull Tokio and `interprocess` into the pure-logic crates. Keeping authority in the endpoint rather than in a field of the request means a caller cannot name its own surface. |
 | DEC-040 | The approval authorization never leaves the daemon: one trusted call issues it, consumes it, and returns the framed content. | Accepted | Section 19.5 requires it to be unavailable to agent-facing methods, but an authorization returned to *any* caller is a value that can be stored and presented later, and the one-use ledger then becomes the only thing standing between a leaked value and a replay. Keeping it inside a single call removes the window instead of guarding it. |
 | DEC-039 | The `add_member` control entry names the invite it consumes, and invite state is part of replayed roster state. | Accepted | Single use (section 15.1) was otherwise unenforceable by anyone but the administrator who happened to remember: nothing in the published record said which authorization a member was admitted under, so a replayed join request could be admitted twice and no reader of the control log could tell. Making it part of replay means a second admission fails for every participant. |
