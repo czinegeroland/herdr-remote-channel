@@ -44,23 +44,29 @@ jobs:
     runs-on: [self-hosted, windows]
     defaults:
       run:
-        # Bash, from the Git for Windows installation the runner already
-        # needs. Neither PowerShell option works unconfigured here: `pwsh` is
-        # a separate install, and `powershell` runs the temporary script
-        # files Actions generates, which the default execution policy blocks.
-        # Bash also brings `set -eo pipefail`, so a failing command in a
-        # multi-line step fails the step.
-        shell: bash
+        # `cmd`, because it is the one shell a Windows machine is guaranteed
+        # to have and the one that needs no resolution. The alternatives each
+        # failed on a real runner: `pwsh` is a separate install; `powershell`
+        # is blocked by the default execution policy from running the script
+        # files Actions generates; and `bash` resolved to WSL's bash, which
+        # cannot read the `C:\...` path it was handed.
+        #
+        # `cmd` only propagates the exit code of the last command in a step,
+        # so multi-command steps chain with `&&` and a failure short-circuits
+        # to the end.
+        shell: cmd
     steps:
       - name: Check out the pull request
         uses: actions/checkout@v4
 
       - name: Report the toolchain
-        run: |
+        # Reported before anything else runs, so a runner missing `rustup`
+        # says so here rather than through a confusing failure later.
+        run: >
           rustup toolchain install stable --profile minimal --component rustfmt,clippy
-          rustup default stable
-          rustc --version
-          cargo --version
+          && rustup default stable
+          && rustc --version
+          && cargo --version
 
       # No dependency cache step here on purpose. A self-hosted runner keeps
       # its own `target` directory and cargo registry between runs, so
@@ -80,9 +86,9 @@ jobs:
         run: cargo test --workspace --locked
 
       - name: Smoke-test the hrc executable
-        run: |
+        run: >
           cargo run --locked --quiet --bin hrc -- --version
-          cargo run --locked --quiet --bin hrc -- --help > /dev/null
+          && cargo run --locked --quiet --bin hrc -- --help > nul
 
   hosted-matrix:
     name: Build and test (${{ matrix.os }})

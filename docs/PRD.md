@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-14T16:05:00+02:00 |
+| Last updated | 2026-09-14T16:30:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -2257,14 +2257,17 @@ self-hosted Windows runner. The GitHub-hosted Linux, macOS, and Windows matrix
 is a `workflow_dispatch` job on the same workflow, and it is what
 `AC-RUST-FOUNDATION` is measured against.
 
-CI steps run under bash, from the Git for Windows installation the runner
-already needs. Neither PowerShell option works on an unconfigured Windows
-machine: `pwsh` is a separate install, and `powershell` executes the temporary
-script files Actions generates, which the default execution policy refuses.
-Bash also supplies `set -eo pipefail`, so a failing command in a multi-line
-step fails the step. The traceability validator is itself PowerShell and is
-invoked with an execution policy scoped to that one process, rather than
-relaxing the machine's policy to suit CI.
+CI steps run under `cmd`, the one shell a Windows machine is guaranteed to
+have and the one that needs no resolution. Each alternative failed on the real
+runner: `pwsh` is a separate install; `powershell` is blocked by the default
+execution policy from running the script files Actions generates; and `bash`
+resolved to WSL's bash, which cannot read the `C:\...` path it was handed.
+Because `cmd` propagates only the last command's exit code, multi-command
+steps chain with `&&`.
+
+The traceability validator is PowerShell and is invoked with an execution
+policy scoped to that one process, rather than relaxing the machine's policy
+to suit CI.
 
 This is a deliberate gap, not an oversight: between dispatches, only Windows
 is continuously verified. Windows is the platform kept because it is where the
