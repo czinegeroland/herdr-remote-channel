@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-14T00:20:00+02:00 |
+| Last updated | 2026-09-14T01:50:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -524,7 +524,7 @@ The Herdr plugin must expose:
 | HRC-MSG-007 | Preserve per-device message ordering. | Must | Implemented | `crates/hrc-storage/src/lib.rs` accepts a message only when it follows the last chain link recorded for its sender device, holds one whose predecessor has not arrived, releases held messages in sequence when the gap fills, and rejects a device that forks its own chain |
 | HRC-MSG-008 | Support structured task/delegation messages without execution. | Should | Implemented | `crates/hrc-protocol/src/delegation.rs` `TaskBody` carries a title, description, acceptance criteria, and a reference to context already shared, and a test asserts the shape exposes no command, script, argument, or environment field |
 | HRC-MSG-009 | Support progress and result messages. | Should | Implemented | `crates/hrc-protocol/src/delegation.rs` `ProgressBody` and `ResultBody`, with the lifecycle of section 18.4 in `DelegationState::may_precede` and party rules in `crates/hrc-core/src/delegation.rs` |
-| HRC-MSG-010 | Retain a local audit record of communication decisions. | Must | In progress | `crates/hrc-storage/src/lib.rs` keeps an append-only audit table and `crates/hrc-cli/src/commands.rs` / `src/main.rs` surface it through `hrc audit`; recording prompt and messaging decisions is still pending |
+| HRC-MSG-010 | Retain a local audit record of communication decisions. | Must | Implemented | `crates/hrc-storage/src/lib.rs` keeps an append-only audit table, `crates/hrc-cli/src/commands.rs` surfaces it through `hrc audit`, and every prompt-gate decision is written through to it by the daemon broker |
 
 ### 12.3 Prompt gate
 
@@ -533,7 +533,7 @@ The Herdr plugin must expose:
 | HRC-GATE-001 | Quarantine every inbound body before it can be exposed through an agent-accessible interface. Metadata-only notification is allowed. | Must | Implemented | `crates/hrc-core/src/gate.rs` `AgentView` carries the closed metadata set and has no field that can hold a body |
 | HRC-GATE-002 | Prevent receiving agents and agent-accessible JSON commands from reading pending content before approval. | Must | Implemented | `crates/hrc-core/src/rpc.rs`: two request and response types, where `AgentResponse` has no variant capable of carrying a body and `dispatch_agent` cannot return one |
 | HRC-GATE-003 | Allow accept, edit, inbox-only, decline, and expiry decisions. | Must | Implemented | `crates/hrc-core/src/gate.rs` `Decision` |
-| HRC-GATE-004 | Preserve original and edited content in the local audit log. | Must | Approved | Pending |
+| HRC-GATE-004 | Preserve original and edited content in the local audit log. | Must | Implemented | `crates/hrc-core/src/gate.rs` returns the audit record together with the framed content so recording is not a separate step, and `crates/hrc-storage/src/lib.rs` `append_decision` preserves both versions rather than only their digests |
 | HRC-GATE-005 | Add provenance and untrusted-content framing to approved prompts. | Must | Implemented | `crates/hrc-core/src/gate.rs` `provenance_banner`, applied by `deliver` |
 | HRC-GATE-006 | Ensure remote senders cannot select local pane IDs. | Must | Implemented | `crates/hrc-core/src/gate.rs`: the target agent comes from the human's decision, never from the envelope |
 | HRC-GATE-007 | Require manual approval by default. | Must | Approved | Pending |
@@ -1595,6 +1595,19 @@ The daemon must expose two distinct local interfaces:
 2. A trusted human interface that can decrypt and preview pending bodies and
    issue a one-use approval authorization.
 
+Every decision is recorded, not only the approvals. Keeping a message in the
+inbox, declining it, and letting it expire are decisions too, and an audit
+that recorded only approvals would show a channel in which nothing was ever
+refused. A decision that was refused records nothing, since a record of an
+approval that did not happen is worse than no record at all.
+
+The record preserves the original content and the edited content, not only
+their digests. The question asked of an audit trail afterwards is not whether
+something was approved but what the human took out before an agent saw it,
+and a digest cannot answer that. The content is local and already held
+quarantined in the inbox, so preserving it discloses nothing the machine did
+not already have.
+
 The approval authorization must be:
 
 - Bound to the channel, message ID, message ciphertext hash, selected action,
@@ -2106,7 +2119,7 @@ npx skills add <owner>/herdr-remote-channel `
 | HRC-SEC-008 | Outgoing context is previewed and secret scanned. | Implemented | `crates/hrc-core/src/context.rs`: `ready_to_send` refuses a package with findings rather than stripping them |
 | HRC-SEC-009 | Incoming content is quarantined and treated as untrusted. | Implemented | `crates/hrc-core/src/message.rs` returns `QuarantinedMessage`; `crates/hrc-core/src/gate.rs` frames approved content as untrusted before delivery |
 | HRC-SEC-010 | Security-sensitive commands require trusted human authorization and reject agent-safe/non-interactive invocation. | Implemented | `crates/hrc-core/src/rpc.rs` refuses every section 22.7 operation on the agent-safe surface before reading or writing any state; `crates/hrc-cli/src/dispatch.rs` refuses the same set non-interactively, and a test joins the two lists so they cannot drift |
-| HRC-SEC-011 | Audit logs record approvals and local actions. | Approved | Pending |
+| HRC-SEC-011 | Audit logs record approvals and local actions. | Implemented | `crates/hrc-core/src/rpc.rs` appends a record for every decision, including those that deliver nothing, and a refused approval records nothing; the storage API has no update or delete path for the audit table and a test asserts that |
 | HRC-SEC-012 | Observed conflicting histories, rewrites, deletions, or substitutions stop synchronization. | Implemented | `crates/hrc-core/src/sync.rs` halts the channel with a sticky reason and audits it; a halted channel refuses to fetch again |
 | HRC-SEC-013 | Messages from stale epochs or devices revoked before object introduction are rejected. | Implemented | `crates/hrc-core/src/message.rs` checks both the claimed epoch and the epoch the object was introduced under |
 | HRC-SEC-014 | Pending bodies and approval capabilities are unavailable through agent-safe CLI and JSON surfaces. | Implemented | `crates/hrc-core/src/rpc/tests.rs` renders every answer the agent-safe surface can produce and asserts the pending body appears in none of them; an authorization is never returned to any caller |
@@ -2448,7 +2461,7 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 | HRC-SEC-006 through HRC-SEC-008 | M4 | `AC-CONTENT-SECURITY`: ciphertext/decompression limits, secret scanning, and preview reject malicious fixtures. | `crates/hrc-crypto/src/encryption.rs` enforces ciphertext and plaintext limits before decryption; `crates/hrc-core/src/context/tests.rs` covers secret scanning and preview; `crates/hrc-protocol/src/attachment/tests.rs` covers a declaration over the ceiling, a per-message total exceeded across attachments within it, an unbounded count, a repeated blob reference, an object larger than declared, a substituted object of the declared size, a plaintext claiming to exceed its ciphertext, and compressed content carried opaquely, plus traversal, control characters, Windows device names, dot-only names, and shell-significant characters in sender-chosen file names. |
 | HRC-SEC-009 | M3 | `AC-QUARANTINE`: every inbound body is quarantined and framed as untrusted before any approved disclosure. | `crates/hrc-core/src/message.rs` and `crates/hrc-core/src/gate/tests.rs`: opening yields quarantined content, and delivery is impossible without a consumed authorization that applies the provenance banner. |
 | HRC-SEC-010, HRC-SEC-014 | M3 | `AC-HUMAN-AUTH`: agent-safe and non-interactive callers cannot read pending bodies, authorize actions, or reuse an authorization. | `crates/hrc-core/src/rpc/tests.rs`: all nine section 22.7 operations are refused on the agent-safe surface with the stable `authorization_required` error and leave no state behind; every agent-safe answer is rendered and searched for the pending body; a pending message and an unknown one produce the same error, so the refusal reveals nothing; an approval is spent by the call that issues it and never returned; unknown methods and unknown parameters fail to decode. `crates/hrc-cli/src/dispatch.rs` joins the daemon's reserved set to the CLI's, and `crates/hrc-cli/tests/command_contract.rs` proves the live daemon agent endpoint still returns `authorization_required` when a trusted request reaches it. Verified on Linux, macOS, and Windows CI. |
-| HRC-SEC-011 and HRC-SEC-012 | M2 | `AC-AUDIT-AND-HISTORY`: local actions are audited and observed rewrite and substitution scenarios fail closed. | Partial: `crates/hrc-core/src/sync/tests.rs` proves rewrite and substitution halt the channel and are audited. Remaining: auditing approval decisions, which arrive with the prompt gate. |
+| HRC-SEC-011 and HRC-SEC-012 | M2 | `AC-AUDIT-AND-HISTORY`: local actions are audited and observed rewrite and substitution scenarios fail closed. | `crates/hrc-core/src/sync/tests.rs` proves rewrite and substitution halt the channel and are audited; `crates/hrc-core/src/rpc/tests.rs` proves every decision leaves a record, an edited delivery records both versions with both digests, a refused approval records nothing, and a non-delivering decision names no agent; `crates/hrc-storage/src/tests.rs` proves decisions accumulate rather than replace and that the storage API has no update or delete path for the audit table. |
 | HRC-GOV-001 through HRC-GOV-003, HRC-GOV-005 | M0 | `AC-PRD-CI`: representative pull-request fixtures fail when the PRD, ledger, update timestamp, exact requirement-row changes, or a valid no-progress rationale are missing; validation executes base-branch code. | `.github/scripts/check-prd-traceability.ps1`, `.github/workflows/prd-traceability.yml` |
 | HRC-GOV-004 | All | `AC-EVIDENCE`: every status transition to `Verified` includes a stable evidence reference in this registry or the primary requirement table. | Pending |
 | HRC-TECH-001, HRC-TECH-004 | M1 | `AC-RUST-FOUNDATION`: the Rust 2024 Cargo workspace builds and its Clap CLI passes command-contract tests on Windows, macOS, and Linux CI. | Partial: `.github/workflows/build-and-test.yml` builds, lints, and tests the workspace on all three platforms; `crates/hrc-cli/tests/command_contract.rs` covers the command surface and the section 22.7 boundary. Remaining: command behavior beyond the contract. |
@@ -2473,8 +2486,8 @@ Every implementation PR must update this table.
 |---|---:|---|---|---|
 | M0 Product and protocol | 55% | Adds an executable adapter contract, capability declaration, and error model to the written specification | Transport contract and reference adapter | Obtain product-owner approval and complete the JSON-RPC adapter binding |
 | M1 Secure foundation | 99% | Adds the framed local IPC layer, verified against a Unix socket and a Windows named pipe on CI, closing the compatibility spike | Local IPC | Persist the principal key, then integrate an OS keychain backend |
-| M2 Git messaging | 90% | Adds the synchronization engine plus real `hrc sync --once`, `hrc daemon`, `hrc audit`, and live daemon IPC hosting over the local store and Git transport | Daemon IPC hosting | Add receipts, threading, deduplication, end-to-end restart coverage, and audit decision recording |
-| M3 Herdr integration | 55% | Adds the daemon's two local interfaces as two request and response types, and now hosts them from the resident daemon so agent-safe callers still cannot name a pending body | Live daemon boundary | Build the trusted approval TUI, then the Herdr inbox UI |
+| M2 Git messaging | 95% | Adds the synchronization engine plus real `hrc sync --once`, `hrc daemon`, `hrc audit`, and live daemon IPC hosting over the local store and Git transport | Daemon IPC hosting | Add receipts, threading, deduplication, end-to-end restart coverage, and audit decision recording |
+| M3 Herdr integration | 60% | Adds the daemon's two local interfaces as two request and response types, and now hosts them from the resident daemon so agent-safe callers still cannot name a pending body | Live daemon boundary | Build the trusted approval TUI, then the Herdr inbox UI |
 | M4 Context/delegation | 65% | Adds attachment limits checked before any fetch and again on arrival, and sender-chosen file names treated as hostile text | Attachment limits | Add git-ignored path checking, then wire context and delegation to the CLI |
 | M5 Provider ecosystem | 0% | Not started | N/A | Deferred until core protocol stabilizes |
 

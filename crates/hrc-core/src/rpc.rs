@@ -385,8 +385,11 @@ pub trait Broker {
     fn channel_local_name(&self, message_id: &str) -> String;
     /// The local human's name, for the provenance banner.
     fn local_user(&self) -> String;
-    /// Records a decision that does not deliver anything.
-    fn record_decision(&mut self, message_id: &str, decision: &Decision) -> Result<()>;
+    /// Appends one decision to the local audit log.
+    ///
+    /// Taking the record rather than its parts means a caller cannot write a
+    /// decision that differs from the one the gate actually made.
+    fn record_decision_record(&mut self, record: &crate::gate::DecisionRecord) -> Result<()>;
     /// Applies a trusted membership or repository operation.
     fn apply_trusted(&mut self, request: &TrustedRequest) -> Result<()>;
 }
@@ -505,7 +508,15 @@ pub fn dispatch_trusted(
             let authorization = Authorization::issue(message, decision.clone(), expires_at);
 
             if !decision.reaches_an_agent() {
-                broker.record_decision(&message_id, &decision)?;
+                // Keeping something in the inbox, declining it, or letting
+                // it expire are decisions too. An audit that recorded only
+                // approvals would show a channel in which nothing was ever
+                // refused.
+                let original = broker.pending_body(&message_id).unwrap_or_default();
+                let decided_by = broker.local_user();
+                let record =
+                    crate::gate::record_decision(message, &decision, &original, &decided_by, now);
+                broker.record_decision_record(&record)?;
                 return Ok(TrustedResponse::Done);
             }
 
@@ -518,15 +529,16 @@ pub fn dispatch_trusted(
 
             // Everything below has to be read before the borrow of `broker`
             // for delivery, and the content is the body the human approved.
-            let body =
-                match edited {
-                    Some(text) => text,
-                    None => broker.pending_body(&message_id).ok_or_else(|| {
-                        CoreError::NoPendingMessage {
-                            message_id: message_id.clone(),
-                        }
-                    })?,
-                };
+            // The original is what arrived; the body is what the human
+            // chose to deliver. The audit preserves both, so a reviewer can
+            // see what was removed.
+            let original =
+                broker
+                    .pending_body(&message_id)
+                    .ok_or_else(|| CoreError::NoPendingMessage {
+                        message_id: message_id.clone(),
+                    })?;
+            let body = edited.unwrap_or_else(|| original.clone());
             let channel_local_name = broker.channel_local_name(&message_id);
             let local_user = broker.local_user();
             let message =
@@ -538,17 +550,28 @@ pub fn dispatch_trusted(
 
             // Consumes the authorization. It is never returned, so there is
             // nothing for a later caller to replay.
-            let framed = crate::gate::deliver(
+            let delivered = crate::gate::deliver(
                 authorization,
                 ledger,
                 message,
-                &body,
-                &channel_local_name,
-                &local_user,
-                now,
+                crate::gate::Approval {
+                    body: &body,
+                    original: &original,
+                    channel_local_name: &channel_local_name,
+                    approved_by: &local_user,
+                    now,
+                },
             )?;
 
-            TrustedResponse::Delivered { agent, framed }
+            // Recorded before the content is handed over. An approval that
+            // reached an agent without leaving a trace is the one an audit
+            // exists to catch.
+            broker.record_decision_record(&delivered.record)?;
+
+            TrustedResponse::Delivered {
+                agent,
+                framed: delivered.framed,
+            }
         }
 
         other => {

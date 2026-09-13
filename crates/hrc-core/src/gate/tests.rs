@@ -66,19 +66,22 @@ fn an_approved_message_is_delivered_with_its_provenance_banner() {
         authorization,
         &mut ledger,
         &message,
-        "please review the retry logic",
-        "Team channel",
-        "roland",
-        NOW,
+        Approval {
+            body: "please review the retry logic",
+            original: "the original body",
+            channel_local_name: "Team channel",
+            approved_by: "roland",
+            now: NOW,
+        },
     )
     .unwrap();
 
-    assert!(delivered.starts_with("[REMOTE HRC MESSAGE]"));
-    assert!(delivered.contains("Sender: alice"));
-    assert!(delivered.contains("Channel: Team channel"));
-    assert!(delivered.contains("Approved locally by: roland"));
-    assert!(delivered.contains("potentially untrusted context"));
-    assert!(delivered.ends_with("please review the retry logic"));
+    assert!(delivered.framed.starts_with("[REMOTE HRC MESSAGE]"));
+    assert!(delivered.framed.contains("Sender: alice"));
+    assert!(delivered.framed.contains("Channel: Team channel"));
+    assert!(delivered.framed.contains("Approved locally by: roland"));
+    assert!(delivered.framed.contains("potentially untrusted context"));
+    assert!(delivered.framed.ends_with("please review the retry logic"));
 }
 
 #[test]
@@ -95,10 +98,13 @@ fn an_authorization_cannot_be_used_twice() {
         first,
         &mut ledger,
         &message,
-        "body",
-        "Team channel",
-        "roland",
-        NOW,
+        Approval {
+            body: "body",
+            original: "the original body",
+            channel_local_name: "Team channel",
+            approved_by: "roland",
+            now: NOW,
+        },
     )
     .unwrap();
 
@@ -106,10 +112,13 @@ fn an_authorization_cannot_be_used_twice() {
         replay,
         &mut ledger,
         &message,
-        "body",
-        "Team channel",
-        "roland",
-        NOW,
+        Approval {
+            body: "body",
+            original: "the original body",
+            channel_local_name: "Team channel",
+            approved_by: "roland",
+            now: NOW,
+        },
     )
     .unwrap_err();
 
@@ -128,10 +137,13 @@ fn an_authorization_does_not_carry_to_a_different_message() {
         authorization,
         &mut ledger,
         &other,
-        "body",
-        "Team channel",
-        "roland",
-        NOW,
+        Approval {
+            body: "body",
+            original: "the original body",
+            channel_local_name: "Team channel",
+            approved_by: "roland",
+            now: NOW,
+        },
     )
     .unwrap_err();
 
@@ -157,10 +169,13 @@ fn swapping_the_ciphertext_under_an_approval_is_refused() {
         authorization,
         &mut ledger,
         &swapped,
-        "body",
-        "Team channel",
-        "roland",
-        NOW,
+        Approval {
+            body: "body",
+            original: "the original body",
+            channel_local_name: "Team channel",
+            approved_by: "roland",
+            now: NOW,
+        },
     )
     .unwrap_err();
 
@@ -177,10 +192,13 @@ fn an_expired_authorization_is_refused() {
         authorization,
         &mut ledger,
         &message,
-        "body",
-        "Team channel",
-        "roland",
-        LATER,
+        Approval {
+            body: "body",
+            original: "the original body",
+            channel_local_name: "Team channel",
+            approved_by: "roland",
+            now: LATER,
+        },
     )
     .unwrap_err();
 
@@ -224,10 +242,13 @@ fn edited_delivery_must_match_what_the_human_approved() {
         authorization.clone(),
         &mut ledger,
         &message,
-        "please review the retry logic",
-        "Team channel",
-        "roland",
-        NOW,
+        Approval {
+            body: "please review the retry logic",
+            original: "the original body",
+            channel_local_name: "Team channel",
+            approved_by: "roland",
+            now: NOW,
+        },
     )
     .unwrap_err();
     assert!(matches!(error, CoreError::EditedContentMismatch));
@@ -239,13 +260,16 @@ fn edited_delivery_must_match_what_the_human_approved() {
         authorization,
         &mut ledger,
         &message,
-        edited,
-        "Team channel",
-        "roland",
-        NOW,
+        Approval {
+            body: edited,
+            original: "the original body",
+            channel_local_name: "Team channel",
+            approved_by: "roland",
+            now: NOW,
+        },
     )
     .unwrap();
-    assert!(delivered.ends_with(edited));
+    assert!(delivered.framed.ends_with(edited));
 }
 
 #[test]
@@ -264,10 +288,13 @@ fn decisions_that_do_not_reach_an_agent_cannot_deliver() {
             authorization,
             &mut ledger,
             &message,
-            "body",
-            "Team channel",
-            "roland",
-            NOW,
+            Approval {
+                body: "body",
+                original: "the original body",
+                channel_local_name: "Team channel",
+                approved_by: "roland",
+                now: NOW,
+            },
         )
         .unwrap_err();
 

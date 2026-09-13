@@ -1001,3 +1001,95 @@ fn an_unknown_receipt_state_is_refused_by_the_schema() {
 
     assert!(database.record_receipt(CHANNEL, &bogus, NOW).is_err());
 }
+
+// --- Decision audit (PRD requirements HRC-GATE-004, HRC-SEC-011) ---
+
+fn decision(action: &str, edited: Option<&str>) -> DecisionRecord {
+    DecisionRecord {
+        channel_id: CHANNEL.into(),
+        message_id: "msg-1".into(),
+        action: action.into(),
+        original_content: "the original body".into(),
+        edited_content: edited.map(str::to_owned),
+        content_hash: "a".repeat(64),
+        edited_hash: edited.map(|_| "b".repeat(64)),
+        agent: Some("reviewer-pane".into()),
+        decided_by: "roland".into(),
+        occurred_at: NOW.into(),
+    }
+}
+
+#[test]
+fn a_decision_round_trips_with_both_versions_of_the_content() {
+    let database = database();
+
+    database
+        .append_decision(&decision("deliver_edited", Some("the edited body")))
+        .unwrap();
+
+    let recorded = database.decisions_for("msg-1").unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].original_content, "the original body");
+    assert_eq!(
+        recorded[0].edited_content.as_deref(),
+        Some("the edited body")
+    );
+    assert_eq!(recorded[0].decided_by, "roland");
+    assert_eq!(recorded[0].agent.as_deref(), Some("reviewer-pane"));
+}
+
+#[test]
+fn decisions_accumulate_rather_than_replace() {
+    // The history of what was decided about a message is the point. A second
+    // decision must not overwrite the first.
+    let database = database();
+
+    database
+        .append_decision(&decision("keep_in_inbox", None))
+        .unwrap();
+    database
+        .append_decision(&decision("deliver_to_agent", None))
+        .unwrap();
+
+    let recorded = database.decisions_for("msg-1").unwrap();
+    let actions: Vec<&str> = recorded.iter().map(|entry| entry.action.as_str()).collect();
+    assert_eq!(actions, vec!["keep_in_inbox", "deliver_to_agent"]);
+}
+
+#[test]
+fn decisions_do_not_mix_with_ordinary_audit_lines() {
+    // `hrc audit` shows everything; a decision query must show decisions.
+    let database = database();
+
+    database
+        .append_audit(
+            Some(CHANNEL),
+            Some("msg-1"),
+            "synchronized",
+            None,
+            None,
+            NOW,
+        )
+        .unwrap();
+    database
+        .append_decision(&decision("decline", None))
+        .unwrap();
+
+    assert_eq!(database.decisions_for("msg-1").unwrap().len(), 1);
+    assert!(database.audit_actions().unwrap().len() >= 2);
+}
+
+#[test]
+fn the_audit_log_has_no_update_or_delete_path() {
+    // Not a behavioral test but a structural one: a decision that could be
+    // revised afterwards would not be evidence of anything. If a future
+    // change adds one, this fails and someone has to argue for it.
+    let source = include_str!("lib.rs");
+
+    for forbidden in ["UPDATE audit", "DELETE FROM audit"] {
+        assert!(
+            !source.contains(forbidden),
+            "the storage API gained a `{forbidden}` path"
+        );
+    }
+}

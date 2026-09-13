@@ -22,7 +22,7 @@ struct TestBroker {
     body: String,
     approved: Option<String>,
     drafts: Vec<String>,
-    decisions: Vec<String>,
+    decisions: Vec<crate::gate::DecisionRecord>,
     applied: Vec<&'static str>,
 }
 
@@ -108,9 +108,8 @@ impl Broker for TestBroker {
         "roland".into()
     }
 
-    fn record_decision(&mut self, message_id: &str, decision: &Decision) -> Result<()> {
-        self.decisions
-            .push(format!("{message_id}:{}", decision.as_str()));
+    fn record_decision_record(&mut self, record: &crate::gate::DecisionRecord) -> Result<()> {
+        self.decisions.push(record.clone());
         Ok(())
     }
 
@@ -535,4 +534,138 @@ fn an_agent_safe_request_cannot_smuggle_a_trusted_parameter() {
         hrc_protocol::canonical::from_json_str::<Request>(json).is_err(),
         "an unknown parameter was accepted"
     );
+}
+
+#[test]
+fn every_decision_leaves_an_audit_record() {
+    // PRD requirement HRC-GATE-004. An audit that recorded only approvals
+    // would show a channel in which nothing was ever refused.
+    let mut broker = TestBroker::new();
+    let message_id = broker.message_id();
+    let mut ledger = AuthorizationLedger::new();
+
+    let decisions = [
+        WireDecision::KeepInInbox,
+        WireDecision::Decline {
+            reason: Some("not now".into()),
+        },
+        WireDecision::DeliverToAgent {
+            agent: "reviewer-pane".into(),
+        },
+    ];
+
+    for decision in decisions {
+        dispatch_trusted(
+            &mut broker,
+            &mut ledger,
+            TrustedRequest::Approve {
+                message_id: message_id.clone(),
+                decision,
+                expires_at: LATER.into(),
+            },
+            NOW,
+        )
+        .unwrap();
+    }
+
+    let actions: Vec<&str> = broker
+        .decisions
+        .iter()
+        .map(|record| record.action)
+        .collect();
+    assert_eq!(
+        actions,
+        vec!["keep_in_inbox", "decline", "deliver_to_agent"]
+    );
+
+    for record in &broker.decisions {
+        assert_eq!(record.message_id, message_id);
+        assert_eq!(record.decided_by, "roland");
+        assert_eq!(record.occurred_at, NOW);
+        assert_eq!(record.original_content, BODY);
+    }
+}
+
+#[test]
+fn an_edited_delivery_records_both_versions() {
+    // The question asked of an audit trail afterwards is not "was this
+    // approved" but "what did the human take out before an agent saw it".
+    let mut broker = TestBroker::new();
+    let message_id = broker.message_id();
+    let mut ledger = AuthorizationLedger::new();
+
+    let edited = "the staging credentials rotated on [REDACTED]";
+    dispatch_trusted(
+        &mut broker,
+        &mut ledger,
+        TrustedRequest::Approve {
+            message_id,
+            decision: WireDecision::DeliverEdited {
+                agent: "reviewer-pane".into(),
+                text: edited.into(),
+            },
+            expires_at: LATER.into(),
+        },
+        NOW,
+    )
+    .unwrap();
+
+    let record = &broker.decisions[0];
+    assert_eq!(record.action, "deliver_edited");
+    assert_eq!(record.original_content, BODY);
+    assert_eq!(record.edited_content.as_deref(), Some(edited));
+    assert_eq!(
+        record.content_hash,
+        hrc_protocol::canonical::sha256_hex(BODY.as_bytes())
+    );
+    assert_eq!(
+        record.edited_hash.as_deref(),
+        Some(hrc_protocol::canonical::sha256_hex(edited.as_bytes()).as_str())
+    );
+    assert_eq!(record.agent.as_deref(), Some("reviewer-pane"));
+}
+
+#[test]
+fn a_refused_approval_records_nothing() {
+    // A record written for an approval that did not happen would be worse
+    // than no record at all.
+    let mut broker = TestBroker::new();
+    let mut ledger = AuthorizationLedger::new();
+
+    let error = dispatch_trusted(
+        &mut broker,
+        &mut ledger,
+        TrustedRequest::Approve {
+            message_id: "01BX5ZZKBKACTAV9WEVGEMMVRZ".into(),
+            decision: WireDecision::KeepInInbox,
+            expires_at: LATER.into(),
+        },
+        NOW,
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, CoreError::NoPendingMessage { .. }));
+    assert!(broker.decisions.is_empty());
+}
+
+#[test]
+fn a_decision_that_reaches_no_agent_names_no_agent() {
+    let mut broker = TestBroker::new();
+    let message_id = broker.message_id();
+    let mut ledger = AuthorizationLedger::new();
+
+    dispatch_trusted(
+        &mut broker,
+        &mut ledger,
+        TrustedRequest::Approve {
+            message_id,
+            decision: WireDecision::KeepInInbox,
+            expires_at: LATER.into(),
+        },
+        NOW,
+    )
+    .unwrap();
+
+    assert!(broker.decisions[0].agent.is_none());
+    assert!(broker.decisions[0].edited_content.is_none());
 }
