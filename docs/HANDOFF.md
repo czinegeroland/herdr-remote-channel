@@ -142,10 +142,9 @@ request as the work it describes, or it will lie.*
 **78 of 94 requirement rows Implemented.** Milestones: **M0 55%, M1 100%,
 M2 99%, M3 85%, M4 85%, M5 0%.**
 
-Thirty-three pull requests merged; no pull request is open. `main` is at
-`docs: hand off the post-reencryption state (#33)`. The current development
-branch is `claude/happy-johnson-4kqomk`, based on `origin/main`, with the
-context-package change present locally but **not committed and no PR created**.
+Thirty-three pull requests are merged. Context-package PR #34 is open from
+`claude/happy-johnson-4kqomk` at `db76d6a`; `main` remains at
+`docs: hand off the post-reencryption state (#33)` until that PR merges.
 
 What works today, end to end and proven by tests against a real Git
 repository: two installations create a channel, invite, join, derive and
@@ -191,8 +190,10 @@ linker.
 
 ### Start here
 
-Nothing is half-done, so pick from the list below rather than hunting for
-loose ends.
+Finish #34 first: wait for every required check, fix any failure on the same
+branch, squash-merge it, then reset `claude/happy-johnson-4kqomk` to
+`origin/main` and force-with-lease push. After that, continue with the list
+below.
 
 ### The remaining work, in the order that unblocks the most
 
