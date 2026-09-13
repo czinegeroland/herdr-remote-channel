@@ -18,7 +18,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{IpcError, Result};
+#[cfg(not(windows))]
+use crate::IpcError;
+use crate::Result;
 
 /// Which of the daemon's two interfaces an endpoint addresses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,11 +57,16 @@ impl Endpoint {
     pub fn new(runtime_dir: &Path, interface: Interface) -> Result<Self> {
         #[cfg(windows)]
         let name = {
-            let _ = runtime_dir;
             // A namespaced name, not a path: `interprocess` prefixes
             // `\\.\pipe\` itself, and passing an already-prefixed name
             // would produce a pipe nobody can find.
-            format!("hrc-{}-{}", session_tag(), interface.name())
+            //
+            // Pipe names are machine-global, so the runtime directory is
+            // folded in. That keeps the name stable for one installation
+            // while stopping two users, two installations, or two tests from
+            // colliding — and a collision here would mean one daemon
+            // answering for another's endpoint.
+            format!("hrc-{}-{}", directory_tag(runtime_dir), interface.name())
         };
 
         #[cfg(not(windows))]
@@ -92,16 +99,25 @@ impl Endpoint {
 }
 
 #[cfg(windows)]
-/// A per-user tag for Windows pipe names.
+/// A short, stable tag derived from the runtime directory.
 ///
-/// Two users on one machine must not collide on a pipe name, and a name that
-/// collided would be a name the first user's daemon already owns.
-fn session_tag() -> String {
-    std::env::var("USERNAME")
-        .or_else(|_| std::env::var("USER"))
-        .unwrap_or_else(|_| "default".to_owned())
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
+/// Hashed rather than embedded, because a pipe name has a length limit and a
+/// path does not, and because a path contains characters a pipe name may not.
+fn directory_tag(runtime_dir: &Path) -> String {
+    use sha2::{Digest as _, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(runtime_dir.to_string_lossy().as_bytes());
+    hex_prefix(&hasher.finalize())
+}
+
+#[cfg(windows)]
+/// The first four bytes of a digest, as hex.
+fn hex_prefix(digest: &[u8]) -> String {
+    digest
+        .iter()
+        .take(4)
+        .map(|byte| format!("{byte:02x}"))
         .collect()
 }
 
@@ -183,6 +199,35 @@ mod tests {
 
         let mode = std::fs::metadata(&runtime).unwrap().permissions().mode();
         assert_eq!(mode & 0o077, 0, "group and other access survived");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn two_runtime_directories_get_distinct_pipe_names() {
+        // Pipe names are machine-global. Two installations sharing one would
+        // mean one daemon answering for the other's endpoint.
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+
+        assert_ne!(
+            Endpoint::new(first.path(), Interface::AgentSafe)
+                .unwrap()
+                .name(),
+            Endpoint::new(second.path(), Interface::AgentSafe)
+                .unwrap()
+                .name()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_pipe_name_is_stable_for_one_runtime_directory() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert_eq!(
+            Endpoint::new(dir.path(), Interface::AgentSafe).unwrap(),
+            Endpoint::new(dir.path(), Interface::AgentSafe).unwrap()
+        );
     }
 
     #[cfg(windows)]

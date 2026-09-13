@@ -65,11 +65,6 @@ async fn start(endpoint: &Endpoint) -> tokio::task::JoinHandle<()> {
     handle
 }
 
-#[cfg(windows)]
-fn windows_only_fixture(interface: Interface) -> Fixture {
-    Fixture::new(interface)
-}
-
 #[tokio::test]
 async fn a_request_and_its_answer_cross_the_local_transport() {
     let fixture = Fixture::new(Interface::AgentSafe);
@@ -237,20 +232,49 @@ async fn the_two_interfaces_are_separate_listeners() {
 }
 
 #[tokio::test]
-async fn an_oversized_frame_does_not_take_the_daemon_down() {
-    // A local process can send anything. The connection that misbehaved is
-    // dropped; every other client keeps working.
+async fn the_client_refuses_to_send_an_oversized_frame() {
+    // Refused locally, so the daemon never sees it and the connection stays
+    // usable: a rejected write leaves nothing in the stream to desynchronize
+    // the next frame.
     let fixture = Fixture::new(Interface::AgentSafe);
     let server = start(&fixture.endpoint).await;
+
+    let mut client = Client::connect_with_retry(&fixture.endpoint, 20, Duration::from_millis(25))
+        .await
+        .unwrap();
 
     let hostile = Request::Echo {
         text: "x".repeat(MAX_FRAME_BYTES + 1),
     };
-    let mut client = Client::connect_with_retry(&fixture.endpoint, 20, Duration::from_millis(25))
-        .await
-        .unwrap();
     let error = client.call::<_, Response>(&hostile).await.unwrap_err();
     assert!(matches!(error, IpcError::FrameTooLarge { .. }));
+
+    let response: Response = client.call(&Request::Status).await.unwrap();
+    assert_eq!(response, Response::Status { pending: 1 });
+
+    client.close().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_frame_the_daemon_cannot_parse_drops_only_that_connection() {
+    // A local process can send anything. The daemon has no way to find where
+    // the next frame starts after a body it could not parse, so it drops
+    // that connection — and only that one.
+    let fixture = Fixture::new(Interface::AgentSafe);
+    let server = start(&fixture.endpoint).await;
+
+    let mut hostile = Client::connect_with_retry(&fixture.endpoint, 20, Duration::from_millis(25))
+        .await
+        .unwrap();
+    let error = hostile
+        .call::<_, Response>(&serde_json::json!({ "method": "not_a_method" }))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, IpcError::Disconnected | IpcError::Io(_)),
+        "unexpected error: {error}"
+    );
 
     let mut recovered =
         Client::connect_with_retry(&fixture.endpoint, 20, Duration::from_millis(25))
@@ -289,7 +313,7 @@ async fn the_socket_and_its_directory_are_owner_only() {
 #[cfg(windows)]
 #[tokio::test]
 async fn a_named_pipe_endpoint_serves_requests() {
-    let fixture = windows_only_fixture(Interface::TrustedHuman);
+    let fixture = Fixture::new(Interface::TrustedHuman);
     let server = start(&fixture.endpoint).await;
 
     let mut client = Client::connect_with_retry(&fixture.endpoint, 20, Duration::from_millis(25))
