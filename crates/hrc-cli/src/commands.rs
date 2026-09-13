@@ -2178,6 +2178,13 @@ fn sync_git_channel(
     channel: &hrc_storage::ChannelRecord,
     now: &str,
 ) -> Result<Value> {
+    if let Some(reason) = &channel.halted_reason {
+        return Err(hrc_core::CoreError::SynchronizationHalted {
+            reason: reason.clone(),
+        }
+        .into());
+    }
+
     if channel.transport_kind != "git" {
         return Err(CliError::Io {
             action: "open the configured transport",
@@ -2202,6 +2209,20 @@ fn sync_git_channel(
         transport.open_group(),
         Err(hrc_transport::TransportError::NoSuchGroup)
     );
+
+    if remote_head.is_none() {
+        let error = hrc_core::CoreError::Transport(
+            "the remote channel branch disappeared after registration".into(),
+        );
+        return Err(hrc_core::sync::halt_synchronization(
+            database,
+            &channel.channel_id,
+            error,
+            now,
+        )
+        .into());
+    }
+
     let remote_changed = remote_head != channel.sync_cursor;
     let recovered = database.recover_reservations(&channel.channel_id, now)?;
 
@@ -2210,7 +2231,9 @@ fn sync_git_channel(
     }
 
     let received = if remote_changed || local_missing {
-        receive_for(paths, channel, now)?
+        receive_for(paths, channel, now).map_err(|error| {
+            halt_if_received_history_is_invalid(database, &channel.channel_id, error, now)
+        })?
     } else {
         Vec::new()
     };
@@ -2272,6 +2295,21 @@ fn sync_git_channel(
         "receivedMessages": received,
         "cursor": fetch.and_then(|outcome| outcome.cursor),
     }))
+}
+
+fn halt_if_received_history_is_invalid(
+    database: &Database,
+    channel_id: &str,
+    error: CliError,
+    now: &str,
+) -> CliError {
+    match error {
+        CliError::Core(_) | CliError::Protocol(_) | CliError::Transport(_) => {
+            let error = hrc_core::CoreError::Transport(error.to_string());
+            hrc_core::sync::halt_synchronization(database, channel_id, error, now).into()
+        }
+        other => other,
+    }
 }
 
 fn outgoing_message_object(
