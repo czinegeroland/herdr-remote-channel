@@ -53,6 +53,25 @@ pub enum CliError {
     /// Local IPC failed.
     #[error(transparent)]
     Ipc(#[from] hrc_ipc::IpcError),
+
+    /// A protocol object could not be built or validated.
+    #[error(transparent)]
+    Protocol(#[from] hrc_protocol::ProtocolError),
+
+    /// The transport refused an operation.
+    #[error(transparent)]
+    Transport(#[from] hrc_transport::TransportError),
+
+    /// This installation already has local state for that channel.
+    #[error("channel {channel_id} already exists locally")]
+    ChannelExists {
+        /// The channel already registered.
+        channel_id: String,
+    },
+
+    /// The operating system would not supply randomness.
+    #[error("could not obtain randomness from the operating system")]
+    Entropy,
 }
 
 impl CliError {
@@ -68,6 +87,10 @@ impl CliError {
             CliError::Core(_) => "core_error",
             CliError::Git(_) => "git_error",
             CliError::Ipc(_) => "ipc_error",
+            CliError::Protocol(_) => "protocol_error",
+            CliError::Transport(_) => "transport_error",
+            CliError::ChannelExists { .. } => "channel_exists",
+            CliError::Entropy => "entropy_unavailable",
         }
     }
 
@@ -77,15 +100,19 @@ impl CliError {
             // A missing passphrase or an uninitialized installation is the
             // user's command being wrong for the current state, not a
             // runtime fault.
-            CliError::NoStateDirectory | CliError::NoPassphrase | CliError::AlreadyInitialized => {
-                exit::USAGE
-            }
+            CliError::NoStateDirectory
+            | CliError::NoPassphrase
+            | CliError::AlreadyInitialized
+            | CliError::ChannelExists { .. } => exit::USAGE,
             CliError::Io { .. }
             | CliError::Storage(_)
             | CliError::Crypto(_)
             | CliError::Core(_)
             | CliError::Git(_)
-            | CliError::Ipc(_) => exit::FAILURE,
+            | CliError::Ipc(_)
+            | CliError::Protocol(_)
+            | CliError::Transport(_)
+            | CliError::Entropy => exit::FAILURE,
         }
     }
 }

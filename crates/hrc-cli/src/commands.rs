@@ -7,13 +7,19 @@
 
 use std::time::Duration;
 
+use hrc_core::Roster;
 use hrc_core::rpc::{AgentRequest, Broker, ChannelStatus, Request, TrustedRequest, dispatch_agent};
 use hrc_core::sync::{PollActivity, poll_interval};
-use hrc_crypto::{DeviceSecrets, KeyStore, PassphraseStore};
+use hrc_crypto::{DeviceSecrets, KeyStore, PassphraseStore, PrincipalSecrets};
 use hrc_ipc::endpoint::{Endpoint, Interface, prepare_runtime_dir};
 use hrc_ipc::serve;
+use hrc_protocol::canonical;
+use hrc_protocol::control::{GenesisPayload, PrincipalMaterial, TransportLocator};
+use hrc_protocol::domain;
+use hrc_protocol::identity::{DeviceCertificatePayload, DeviceDescriptor};
+use hrc_protocol::signed::Signer;
 use hrc_storage::Database;
-use hrc_transport::{ObjectClass, Transport};
+use hrc_transport::{ObjectClass, PublishObject, Transport};
 use hrc_transport_git::GitTransport;
 use secrecy::SecretString;
 use serde_json::{Value, json};
@@ -31,6 +37,13 @@ pub const PASSPHRASE_VARIABLE: &str = "HRC_PASSPHRASE";
 
 /// The name this installation's device keys are stored under.
 const DEVICE_KEY_NAME: &str = "device";
+
+/// The name this installation's principal key is stored under.
+///
+/// Separate from the device key because they answer for different things: a
+/// device key signs messages from one machine, while a principal key vouches
+/// for which devices belong to the person (PRD requirement HRC-CH-006).
+const PRINCIPAL_KEY_NAME: &str = "principal";
 
 /// Everything a command needs from its environment.
 ///
@@ -78,6 +91,12 @@ pub fn init(context: &Context) -> Result<Value> {
     }
 
     let secrets = DeviceSecrets::generate()?;
+    let principal = PrincipalSecrets::generate()?;
+
+    // Both keys or neither. An installation with a device key and no
+    // principal key could sign messages but could not prove the device was
+    // its own, which is a state nothing else knows how to recover from.
+    store.save(PRINCIPAL_KEY_NAME, &principal)?;
     store.save(DEVICE_KEY_NAME, &secrets)?;
 
     // Creating the database after the keys means a half-finished init leaves
@@ -87,15 +106,139 @@ pub fn init(context: &Context) -> Result<Value> {
     Ok(json!({
         "status": "ok",
         "home": paths.home().display().to_string(),
+        "principalKey": principal.signing_key().verifying_key().to_base64url(),
         "signingKey": secrets.signing_key().verifying_key().to_base64url(),
         "encryptionRecipient": secrets.device_identity()?.recipient().to_string(),
     }))
 }
 
+/// `hrc create`: create a channel and publish its genesis object.
+///
+/// Genesis is the channel's identity: the channel ID is the hash of the
+/// genesis payload, so everything below has to be settled before the channel
+/// exists at all. The order matters — the device certificate is signed by the
+/// principal key, genesis carries that certificate and is signed by the
+/// device key, and only then is the channel ID derivable.
+///
+/// Publication comes before the local record. A channel registered locally
+/// but never published would be one this installation believes in and nobody
+/// else can see.
+pub fn create(context: &Context, repo: &str, local_name: Option<&str>) -> Result<Value> {
+    let paths = &context.paths;
+    paths.ensure()?;
+
+    let store = context.key_store()?;
+    let principal: PrincipalSecrets = store.load(PRINCIPAL_KEY_NAME)?;
+    let device: DeviceSecrets = store.load::<DeviceSecrets>(DEVICE_KEY_NAME)?;
+
+    let database = Database::open(paths.database())?;
+    let now = database.utc_now()?;
+
+    let principal_key = principal.signing_key();
+    let principal_id = principal_key.verifying_key().to_base64url();
+    let device_key = device.signing_key();
+
+    let descriptor = DeviceDescriptor {
+        version: hrc_protocol::PROTOCOL_VERSION,
+        principal_id: principal_id.clone(),
+        encryption_recipient: device.device_identity()?.recipient().to_string(),
+        signing_key: device_key.verifying_key().to_base64url(),
+        created_at: now.clone(),
+        expires_at: None,
+        nonce: canonical::encode_base64url(&random_nonce()?),
+    };
+
+    let certificate_payload = DeviceCertificatePayload::new(descriptor)?;
+    let device_id = certificate_payload.device_id.clone();
+    let signer = Signer {
+        principal_id: principal_id.clone(),
+        device_id: device_id.clone(),
+    };
+
+    let certificate = principal_key.sign_object(
+        domain::DEVICE_CERTIFICATE,
+        signer.clone(),
+        certificate_payload,
+    )?;
+
+    let genesis_payload = GenesisPayload {
+        version: hrc_protocol::PROTOCOL_VERSION,
+        created_at: now.clone(),
+        initial_admin: PrincipalMaterial {
+            principal_id: principal_id.clone(),
+            principal_signing_key: principal_id.clone(),
+            devices: vec![certificate],
+        },
+        transport: TransportLocator {
+            kind: "git".into(),
+            locator: repo.to_owned(),
+        },
+        policy: serde_json::json!({}),
+    };
+
+    let channel_id = genesis_payload.channel_id()?;
+    let genesis = device_key.sign_object(domain::GENESIS, signer, genesis_payload)?;
+
+    // Verifying our own genesis before publishing it. A channel whose
+    // identity object does not validate would be unusable by everyone
+    // including its creator, and the cost of finding out now is nothing.
+    Roster::from_genesis(&genesis)?;
+
+    if database.channel(&channel_id)?.is_some() {
+        return Err(CliError::ChannelExists {
+            channel_id: channel_id.clone(),
+        });
+    }
+
+    let mut transport = GitTransport::open(paths.channel_transport(&channel_id), repo)?;
+    transport.create_group(vec![
+        PublishObject {
+            name: "protocol.json".into(),
+            class: ObjectClass::Protocol,
+            bytes: canonical::to_canonical_bytes(&serde_json::json!({
+                "version": hrc_protocol::PROTOCOL_VERSION,
+            }))?,
+        },
+        PublishObject {
+            name: format!("control/log/00000000-{}.json", &channel_id[..16]),
+            class: ObjectClass::Control,
+            bytes: canonical::to_canonical_bytes(&genesis)?,
+        },
+    ])?;
+
+    database.insert_channel(&channel_id, "git", repo, local_name.unwrap_or(repo), &now)?;
+    database.append_audit(
+        Some(&channel_id),
+        None,
+        "create_channel",
+        Some(&channel_id),
+        Some(repo),
+        &now,
+    )?;
+
+    Ok(json!({
+        "status": "ok",
+        "channelId": channel_id,
+        "repo": repo,
+        "principalId": principal_id,
+        "deviceId": device_id,
+    }))
+}
+
+/// A fresh descriptor nonce.
+///
+/// Two devices created in the same second with the same keys would otherwise
+/// share a descriptor, and therefore a device ID (PRD section 18.0.1).
+fn random_nonce() -> Result<[u8; 16]> {
+    let mut nonce = [0u8; 16];
+    getrandom::fill(&mut nonce).map_err(|_| CliError::Entropy)?;
+    Ok(nonce)
+}
+
 /// `hrc whoami`: report this device's public identity.
 pub fn whoami(context: &Context) -> Result<Value> {
     let store = context.key_store()?;
-    let secrets = store.load(DEVICE_KEY_NAME)?;
+    let secrets = store.load::<DeviceSecrets>(DEVICE_KEY_NAME)?;
 
     Ok(json!({
         "status": "ok",
@@ -462,7 +605,7 @@ impl DaemonBroker {
             .collect();
 
         let store = context.key_store()?;
-        let secrets = store.load(DEVICE_KEY_NAME)?;
+        let secrets = store.load::<DeviceSecrets>(DEVICE_KEY_NAME)?;
         let principal_id = secrets.signing_key().verifying_key().to_base64url();
         let device_id = secrets.device_identity()?.recipient().to_string();
 

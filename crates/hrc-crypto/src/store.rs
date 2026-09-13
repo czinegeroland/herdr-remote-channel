@@ -76,8 +76,9 @@ impl DeviceSecrets {
     pub fn device_identity(&self) -> Result<DeviceIdentity> {
         DeviceIdentity::from_secret_string(self.encryption_identity.expose_secret())
     }
+}
 
-    /// Serializes to the bytes that get encrypted at rest.
+impl ProtectedSecret for DeviceSecrets {
     fn to_protected_bytes(&self) -> Zeroizing<Vec<u8>> {
         let document = serde_json::json!({
             "version": 1,
@@ -88,7 +89,6 @@ impl DeviceSecrets {
         Zeroizing::new(document.to_string().into_bytes())
     }
 
-    /// Parses the bytes recovered from an encrypted store.
     fn from_protected_bytes(bytes: &[u8]) -> Result<Self> {
         let document: serde_json::Value =
             serde_json::from_slice(bytes).map_err(|_| CryptoError::CorruptKeyStore)?;
@@ -121,6 +121,93 @@ impl DeviceSecrets {
     }
 }
 
+/// A principal's long-term signing identity.
+///
+/// A principal signs device certificates and join requests. It has no
+/// encryption identity, because nothing is ever addressed to a principal —
+/// messages go to devices. Keeping the types separate means a principal key
+/// cannot be handed to something expecting a device, and no unused age
+/// identity is generated and stored for it.
+pub struct PrincipalSecrets {
+    signing_seed: Zeroizing<[u8; SEED_LEN]>,
+}
+
+impl std::fmt::Debug for PrincipalSecrets {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PrincipalSecrets(<redacted>)")
+    }
+}
+
+impl PrincipalSecrets {
+    /// Generates a fresh principal key from operating-system entropy.
+    pub fn generate() -> Result<Self> {
+        let mut seed = Zeroizing::new([0u8; SEED_LEN]);
+        getrandom::fill(seed.as_mut()).map_err(CryptoError::Entropy)?;
+
+        Ok(Self { signing_seed: seed })
+    }
+
+    /// The Ed25519 signing key.
+    pub fn signing_key(&self) -> SigningKey {
+        SigningKey::from_seed(&self.signing_seed)
+    }
+}
+
+/// Something that can be protected at rest by a key store.
+///
+/// The store encrypts bytes; what those bytes mean is the secret's business.
+/// Splitting it this way means device and principal keys share one
+/// encrypted-at-rest code path rather than each growing their own.
+pub trait ProtectedSecret: Sized {
+    /// Serializes to the bytes that get encrypted.
+    fn to_protected_bytes(&self) -> Zeroizing<Vec<u8>>;
+
+    /// Parses the bytes recovered from a store.
+    fn from_protected_bytes(bytes: &[u8]) -> Result<Self>;
+}
+
+impl ProtectedSecret for PrincipalSecrets {
+    fn to_protected_bytes(&self) -> Zeroizing<Vec<u8>> {
+        let document = serde_json::json!({
+            "version": 1,
+            "kind": "principal",
+            "signingSeed": crate::encode_seed(self.signing_seed.as_slice()),
+        });
+
+        Zeroizing::new(document.to_string().into_bytes())
+    }
+
+    fn from_protected_bytes(bytes: &[u8]) -> Result<Self> {
+        let document: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|_| CryptoError::CorruptKeyStore)?;
+
+        if document.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
+            return Err(CryptoError::CorruptKeyStore);
+        }
+
+        // A device document parsed as a principal would silently discard the
+        // encryption identity, leaving a key that decrypts nothing.
+        if document.get("kind").and_then(serde_json::Value::as_str) != Some("principal") {
+            return Err(CryptoError::CorruptKeyStore);
+        }
+
+        let seed = document
+            .get("signingSeed")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(CryptoError::CorruptKeyStore)?;
+        let seed = hrc_protocol::canonical::decode_base64url("signingSeed", seed)
+            .map_err(|_| CryptoError::CorruptKeyStore)?;
+        let seed: [u8; SEED_LEN] = seed
+            .as_slice()
+            .try_into()
+            .map_err(|_| CryptoError::CorruptKeyStore)?;
+
+        Ok(Self {
+            signing_seed: Zeroizing::new(seed),
+        })
+    }
+}
+
 /// Somewhere device keys can be kept.
 ///
 /// Implementations must protect the key at rest or fail. Returning success
@@ -128,10 +215,10 @@ impl DeviceSecrets {
 /// this trait.
 pub trait KeyStore {
     /// Persists `secrets` under `name`, replacing anything already there.
-    fn save(&self, name: &str, secrets: &DeviceSecrets) -> Result<()>;
+    fn save<S: ProtectedSecret>(&self, name: &str, secrets: &S) -> Result<()>;
 
     /// Loads the secrets stored under `name`.
-    fn load(&self, name: &str) -> Result<DeviceSecrets>;
+    fn load<S: ProtectedSecret>(&self, name: &str) -> Result<S>;
 
     /// Removes the secrets stored under `name`, if any.
     fn delete(&self, name: &str) -> Result<()>;
@@ -201,7 +288,7 @@ impl PassphraseStore {
 }
 
 impl KeyStore for PassphraseStore {
-    fn save(&self, name: &str, secrets: &DeviceSecrets) -> Result<()> {
+    fn save<S: ProtectedSecret>(&self, name: &str, secrets: &S) -> Result<()> {
         let path = self.path_for(name)?;
         let plaintext = secrets.to_protected_bytes();
 
@@ -220,7 +307,7 @@ impl KeyStore for PassphraseStore {
         Ok(())
     }
 
-    fn load(&self, name: &str) -> Result<DeviceSecrets> {
+    fn load<S: ProtectedSecret>(&self, name: &str) -> Result<S> {
         let path = self.path_for(name)?;
 
         let ciphertext = std::fs::read(&path).map_err(|source| match source.kind() {
@@ -240,7 +327,7 @@ impl KeyStore for PassphraseStore {
         )
         .map_err(|_| CryptoError::KeyStoreUnreadable)?;
 
-        DeviceSecrets::from_protected_bytes(&plaintext)
+        S::from_protected_bytes(&plaintext)
     }
 
     fn delete(&self, name: &str) -> Result<()> {
@@ -309,7 +396,7 @@ mod tests {
         let recipient = secrets.device_identity().unwrap().recipient().to_string();
 
         store.save("device-1", &secrets).unwrap();
-        let loaded = store.load("device-1").unwrap();
+        let loaded = store.load::<DeviceSecrets>("device-1").unwrap();
 
         assert_eq!(loaded.signing_key().verifying_key().to_base64url(), public);
         assert_eq!(
@@ -327,7 +414,7 @@ mod tests {
 
         let secrets = DeviceSecrets::generate().unwrap();
         store.save("device-1", &secrets).unwrap();
-        let loaded = store.load("device-1").unwrap();
+        let loaded = store.load::<DeviceSecrets>("device-1").unwrap();
 
         let payload = serde_json::json!({ "kind": "note" });
         let signature = loaded
@@ -397,7 +484,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            attacker.load("device-1").unwrap_err(),
+            attacker.load::<DeviceSecrets>("device-1").unwrap_err(),
             CryptoError::KeyStoreUnreadable
         ));
     }
@@ -417,7 +504,7 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
 
         assert!(matches!(
-            store.load("device-1").unwrap_err(),
+            store.load::<DeviceSecrets>("device-1").unwrap_err(),
             CryptoError::KeyStoreUnreadable
         ));
     }
@@ -444,7 +531,7 @@ mod tests {
         let store = store(&directory);
 
         assert!(matches!(
-            store.load("device-1").unwrap_err(),
+            store.load::<DeviceSecrets>("device-1").unwrap_err(),
             CryptoError::NoStoredKey { .. }
         ));
         assert!(!store.contains("device-1").unwrap());
@@ -501,7 +588,7 @@ mod tests {
         std::fs::write(directory.path().join("keys/device-1.age"), ciphertext).unwrap();
 
         assert!(matches!(
-            store.load("device-1").unwrap_err(),
+            store.load::<DeviceSecrets>("device-1").unwrap_err(),
             CryptoError::CorruptKeyStore
         ));
     }

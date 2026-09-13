@@ -17,7 +17,7 @@ pub mod store;
 
 pub use encryption::{DeviceIdentity, DeviceRecipient, encrypt_to};
 pub use enrollment::{Invite, SafetyPhrase, invite_proof, safety_phrase, verify_invite_proof};
-pub use store::{DeviceSecrets, KeyStore, PassphraseStore};
+pub use store::{DeviceSecrets, KeyStore, PassphraseStore, PrincipalSecrets, ProtectedSecret};
 
 use ed25519_dalek::{Signer as _, Verifier as _};
 use hrc_protocol::canonical;

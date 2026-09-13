@@ -1245,6 +1245,7 @@ version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "clap",
+ "getrandom 0.4.3",
  "hrc-core",
  "hrc-crypto",
  "hrc-ipc",

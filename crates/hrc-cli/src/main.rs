@@ -157,6 +157,11 @@ fn run(cli: &Cli, _path: &str) -> std::result::Result<Value, Failure> {
         Command::Audit(args) => {
             commands::audit(&context, args.since.as_deref()).map_err(Failure::from)
         }
+        Command::Create(args) => {
+            // Public creation is refused earlier, on the section 22.7
+            // boundary, so anything reaching here is a private channel.
+            commands::create(&context, &args.repo, None).map_err(Failure::from)
+        }
         Command::Sync(args) if args.once => commands::sync_once(&context).map_err(Failure::from),
 
         other => match dispatch::classify(other) {
