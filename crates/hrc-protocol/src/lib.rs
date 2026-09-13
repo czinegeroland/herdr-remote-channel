@@ -7,11 +7,13 @@
 //! See PRD sections 18.0 and 18.2.
 
 pub mod canonical;
+pub mod control;
 pub mod error;
 pub mod identity;
 pub mod recipients;
 pub mod signed;
 
+pub use control::{ControlEntryPayload, ControlOperation, GenesisPayload};
 pub use error::{ProtocolError, Result};
 pub use identity::{DeviceCertificatePayload, DeviceDescriptor};
 pub use recipients::RecipientDevices;

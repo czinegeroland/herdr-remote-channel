@@ -50,6 +50,13 @@ pub enum ProtocolError {
         expected: u32,
     },
 
+    /// A control entry claimed a sequence number it may not use.
+    #[error("control sequence {sequence} is not valid for a control entry")]
+    InvalidControlSequence {
+        /// The rejected sequence number.
+        sequence: u64,
+    },
+
     /// A message addressed nobody.
     ///
     /// An empty recipient set would produce ciphertext no one can read while
