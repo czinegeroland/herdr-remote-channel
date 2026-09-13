@@ -12,8 +12,10 @@
 //!   has no accessor for its bytes and its `Debug` output is a placeholder.
 
 pub mod encryption;
+pub mod store;
 
 pub use encryption::{DeviceIdentity, DeviceRecipient, encrypt_to};
+pub use store::{DeviceSecrets, KeyStore, PassphraseStore};
 
 use ed25519_dalek::{Signer as _, Verifier as _};
 use hrc_protocol::canonical;
@@ -89,6 +91,49 @@ pub enum CryptoError {
     PlaintextTooLarge {
         /// The configured limit.
         limit: usize,
+    },
+
+    /// A key store passphrase was empty.
+    #[error("refusing to protect a key with an empty passphrase")]
+    EmptyPassphrase,
+
+    /// A key store name was not usable as a file name.
+    #[error("`{name}` is not a valid key name")]
+    InvalidKeyName {
+        /// The rejected name.
+        name: String,
+    },
+
+    /// No key is stored under that name.
+    ///
+    /// Distinct from [`CryptoError::KeyStoreUnreadable`]: "not enrolled yet"
+    /// and "cannot read your keys" call for very different responses.
+    #[error("no key is stored under `{name}`")]
+    NoStoredKey {
+        /// The name that was looked up.
+        name: String,
+    },
+
+    /// The stored key could not be decrypted.
+    ///
+    /// A wrong passphrase and a tampered file are deliberately the same
+    /// error: distinguishing them would tell an attacker which of the two
+    /// they achieved.
+    #[error("the stored key could not be decrypted; the passphrase may be wrong")]
+    KeyStoreUnreadable,
+
+    /// The decrypted key document was malformed.
+    #[error("the stored key document is corrupt")]
+    CorruptKeyStore,
+
+    /// A key store file operation failed.
+    #[error("could not {action}: {source}")]
+    KeyStoreIo {
+        /// What was being attempted.
+        action: &'static str,
+        /// The underlying failure.
+        #[source]
+        source: std::io::Error,
     },
 
     /// The payload could not be canonicalized.
@@ -168,6 +213,11 @@ impl SigningKey {
             signature,
         })
     }
+}
+
+/// Encodes a seed for storage inside an already-encrypted document.
+pub(crate) fn encode_seed(seed: &[u8]) -> String {
+    canonical::encode_base64url(seed)
 }
 
 /// An Ed25519 public key.

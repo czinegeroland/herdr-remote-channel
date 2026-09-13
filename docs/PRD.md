@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-13T07:22:00+02:00 |
+| Last updated | 2026-09-13T07:58:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -505,7 +505,7 @@ The Herdr plugin must expose:
 | HRC-CH-003 | Support private repositories by default. | Must | Approved | Pending |
 | HRC-CH-004 | Support public repositories after explicit risk confirmation. | Should | Approved | Pending |
 | HRC-CH-005 | Create expiring, single-use invites. | Must | Approved | Pending |
-| HRC-CH-006 | Generate separate principal and device identities. | Must | Approved | Pending |
+| HRC-CH-006 | Generate separate principal and device identities. | Must | In progress | `crates/hrc-crypto/src/store.rs` generates and persists device keys; principal key handling and the enrollment flow are pending |
 | HRC-CH-007 | Require explicit administrator approval for joins. | Must | Approved | Pending |
 | HRC-CH-008 | Support member and device revocation. | Should | In progress | `crates/hrc-core/src/roster.rs`; publication and CLI surface pending |
 | HRC-CH-009 | Maintain a signed, append-only membership/control log. | Must | Implemented | `crates/hrc-protocol/src/control.rs`, `crates/hrc-core/src/roster.rs` |
@@ -803,6 +803,19 @@ Private keys MUST:
 - Remain on the generating device.
 - Be stored through the operating-system keychain where available.
 - Never be committed, printed, placed in JSON output, or transmitted.
+
+Where no platform credential store is available, the implementation MUST NOT
+fall back to unprotected storage. It either protects the key by another
+approved means or refuses to store it, and it tells the user which happened.
+Silently writing an unprotected key is the worst available outcome: the
+security property stays documented, users believe they have it, and nothing
+signals that they do not.
+
+The approved alternative is a key file encrypted with a user passphrase using
+an established construction. HRC uses age's scrypt recipient, so the
+key-derivation and cipher choices come from the same audited implementation
+as message encryption rather than from this project. An empty passphrase is
+refused. See decision DEC-031, which closes open question OQ-001.
 
 ### 14.2 Cryptographic primitives
 
@@ -1945,7 +1958,7 @@ npx skills add <owner>/herdr-remote-channel `
 
 | ID | Requirement | Status | Evidence |
 |---|---|---|---|
-| HRC-SEC-001 | Private keys never leave their device. | Approved | Pending |
+| HRC-SEC-001 | Private keys never leave their device. | In progress | `crates/hrc-crypto/src/store.rs` protects keys at rest with a passphrase and refuses to store them unprotected; the OS keychain backend is not implemented |
 | HRC-SEC-002 | Messages are encrypted to explicit active recipient devices. | Implemented | `crates/hrc-core/src/message.rs` selects recipients from the roster's active device set |
 | HRC-SEC-003 | Every message is authenticated by a valid sender-device signature. | Implemented | `crates/hrc-core/src/message.rs`: the signer is resolved from the roster and the signature verified before any field is trusted |
 | HRC-SEC-004 | Roster changes are signed and hash chained. | Implemented | `crates/hrc-core/src/roster.rs`; chain, sequence, epoch, and authority all enforced on apply |
@@ -2281,7 +2294,7 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 | HRC-TR-007 | M2 | `AC-ADAPTER-CONFORMANCE`: the in-memory reference adapter and Git adapter both pass the publication-revision, ordering, conflict, durability, and opaque-object conformance suite. | Both adapters pass all fifteen checks (`crates/hrc-transport/tests/reference_adapter.rs`, `crates/hrc-transport-git/tests/git_adapter.rs`), and a deliberately broken adapter is proven to fail the suite. Verified on Linux, macOS, and Windows CI. |
 | HRC-SKILL-001 through HRC-SKILL-007 | M3 | `AC-SKILL`: an agent guides setup and drafts communication while tests prove it cannot retrieve private keys/invite secrets, approve joins, or bypass the prompt gate. | Pending |
 | HRC-SKILL-008 | M4 | `AC-SKILL-CONTEXT`: an agent can draft supported context packages while preview and send remain human-controlled. | Pending |
-| HRC-SEC-001 through HRC-SEC-005, HRC-SEC-013, HRC-SEC-015, HRC-SEC-016 | M1 | `AC-KEYS-AND-ROSTER`: key isolation, signed recipient intent, signature validation, control-chain validation, control-only publication ordering, revocation, and stale-epoch rejection pass adversarial tests. | Partial: `crates/hrc-core/src/message/tests.rs` and `crates/hrc-core/src/roster/tests.rs` cover forged signatures, unknown signing devices, foreign channels, stale epochs, a revoked device's message reintroduced after revocation, and a recipient set that disagrees with the roster. Remaining: key isolation once keys are persisted. |
+| HRC-SEC-001 through HRC-SEC-005, HRC-SEC-013, HRC-SEC-015, HRC-SEC-016 | M1 | `AC-KEYS-AND-ROSTER`: key isolation, signed recipient intent, signature validation, control-chain validation, control-only publication ordering, revocation, and stale-epoch rejection pass adversarial tests. | Partial: `crates/hrc-core/src/message/tests.rs` and `crates/hrc-core/src/roster/tests.rs` cover forged signatures, unknown signing devices, foreign channels, stale epochs, a revoked device's message reintroduced after revocation, and a recipient set that disagrees with the roster; `crates/hrc-crypto/src/store.rs` proves the stored key file contains no plaintext secret and that a wrong passphrase, a tampered file, and a corrupt document all fail closed. Remaining: the OS keychain backend. |
 | HRC-SEC-006 through HRC-SEC-008 | M4 | `AC-CONTENT-SECURITY`: ciphertext/decompression limits, secret scanning, and preview reject malicious fixtures. | Pending |
 | HRC-SEC-009 | M3 | `AC-QUARANTINE`: every inbound body is quarantined and framed as untrusted before any approved disclosure. | Pending |
 | HRC-SEC-010, HRC-SEC-014 | M3 | `AC-HUMAN-AUTH`: agent-safe and non-interactive callers cannot read pending bodies, authorize actions, or reuse an authorization. | Pending |
@@ -2309,7 +2322,7 @@ Every implementation PR must update this table.
 | Milestone | Completion | Current state | Last PR | Evidence / next step |
 |---|---:|---|---|---|
 | M0 Product and protocol | 55% | Adds an executable adapter contract, capability declaration, and error model to the written specification | Transport contract and reference adapter | Obtain product-owner approval and complete the JSON-RPC adapter binding |
-| M1 Secure foundation | 75% | Messages seal and open end to end against a real roster, with recipient commitment, revocation ordering, and expiry enforced | Message envelope and validation pipeline | Persist principal and device keys through the OS keychain, then wire channel creation and enrollment into the CLI |
+| M1 Secure foundation | 85% | Adds protected key storage at rest, closing OQ-001 with a no-silent-downgrade rule | Passphrase key store | Integrate an OS keychain backend behind the same trait, then wire channel creation and enrollment into the CLI |
 | M2 Git messaging | 70% | Adds the synchronization engine: cursor-resuming fetch, conflict-retrying publish, backoff policy, and fail-closed halting on observed tampering | Synchronization engine | Wire the resident daemon and the CLI, then receipts, threading, and deduplication |
 | M3 Herdr integration | 0% | Not started | N/A | Verify Herdr long-lived plugin process capabilities |
 | M4 Context/delegation | 0% | Not started | N/A | Finalize context package schema |
@@ -2398,6 +2411,8 @@ recorded either directly in this PRD or in a stable linked artifact.
 | DEC-016 | RFC 8785 canonical JSON uses a pinned Rust implementation, initially `serde_jcs`, guarded by protocol vectors. | Accepted | Avoids custom canonicalization while making signed bytes interoperable. |
 | DEC-017 | Build and test run in a separate `pull_request` workflow rather than being added to the `pull_request_target` traceability workflow. | Accepted | Compiling and running pull-request code under `pull_request_target` would hand a write-capable, secret-bearing context to untrusted code; the two triggers stay separated. |
 | DEC-018 | The CLI publishes a fixed numeric exit-code contract: 0 success, 1 runtime failure, 2 usage, 3 unimplemented, 4 authorization required. | Accepted | PRD section 11.1 requires documented exit codes, and the Herdr plugin and skill must branch on stable numbers rather than parsing prose. |
+| DEC-031 | When no OS keychain is available, HRC stores keys in a passphrase-encrypted file using age's scrypt recipient, and never falls back to unprotected storage. | Accepted | Closes OQ-001. A silent downgrade would leave the documented security property believed but absent. The passphrase store works on headless hosts and in CI, and introduces no new cryptographic primitive. |
+| DEC-032 | A wrong passphrase and a tampered key file report the same error. | Accepted | Distinguishing them would tell an attacker which of the two they achieved, and neither outcome permits a different response from the user. |
 | DEC-029 | Synchronization timing is expressed as pure policy functions; nothing in the core sleeps or reads a clock. | Accepted | Retry, backoff, and poll pacing are the parts most likely to be wrong and the hardest to test against real time. Returning durations for the daemon to wait on makes them ordinary unit tests, and leaves the choice of async runtime to the daemon rather than to the core. |
 | DEC-030 | The core re-verifies the publication parent chain that the adapter already guarantees. | Accepted | The conformance suite proves a conforming adapter chains correctly, but a transport is precisely the component an attacker controls. The check is cheap, and the property it protects — which roster epoch governs a message — is the one everything else rests on. |
 | DEC-028 | The recipient device set is derived from the roster inside the sealing operation, never accepted from the caller. | Accepted | HRC-SEC-016 requires the signed commitment to describe the set the encryption builder actually used. A caller that could pass the list separately could commit to one audience and encrypt to another, which is precisely the divergence the requirement exists to prevent. |
@@ -2417,10 +2432,10 @@ recorded either directly in this PRD or in a stable linked artifact.
 
 Resolved questions move to section 34 as decisions and are removed from this
 table. OQ-002 was closed by decision DEC-019 and the RFC 8785 vector suite.
+OQ-001 was closed by decision DEC-031 and the passphrase key store.
 
 | ID | Question | Owner | Target milestone |
 |---|---|---|---|
-| OQ-001 | Which secure fallback is allowed when the Rust `keyring` crate cannot access a platform credential store? | TBD | M1 |
 | OQ-003 | Does the selected local IPC crate behave consistently for Unix sockets and Windows named pipes under Tokio? | TBD | M1 |
 | OQ-004 | Can a Herdr plugin host a long-running process, or must the daemon be external? | TBD | M0 |
 | OQ-005 | Which GitHub ruleset features are available on supported account plans? | TBD | M1 |
@@ -2430,6 +2445,7 @@ table. OQ-002 was closed by decision DEC-019 and the RFC 8785 vector suite.
 | OQ-009 | Should sent messages be encrypted to all of the sender's devices by default? | TBD | M1 |
 | OQ-010 | What is the first secondary transport used for adapter conformance? | TBD | M5 |
 | OQ-011 | Which harness runs the section 28.4 governance tests, given that the traceability validator is PowerShell and the rest of the suite is Rust? | TBD | M1 |
+| OQ-013 | Which keychain crate and platform backends can be integrated without a runtime service that headless hosts and CI lack? The `keyring` crate's Linux backend requires a D-Bus secret service, which is unavailable in both. | TBD | M1 |
 | OQ-012 | Should release builds pin an exact Rust toolchain version instead of `stable`, so `cargo-dist` artifacts are reproducible? | TBD | M3 |
 
 ---

@@ -146,6 +146,66 @@ pub fn encrypt_to(recipients: &[DeviceRecipient], plaintext: &[u8]) -> Result<Ve
     Ok(ciphertext)
 }
 
+/// Encrypts to arbitrary age recipients.
+///
+/// [`encrypt_to`] is the channel-facing entry point and takes device
+/// recipients only; the key store needs a passphrase recipient, which is the
+/// same age operation with a different recipient type.
+pub(crate) fn encrypt_to_recipients(
+    recipients: &[&dyn age::Recipient],
+    plaintext: &[u8],
+) -> Result<Vec<u8>> {
+    if recipients.is_empty() {
+        return Err(CryptoError::NoRecipients);
+    }
+
+    let encryptor = age::Encryptor::with_recipients(recipients.iter().copied())
+        .map_err(|_| CryptoError::Recipient)?;
+
+    let mut ciphertext = Vec::new();
+    let mut writer = encryptor
+        .wrap_output(&mut ciphertext)
+        .map_err(|_| CryptoError::Ciphertext)?;
+    writer
+        .write_all(plaintext)
+        .map_err(|_| CryptoError::Ciphertext)?;
+    writer.finish().map_err(|_| CryptoError::Ciphertext)?;
+
+    Ok(ciphertext)
+}
+
+/// Decrypts with arbitrary age identities, under the same size limits.
+pub(crate) fn decrypt_with_identities(
+    identities: &[&dyn age::Identity],
+    ciphertext: &[u8],
+) -> Result<Zeroizing<Vec<u8>>> {
+    if ciphertext.len() > MAX_CIPHERTEXT_BYTES {
+        return Err(CryptoError::CiphertextTooLarge {
+            size: ciphertext.len(),
+            limit: MAX_CIPHERTEXT_BYTES,
+        });
+    }
+
+    let decryptor = age::Decryptor::new(ciphertext).map_err(|_| CryptoError::Ciphertext)?;
+    let reader = decryptor
+        .decrypt(identities.iter().copied())
+        .map_err(|_| CryptoError::NotARecipient)?;
+
+    let mut plaintext = Zeroizing::new(Vec::new());
+    reader
+        .take(MAX_PLAINTEXT_BYTES as u64 + 1)
+        .read_to_end(&mut plaintext)
+        .map_err(|_| CryptoError::Ciphertext)?;
+
+    if plaintext.len() > MAX_PLAINTEXT_BYTES {
+        return Err(CryptoError::PlaintextTooLarge {
+            limit: MAX_PLAINTEXT_BYTES,
+        });
+    }
+
+    Ok(plaintext)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

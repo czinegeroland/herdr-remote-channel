@@ -14,12 +14,13 @@ hrc-protocol = { workspace = true }
 getrandom = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
 hex = { workspace = true }
-serde_json = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true
