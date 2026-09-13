@@ -46,6 +46,17 @@ pub struct OutgoingReservation {
     pub roster_epoch: u64,
 }
 
+/// One queued outbox entry ready for publication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingOutgoing {
+    /// Sortable message identifier.
+    pub message_id: String,
+    /// RFC 3339 UTC creation time used for the message object path.
+    pub created_at: String,
+    /// Stored ciphertext bytes.
+    pub ciphertext: Vec<u8>,
+}
+
 /// State of an outbox record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutboxState {
@@ -442,6 +453,23 @@ impl Database {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Queued outbox records with the bytes needed for publication, in send order.
+    pub fn pending_outgoing_records(&self, channel_id: &str) -> Result<Vec<PendingOutgoing>> {
+        let mut statement = self.connection.prepare(
+            "SELECT message_id, created_at, ciphertext FROM outbox
+             WHERE channel_id = ?1 AND state IN ('queued', 'publishing')
+             ORDER BY device_sequence",
+        )?;
+        let rows = statement.query_map(params![channel_id], |row| {
+            Ok(PendingOutgoing {
+                message_id: row.get(0)?,
+                created_at: row.get(1)?,
+                ciphertext: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     /// Resolves reservations left behind by a crash.
     ///
     /// A reserved slot has a sequence but no ciphertext, so nothing can be
@@ -544,6 +572,15 @@ impl Database {
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
 
         Ok(result == "ok")
+    }
+
+    /// Current UTC time from SQLite, in RFC 3339 form.
+    pub fn utc_now(&self) -> Result<String> {
+        self.connection
+            .query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now')", [], |row| {
+                row.get(0)
+            })
+            .map_err(StorageError::from)
     }
 
     /// Appends an audit record. There is no update or delete counterpart.

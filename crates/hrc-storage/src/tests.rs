@@ -364,6 +364,23 @@ fn recovery_leaves_queued_messages_alone() {
 }
 
 #[test]
+fn pending_outgoing_records_include_ciphertext_and_created_at() {
+    let mut database = database();
+    database
+        .allocate_outgoing(CHANNEL, DEVICE, "msg-1", 1, "hash", NOW)
+        .unwrap();
+    database
+        .queue_outgoing("msg-1", b"ciphertext", NOW)
+        .unwrap();
+
+    let records = database.pending_outgoing_records(CHANNEL).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].message_id, "msg-1");
+    assert_eq!(records[0].created_at, NOW);
+    assert_eq!(records[0].ciphertext, b"ciphertext");
+}
+
+#[test]
 fn the_outbox_lifecycle_advances_and_is_ordered() {
     let mut database = database();
     for index in 1..=3 {
@@ -473,6 +490,20 @@ fn audit_records_are_appended_in_order() {
         database.audit_actions().unwrap(),
         vec!["quarantine", "approve_to_agent"]
     );
+}
+
+#[test]
+fn utc_now_is_an_rfc_3339_utc_timestamp() {
+    let database = database();
+    let now = database.utc_now().unwrap();
+
+    assert_eq!(now.len(), 20);
+    assert_eq!(&now[4..5], "-");
+    assert_eq!(&now[7..8], "-");
+    assert_eq!(&now[10..11], "T");
+    assert_eq!(&now[13..14], ":");
+    assert_eq!(&now[16..17], ":");
+    assert_eq!(&now[19..20], "Z");
 }
 
 #[test]

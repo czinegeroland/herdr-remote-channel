@@ -54,6 +54,12 @@ impl Paths {
         self.home.join("state.sqlite")
     }
 
+    /// The locally managed Git repository for one channel.
+    pub fn channel_transport(&self, channel_id: &str) -> PathBuf {
+        let tag = hrc_protocol::canonical::sha256_hex(channel_id.as_bytes());
+        self.home.join("transport").join(format!("{tag}.git"))
+    }
+
     /// The directory holding protected key files.
     pub fn keys(&self) -> PathBuf {
         self.home.join("keys")

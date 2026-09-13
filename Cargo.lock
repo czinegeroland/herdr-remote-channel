@@ -951,6 +951,8 @@ dependencies = [
  "hrc-crypto",
  "hrc-protocol",
  "hrc-storage",
+ "hrc-transport",
+ "hrc-transport-git",
  "predicates",
  "secrecy",
  "serde_json",

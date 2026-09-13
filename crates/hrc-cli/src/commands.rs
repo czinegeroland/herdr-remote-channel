@@ -7,6 +7,8 @@
 
 use hrc_crypto::{DeviceSecrets, KeyStore, PassphraseStore};
 use hrc_storage::Database;
+use hrc_transport::{ObjectClass, Transport};
+use hrc_transport_git::GitTransport;
 use secrecy::SecretString;
 use serde_json::{Value, json};
 
@@ -238,6 +240,133 @@ pub fn audit(context: &Context, since: Option<&str>) -> Result<Value> {
         "status": "ok",
         "entries": entries,
     }))
+}
+
+/// `hrc sync --once`: run one synchronization pass for every configured channel.
+pub fn sync_once(context: &Context) -> Result<Value> {
+    let database = Database::open(context.paths.database())?;
+    let now = database.utc_now()?;
+    let mut channels = Vec::new();
+
+    for channel in database.channels()? {
+        channels.push(sync_git_channel(&context.paths, &database, &channel, &now)?);
+    }
+
+    Ok(json!({
+        "status": "ok",
+        "syncedAt": now,
+        "channels": channels,
+    }))
+}
+
+fn sync_git_channel(
+    paths: &Paths,
+    database: &Database,
+    channel: &hrc_storage::ChannelRecord,
+    now: &str,
+) -> Result<Value> {
+    if channel.transport_kind != "git" {
+        return Err(CliError::Io {
+            action: "open the configured transport",
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("unsupported transport {}", channel.transport_kind),
+            ),
+        });
+    }
+
+    let git_dir = paths.channel_transport(&channel.channel_id);
+    if let Some(parent) = git_dir.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| CliError::Io {
+            action: "create the local transport directory",
+            source,
+        })?;
+    }
+
+    let mut transport = GitTransport::open(&git_dir, &channel.transport_locator)?;
+    let remote_head = transport.remote_head()?;
+    let local_missing = matches!(
+        transport.open_group(),
+        Err(hrc_transport::TransportError::NoSuchGroup)
+    );
+    let remote_changed = remote_head != channel.sync_cursor;
+    let recovered = database.recover_reservations(&channel.channel_id, now)?;
+
+    if remote_changed || (remote_head.is_some() && local_missing) {
+        transport.sync_from_remote()?;
+    }
+
+    let fetch = if remote_changed {
+        Some(hrc_core::sync::fetch_once(
+            &transport,
+            database,
+            &channel.channel_id,
+            100,
+            now,
+        )?)
+    } else {
+        None
+    };
+
+    let published = database
+        .pending_outgoing_records(&channel.channel_id)?
+        .into_iter()
+        .map(|record| {
+            hrc_core::sync::publish_one(
+                &mut transport,
+                database,
+                &channel.channel_id,
+                &record.message_id,
+                outgoing_message_object(&record.message_id, &record.created_at, record.ciphertext),
+                3,
+                now,
+            )
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    let published_messages = published
+        .iter()
+        .flat_map(|outcome| outcome.published.iter().cloned())
+        .collect::<Vec<_>>();
+    let deferred_messages = published
+        .iter()
+        .flat_map(|outcome| outcome.deferred.iter().cloned())
+        .collect::<Vec<_>>();
+    let conflicts = published
+        .iter()
+        .map(|outcome| outcome.conflicts)
+        .sum::<u32>();
+
+    Ok(json!({
+        "channelId": channel.channel_id,
+        "transport": channel.transport_kind,
+        "locator": channel.transport_locator,
+        "remoteChanged": remote_changed,
+        "remoteHead": remote_head,
+        "recoveredReservations": recovered,
+        "publishedMessages": published_messages,
+        "deferredMessages": deferred_messages,
+        "publishConflicts": conflicts,
+        "fetchedPublications": fetch.as_ref().map(|outcome| outcome.publications).unwrap_or(0),
+        "fetchedControlObjects": fetch.as_ref().map(|outcome| outcome.control_objects).unwrap_or(0),
+        "fetchedMessageObjects": fetch.as_ref().map(|outcome| outcome.message_objects).unwrap_or(0),
+        "cursor": fetch.and_then(|outcome| outcome.cursor),
+    }))
+}
+
+fn outgoing_message_object(
+    message_id: &str,
+    created_at: &str,
+    ciphertext: Vec<u8>,
+) -> hrc_transport::PublishObject {
+    let year = created_at.get(0..4).unwrap_or("0000");
+    let month = created_at.get(5..7).unwrap_or("00");
+
+    hrc_transport::PublishObject {
+        name: format!("messages/{year}/{month}/{message_id}.age"),
+        class: ObjectClass::Message,
+        bytes: ciphertext,
+    }
 }
 
 /// The installed Git version, if Git is on the path.

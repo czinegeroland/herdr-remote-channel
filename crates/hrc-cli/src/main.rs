@@ -97,6 +97,7 @@ fn run(cli: &Cli, _path: &str) -> std::result::Result<Value, Failure> {
         Command::Audit(args) => {
             commands::audit(&context, args.since.as_deref()).map_err(Failure::from)
         }
+        Command::Sync(args) if args.once => commands::sync_once(&context).map_err(Failure::from),
 
         other => match dispatch::classify(other) {
             Outcome::Unimplemented { milestone } => Err(Failure::NotShipped { milestone }),
