@@ -1,0 +1,106 @@
+name: Cross-platform check
+
+# Windows and macOS, run deliberately rather than on every change.
+#
+# `build-and-test.yml` holds every pull request to Linux, which is where the
+# fast feedback belongs and what a private repository can afford per change.
+# This is the other half of PRD acceptance criterion `AC-RUST-FOUNDATION`,
+# which requires the workspace to build and its contract tests to pass on
+# Windows, macOS, and Linux.
+#
+# Run it:
+#
+# - before cutting a release;
+# - after merging anything that touches paths, filesystem behavior, process
+#   or pipe handling, time and clock resolution, or line endings;
+# - when a dependency that compiles C is added or upgraded.
+#
+# Those are the categories that have actually broken here. Windows found a
+# ULID ordering bug that only appeared at its clock resolution, and a
+# `#[cfg(unix)]` block with no counterpart that simply did not compile.
+#
+# Nothing runs this on a timer. Adding one is a `schedule:` trigger below,
+# but a weekly full matrix is roughly four dollars a month, so it is a
+# deliberate choice rather than a default.
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: Which platforms to run
+        type: choice
+        default: both
+        options: [both, windows, macos]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cross-platform-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    outputs:
+      platforms: ${{ steps.decide.outputs.platforms }}
+    steps:
+      - name: Decide which platforms to run
+        id: decide
+        env:
+          CHOICE: ${{ inputs.platforms }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$CHOICE" in
+            windows) platforms='["windows-latest"]' ;;
+            macos)   platforms='["macos-latest"]' ;;
+            *)       platforms='["windows-latest","macos-latest"]' ;;
+          esac
+          echo "platforms=$platforms" >> "$GITHUB_OUTPUT"
+          echo "Running: $platforms"
+
+  test:
+    name: Build and test (${{ matrix.os }})
+    needs: plan
+    strategy:
+      # One platform failing should not hide the other's result: knowing
+      # whether a break is Windows-only or on both is most of the diagnosis.
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.plan.outputs.platforms) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      # This workflow runs rarely, so its cache is usually cold and saving
+      # one is worth more than it costs. Keyed per platform by the action.
+      - name: Cache cargo build output
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cross-platform
+
+      - name: Run the test suite
+        run: cargo test --workspace --all-targets --locked
+
+      - name: Run the doc tests
+        run: cargo test --workspace --doc --locked
+
+      - name: Smoke-test the hrc executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --locked --quiet --bin hrc -- --version
+          cargo run --locked --quiet --bin hrc -- --help > /dev/null

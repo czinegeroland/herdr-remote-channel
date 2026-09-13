@@ -4,6 +4,21 @@ name: Build and test
 # execute trusted base-branch code (PRD decision DEC-014). This workflow
 # compiles and runs pull-request code, so it deliberately uses the untrusted
 # `pull_request` trigger with a read-only token instead.
+#
+# This repository is private, so every minute is billed and the platforms are
+# not billed equally: Linux is the base rate, Windows twice it, macOS ten
+# times it. A full three-platform matrix on both the pull request and the
+# merge that follows costs roughly two dollars a change, about two thirds of
+# it on macOS alone.
+#
+# Public Rust projects usually do run a full matrix on every pull request —
+# tokio, ripgrep and friends all do — but Actions is free for them. For a
+# private repository the ordinary pattern is fast feedback on one platform
+# per change, with the other platforms run deliberately. That is the shape
+# here: this workflow is Linux only, and `cross-platform.yml` runs Windows
+# and macOS when someone asks it to.
+#
+# A change that touches no Rust and no agent skill runs none of it.
 on:
   push:
     branches: [main]
@@ -24,8 +39,54 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  # Decides what the rest of the run needs to do. Cheap: checkout and a diff.
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.decide.outputs.rust }}
+    steps:
+      - name: Check out enough history to diff
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide what to run
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Whether anything the Rust jobs read has changed. A schedule or a
+          # manual run always builds: the point of those is to catch drift
+          # that no diff would show, such as a dependency yanked upstream.
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+          echo "Changed files:"
+          echo "$changed"
+
+          # `.agents/` is in this list because the skill contract tests read
+          # SKILL.md, so a skill-only change really can fail the suite.
+          # `docs/` is not: nothing under it is read at test time.
+          if echo "$changed" | grep -Eq '^(crates/|Cargo\.toml|Cargo\.lock|rust-toolchain|\.agents/|\.github/workflows/build-and-test\.yml)'; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "rust=false" >> "$GITHUB_OUTPUT"
+            echo "No Rust, manifest, or agent-skill changes; skipping the build."
+          fi
+
   lint:
     name: Format and lint
+    needs: plan
+    if: needs.plan.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Check out the pull request
@@ -38,16 +99,16 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: Cache cargo registry and build output
-        uses: actions/cache@v4
+      # Keyed on the lockfile *and* the compiler version, and it prunes
+      # registry sources and stale build output rather than carrying an
+      # ever-growing `target` between runs. The hand-rolled cache this
+      # replaced kept whole `target` directories that only grew, which on
+      # Windows cost more to restore than the compile it saved.
+      - name: Cache cargo build output
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: cargo-lint-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-lint-${{ runner.os }}-
+          shared-key: lint
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Check formatting
         run: cargo fmt --all --check
@@ -56,14 +117,15 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   test:
-    name: Build and test (${{ matrix.os }})
+    name: Build and test
+    needs: plan
+    if: needs.plan.outputs.rust == 'true'
     # PRD acceptance suite AC-RUST-FOUNDATION requires the workspace to build
-    # and the CLI contract tests to pass on Windows, macOS, and Linux.
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    # and pass on Windows, macOS, and Linux. Linux is what every change is
+    # held to; the other two are `cross-platform.yml`, run before a release
+    # and whenever a change touches paths, filesystem behavior, process
+    # handling, or time.
+    runs-on: ubuntu-latest
     steps:
       - name: Check out the pull request
         uses: actions/checkout@v4
@@ -75,22 +137,22 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: Cache cargo registry and build output
-        uses: actions/cache@v4
+      - name: Cache cargo build output
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: cargo-test-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-test-${{ runner.os }}-
+          shared-key: test
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Build the workspace
-        run: cargo build --workspace --all-targets --locked
-
+      # No separate `cargo build` step: `cargo test` builds the same targets,
+      # and running both meant resolving and fingerprinting the workspace
+      # twice for one set of artifacts.
       - name: Run the test suite
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --all-targets --locked
+
+      # Doc tests are not covered by `--all-targets`, and the conformance
+      # suite's documented example is one.
+      - name: Run the doc tests
+        run: cargo test --workspace --doc --locked
 
       - name: Smoke-test the hrc executable
         shell: bash
