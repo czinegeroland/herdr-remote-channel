@@ -1348,6 +1348,8 @@ name = "hrc-transport"
 version = "0.1.0"
 dependencies = [
  "hrc-protocol",
+ "serde",
+ "serde_json",
  "thiserror 2.0.20",
 ]
 

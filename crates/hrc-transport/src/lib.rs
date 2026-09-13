@@ -29,6 +29,7 @@
 //! message was introduced under.
 
 pub mod conformance;
+pub mod jsonrpc;
 pub mod memory;
 
 use std::collections::BTreeMap;
