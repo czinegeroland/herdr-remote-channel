@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-14T01:50:00+02:00 |
+| Last updated | 2026-09-14T03:15:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -536,7 +536,7 @@ The Herdr plugin must expose:
 | HRC-GATE-004 | Preserve original and edited content in the local audit log. | Must | Implemented | `crates/hrc-core/src/gate.rs` returns the audit record together with the framed content so recording is not a separate step, and `crates/hrc-storage/src/lib.rs` `append_decision` preserves both versions rather than only their digests |
 | HRC-GATE-005 | Add provenance and untrusted-content framing to approved prompts. | Must | Implemented | `crates/hrc-core/src/gate.rs` `provenance_banner`, applied by `deliver` |
 | HRC-GATE-006 | Ensure remote senders cannot select local pane IDs. | Must | Implemented | `crates/hrc-core/src/gate.rs`: the target agent comes from the human's decision, never from the envelope |
-| HRC-GATE-007 | Require manual approval by default. | Must | Approved | Pending |
+| HRC-GATE-007 | Require manual approval by default. | Must | Implemented | `crates/hrc-tui/src/app.rs`: the screen opens with nothing revealed and nothing proposed, a decision is unreachable until the body has been shown, and every decision takes a second confirming key that names what is about to happen |
 | HRC-GATE-008 | Require a one-use local approval authorization, bound to message digest and action, before content disclosure or agent delivery. | Must | Implemented | `crates/hrc-core/src/gate.rs` `Authorization` and `AuthorizationLedger` |
 
 ### 12.4 Context
@@ -613,7 +613,7 @@ The Herdr plugin must expose:
 | HRC-TECH-005 | Use Serde/serde_json and a pinned RFC 8785 implementation with protocol test vectors. | Must | In progress | `crates/hrc-protocol/src/canonical.rs`, `crates/hrc-protocol/tests/rfc8785_vectors.rs` |
 | HRC-TECH-006 | Use maintained Rust cryptography crates, including `age` and `ed25519-dalek`, without custom cryptographic primitives. | Must | Implemented | `crates/hrc-crypto/src/lib.rs` (Ed25519), `crates/hrc-crypto/src/encryption.rs` (age X25519) |
 | HRC-TECH-007 | Store durable local state in SQLite using `rusqlite` with WAL mode and transactional allocation. | Must | Implemented | `crates/hrc-storage/src/lib.rs`, `crates/hrc-storage/src/migrations/001_initial.sql` |
-| HRC-TECH-008 | Use `ratatui` and `crossterm` for the trusted inbox and approval TUI. | Must | Approved | Decision DEC-015 |
+| HRC-TECH-008 | Use `ratatui` and `crossterm` for the trusted inbox and approval TUI. | Must | Implemented | `crates/hrc-tui/src/app.rs` and `src/view.rs`, driven by real key events and read back from a real rendered buffer in `crates/hrc-tui/tests/approval_flow.rs` |
 | HRC-TECH-009 | Use a cross-platform local IPC abstraction supporting Unix-domain sockets and Windows named pipes. | Must | Implemented | `crates/hrc-ipc/`: `interprocess` 2 over Tokio, with length-prefixed JSON framing; `crates/hrc-ipc/tests/local_transport.rs` runs the same suite against a Unix socket and a Windows named pipe |
 | HRC-TECH-010 | Invoke the system Git executable rather than embedding a Git implementation. | Must | Approved | Decision DEC-015 |
 | HRC-TECH-011 | Publish prebuilt Windows, macOS, and Linux binaries with checksums using `cargo-dist`. | Must | Approved | Decision DEC-015 |
@@ -1560,6 +1560,15 @@ The receiver may:
 - Decline with or without a reason.
 - Allow it to expire.
 
+Manual approval is not satisfied by a human being present. The trusted screen
+opens with no body displayed and no decision selected, a decision is
+unreachable until the body has actually been shown, and every decision takes a
+second key that confirms a prompt naming what is about to happen. Only `y`
+confirms: Enter is the key people press to dismiss things, so it cancels, and
+a habitual press cannot approve remote content. Moving the selection hides the
+body again, since a revealed pane and a moved selection could otherwise
+disagree about which message a decision is about. See decision DEC-046.
+
 ### 19.3 Agent delivery framing
 
 Approved content must be prefixed with provenance:
@@ -2468,7 +2477,7 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 | HRC-TECH-005, HRC-TECH-006 | M1 | `AC-RUST-PROTOCOL`: RFC 8785 vectors, signatures, age encryption, malformed-input cases, and cross-platform deterministic fixtures pass. | `crates/hrc-protocol/tests/rfc8785_vectors.rs` (canonicalization), `crates/hrc-crypto/src/lib.rs` (OpenSSL-derived Ed25519 vector, malformed-key, malformed-signature, wrong-domain, tampered-payload), `crates/hrc-crypto/src/encryption.rs` (age round trip, non-recipient, tampered, truncated, oversized). Verified on Linux, macOS, and Windows CI. |
 | HRC-TECH-009 | M1 | `AC-RUST-IPC`: the selected IPC implementation exchanges framed requests over Unix-domain sockets and Windows named pipes with reconnect and permission tests. | `crates/hrc-ipc/tests/local_transport.rs`: request and answer over the platform transport, twenty-five framed exchanges on one connection, eight concurrent clients, reconnection after the daemon restarts and leaves a stale socket behind, a missing daemon failing rather than hanging, the two interfaces proven to be separate listeners, a client refusing to send an oversized frame without desynchronizing its stream, an unparseable frame dropping only its own connection, and Unix socket and directory modes asserted owner-only. On Windows the pipe name folds in the runtime directory, since pipe names are machine-global and a collision would mean one daemon answering for another's endpoint. A live daemon keeps its endpoint: a second bind probes before removing a socket file, because unlinking a live daemon's socket and binding a new one at the same path succeeds and leaves that daemon listening where no client can reach it. `crates/hrc-ipc/src/frame.rs` covers framing, truncation, and the pre-allocation size check. Verified on Linux, macOS, and Windows CI. |
 | HRC-TECH-003, HRC-TECH-007, HRC-TECH-010 | M2 | `AC-RUST-DAEMON`: Tokio daemon, WAL-backed SQLite state, transactional allocation, and system-Git synchronization pass crash/retry integration tests. | Partial: `crates/hrc-cli/src/main.rs` runs `hrc daemon` on a Tokio runtime, `crates/hrc-cli/src/commands.rs` drives the resident synchronization loop over the WAL-backed SQLite store and system Git transport while binding both local IPC listeners, and `crates/hrc-cli/src/commands/tests.rs` plus `tests/command_contract.rs` cover daemon tick behavior, the startup contract, the live agent-safe status call, the trusted-listener bind, and live refusal of trusted methods on the agent-safe endpoint. Remaining: crash/restart integration tests and the real trusted-operation implementations. |
-| HRC-TECH-008 | M3 | `AC-RUST-TUI`: ratatui/crossterm inbox and approval flows pass terminal interaction tests on supported platforms. | Pending |
+| HRC-TECH-008 | M3 | `AC-RUST-TUI`: ratatui/crossterm inbox and approval flows pass terminal interaction tests on supported platforms. | `crates/hrc-tui/tests/approval_flow.rs` drives real key events through the screen and reads the real rendered buffer: the body is absent until revealed and hidden again when the selection moves, no decision is reachable before the body is shown, approval takes two deliberate presses, the confirmation names the sender and the target agent, Enter and every key other than `y` cancel, all three section 19.2 decisions are reachable, the selection is marked in text rather than only by highlight, the status line always says what the next key does, Escape closes the body before the screen, Ctrl-C leaves without deciding, and an empty inbox decides nothing. Verified on Linux, macOS, and Windows CI. |
 | HRC-TECH-002 | M3 | `AC-SINGLE-BINARY`: one `hrc` executable successfully dispatches CLI, daemon, Herdr startup/action/event, and pane modes. | Partial: the binary parses and dispatches every mode, eight commands now perform real work, and `crates/hrc-cli/tests/command_contract.rs` covers the daemon startup contract plus live daemon IPC requests on both local interfaces. Remaining: the Herdr modes and channel-management flows. |
 | HRC-TECH-011, HRC-TECH-012 | M3 | `AC-RELEASE-ARTIFACTS`: cargo-dist publishes supported-platform binaries and checksums; clean-host tests download, verify, install, and smoke-test CLI and daemon modes without a Rust, .NET, Node.js, or Python runtime. | Pending |
 
@@ -2487,7 +2496,7 @@ Every implementation PR must update this table.
 | M0 Product and protocol | 55% | Adds an executable adapter contract, capability declaration, and error model to the written specification | Transport contract and reference adapter | Obtain product-owner approval and complete the JSON-RPC adapter binding |
 | M1 Secure foundation | 99% | Adds the framed local IPC layer, verified against a Unix socket and a Windows named pipe on CI, closing the compatibility spike | Local IPC | Persist the principal key, then integrate an OS keychain backend |
 | M2 Git messaging | 95% | Adds the synchronization engine plus real `hrc sync --once`, `hrc daemon`, `hrc audit`, and live daemon IPC hosting over the local store and Git transport | Daemon IPC hosting | Add receipts, threading, deduplication, end-to-end restart coverage, and audit decision recording |
-| M3 Herdr integration | 60% | Adds the daemon's two local interfaces as two request and response types, and now hosts them from the resident daemon so agent-safe callers still cannot name a pending body | Live daemon boundary | Build the trusted approval TUI, then the Herdr inbox UI |
+| M3 Herdr integration | 75% | Adds the daemon's two local interfaces as two request and response types, and now hosts them from the resident daemon so agent-safe callers still cannot name a pending body | Live daemon boundary | Build the trusted approval TUI, then the Herdr inbox UI |
 | M4 Context/delegation | 65% | Adds attachment limits checked before any fetch and again on arrival, and sender-chosen file names treated as hostile text | Attachment limits | Add git-ignored path checking, then wire context and delegation to the CLI |
 | M5 Provider ecosystem | 0% | Not started | N/A | Deferred until core protocol stabilizes |
 
@@ -2574,6 +2583,7 @@ recorded either directly in this PRD or in a stable linked artifact.
 | DEC-016 | RFC 8785 canonical JSON uses a pinned Rust implementation, initially `serde_jcs`, guarded by protocol vectors. | Accepted | Avoids custom canonicalization while making signed bytes interoperable. |
 | DEC-017 | Build and test run in a separate `pull_request` workflow rather than being added to the `pull_request_target` traceability workflow. | Accepted | Compiling and running pull-request code under `pull_request_target` would hand a write-capable, secret-bearing context to untrusted code; the two triggers stay separated. |
 | DEC-018 | The CLI publishes a fixed numeric exit-code contract: 0 success, 1 runtime failure, 2 usage, 3 unimplemented, 4 authorization required. | Accepted | PRD section 11.1 requires documented exit codes, and the Herdr plugin and skill must branch on stable numbers rather than parsing prose. |
+| DEC-046 | The trusted approval screen reveals a body only on request, keeps every decision behind a second confirming key, and never treats Enter as consent. | Accepted | "A human was present" is not the property section 19.4 needs; "a human answered a question naming what would happen" is. Enter and Escape are the keys people press without reading, so neither may confirm, and a screen that opened with a body displayed would disclose it to anyone who walked past. |
 | DEC-045 | HRC never decompresses received content, and attachment limits are enforced on the declaration before fetching and again on the bytes that arrive. | Accepted | A decompression limit protects an expansion step; not having the step is stronger than bounding it, and archive handling is not needed to move opaque ciphertext. Checking only the declaration would make it a promise rather than a limit, and checking only after decryption would make it a postmortem. |
 | DEC-044 | Delegation state changes are checked against both the lifecycle and the party reporting them, and terminal states are final. | Accepted | A lifecycle check alone would let an assignee accept a task on its own behalf and then declare its own work reviewed and complete, which is the judgement the requester is supposed to make. Making terminal states final stops a closed task from being reopened by whoever speaks last. |
 | DEC-043 | A receipt is accepted only from a device that was an intended recipient of every message it names, and receipt state is per device rather than per message. | Accepted | A signature proves who sent a receipt, not that they were ever entitled to report on the message it names; without the recipient check any channel member could tell a sender their message landed. Per-device state keeps the sender's picture honest, since one device reporting delivery says nothing about the other devices the message was addressed to. |

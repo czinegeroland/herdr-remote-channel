@@ -1,0 +1,112 @@
+//! Drawing the trusted inbox.
+//!
+//! Two rules from PRD section 27 shape this. Nothing relies on colour alone,
+//! so every state that matters is spelled out in words as well — a terminal
+//! without colour, or a reader who cannot distinguish it, must be able to see
+//! which message is selected, whether a body is hidden, and what is about to
+//! happen. And the body is drawn only when it has been revealed, because a
+//! screen that painted it by default would disclose it to anyone who walked
+//! past.
+
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+
+use crate::app::{App, Focus};
+
+/// Draws the whole screen.
+pub fn render(frame: &mut Frame<'_>, app: &App) {
+    let areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(5),
+            Constraint::Length(9),
+            Constraint::Length(3),
+        ])
+        .split(frame.area());
+
+    render_list(frame, app, areas[0]);
+    render_body(frame, app, areas[1]);
+    render_status(frame, app, areas[2]);
+}
+
+/// The pending messages, with the selection marked in text.
+fn render_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let items: Vec<ListItem<'_>> = app
+        .items()
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            // The marker is what carries the selection for a reader who
+            // cannot see the highlight; the highlight is an addition to it,
+            // never a replacement for it.
+            let marker = if index == app.selected_index() {
+                "> "
+            } else {
+                "  "
+            };
+
+            let endpoint = if item.view.endpoint_label.is_empty() {
+                String::new()
+            } else {
+                format!(" -> {}", item.view.endpoint_label)
+            };
+
+            let line = format!(
+                "{marker}{} [{}]{endpoint}  {} bytes",
+                item.view.sender_local_name, item.view.kind, item.view.plaintext_bytes
+            );
+
+            let style = if index == app.selected_index() {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+
+            ListItem::new(Line::from(Span::styled(line, style)))
+        })
+        .collect();
+
+    let title = format!("Pending approval ({})", app.items().len());
+    frame.render_widget(
+        List::new(items).block(Block::default().borders(Borders::ALL).title(title)),
+        area,
+    );
+}
+
+/// The body pane, which is empty until a human reveals it.
+fn render_body(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let (title, text) = match (app.is_revealed(), app.selected()) {
+        (true, Some(item)) => ("Message body (not yet approved)", item.body.clone()),
+        (false, Some(_)) => (
+            "Message body",
+            "HIDDEN. This message has not been approved. Press Enter to read it.".to_owned(),
+        ),
+        _ => ("Message body", "No message selected.".to_owned()),
+    };
+
+    frame.render_widget(
+        Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).title(title)),
+        area,
+    );
+}
+
+/// The status line, which always says what the next key does.
+fn render_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let prefix = match app.focus() {
+        Focus::Confirm => "CONFIRM: ",
+        Focus::Body => "READING: ",
+        Focus::List => "",
+    };
+
+    frame.render_widget(
+        Paragraph::new(format!("{prefix}{}", app.status()))
+            .wrap(Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL)),
+        area,
+    );
+}
