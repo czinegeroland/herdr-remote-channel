@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-13T12:20:00+02:00 |
+| Last updated | 2026-09-13T12:35:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -2373,7 +2373,7 @@ Every implementation PR must update this table.
 | M0 Product and protocol | 55% | Adds an executable adapter contract, capability declaration, and error model to the written specification | Transport contract and reference adapter | Obtain product-owner approval and complete the JSON-RPC adapter binding |
 | M1 Secure foundation | 95% | Adds enrollment cryptography: invites, non-transferable invite proofs, and safety-phrase derivation against the pinned EFF wordlist | Enrollment cryptography | Wire the join request and approval flow, then integrate an OS keychain backend |
 | M2 Git messaging | 70% | Adds the synchronization engine: cursor-resuming fetch, conflict-retrying publish, backoff policy, and fail-closed halting on observed tampering | Synchronization engine | Wire the resident daemon and the CLI, then receipts, threading, and deduplication |
-| M3 Herdr integration | 25% | Prompt gate core: agent-safe view, one-use digest-bound authorizations, and provenance framing | Prompt gate | Build the trusted approval interface and the daemon RPC split, then the Herdr inbox UI |
+| M3 Herdr integration | 35% | Adds the agent skill at the section 24 path, held to the CLI exit codes, command surface, and section 24.2 prohibitions by tests in the build | Agent skill | Build the trusted approval interface and the daemon RPC split, then the Herdr inbox UI |
 | M4 Context/delegation | 30% | Context packages with previews, digest verification, default path exclusions, and blocking secret scanning | Context packages | Add git-ignored path checking and attachment limits, then structured delegation messages |
 | M5 Provider ecosystem | 0% | Not started | N/A | Deferred until core protocol stabilizes |
 

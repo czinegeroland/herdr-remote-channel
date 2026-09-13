@@ -18,7 +18,11 @@ fn skill_path() -> PathBuf {
 }
 
 fn skill() -> String {
-    std::fs::read_to_string(skill_path()).expect("the skill file should exist at the PRD path")
+    // Git may check the file out with CRLF endings, so normalize: line
+    // endings are a property of the checkout, not of the skill's content.
+    std::fs::read_to_string(skill_path())
+        .expect("the skill file should exist at the PRD path")
+        .replace("\r\n", "\n")
 }
 
 #[test]
