@@ -11,6 +11,7 @@
 pub mod error;
 pub mod message;
 pub mod roster;
+pub mod sync;
 
 pub use error::{CoreError, Result};
 pub use message::{QuarantinedMessage, open, seal};

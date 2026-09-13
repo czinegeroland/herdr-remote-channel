@@ -921,6 +921,8 @@ version = "0.1.0"
 dependencies = [
  "hrc-crypto",
  "hrc-protocol",
+ "hrc-storage",
+ "hrc-transport",
  "serde_json",
  "thiserror 2.0.20",
 ]

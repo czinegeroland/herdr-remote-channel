@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-13T06:44:00+02:00 |
+| Last updated | 2026-09-13T07:22:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -558,12 +558,12 @@ The Herdr plugin must expose:
 | HRC-SYNC-001 | Persist outgoing objects before attempting publication. | Must | Implemented | `crates/hrc-storage/src/lib.rs` durable outbox |
 | HRC-SYNC-002 | Detect remote branch changes through polling. | Must | In progress | `crates/hrc-transport-git/src/lib.rs` `remote_head`; the daemon poll loop is pending |
 | HRC-SYNC-003 | Fetch only when the remote branch head changes. | Must | In progress | `crates/hrc-transport-git/src/lib.rs` separates `remote_head` from `sync_from_remote`; the daemon poll loop is pending |
-| HRC-SYNC-004 | Resume from a durable local commit cursor. | Must | In progress | `crates/hrc-storage/src/lib.rs` cursor column and accessors; fetch loop pending |
-| HRC-SYNC-005 | Detect observed history rewrites, conflicting successors, deletions, and changed objects. | Must | Approved | Pending |
-| HRC-SYNC-006 | Retry non-fast-forward pushes automatically. | Must | In progress | `crates/hrc-transport-git/src/lib.rs` reports a conflict with the new tip and rewinds; the automatic retry loop is pending |
+| HRC-SYNC-004 | Resume from a durable local commit cursor. | Must | Implemented | `crates/hrc-core/src/sync.rs` `fetch_once` resumes from the stored cursor and advances it per publication |
+| HRC-SYNC-005 | Detect observed history rewrites, conflicting successors, deletions, and changed objects. | Must | Implemented | `crates/hrc-core/src/sync.rs` re-verifies the parent chain and halts the channel; `crates/hrc-core/src/roster.rs` rejects conflicting control successors |
+| HRC-SYNC-006 | Retry non-fast-forward pushes automatically. | Must | Implemented | `crates/hrc-core/src/sync.rs` `publish_one` rebuilds on the reported tip and retries within a bounded attempt count |
 | HRC-SYNC-007 | Never force-push during normal operation. | Must | Implemented | `crates/hrc-transport-git/src/lib.rs`: no code path passes `--force` or a `+` refspec when pushing |
 | HRC-SYNC-008 | Re-encrypt unpublished messages after a roster-epoch change. | Must | Approved | Pending |
-| HRC-SYNC-009 | Back off with jitter after failures or inactivity. | Must | Approved | Pending |
+| HRC-SYNC-009 | Back off with jitter after failures or inactivity. | Must | Implemented | `crates/hrc-core/src/sync.rs` `Backoff` and `poll_interval` |
 | HRC-SYNC-010 | Continue operating after process and Herdr restarts. | Must | Approved | Pending |
 | HRC-SYNC-011 | Allocate message ID, device sequence, predecessor chain ID, payload, and outbox record atomically. | Must | Implemented | `crates/hrc-storage/src/lib.rs` `allocate_outgoing`, proven by a 100-allocation four-thread concurrency test |
 
@@ -976,6 +976,11 @@ Recommended polling:
 | Active thread | 10-15 seconds |
 | Normal background | 30 seconds |
 | Long idle period | 2-5 minutes |
+
+These are targets, not floors. An adapter declares a minimum poll interval in
+its capabilities, and where that minimum is longer than the target above, the
+adapter's value governs: a provider's rate limit is a hard constraint, and
+exceeding it gets an installation throttled for every channel it hosts.
 
 ### 17.2 Local writer
 
@@ -1951,7 +1956,7 @@ npx skills add <owner>/herdr-remote-channel `
 | HRC-SEC-009 | Incoming content is quarantined and treated as untrusted. | Approved | Pending |
 | HRC-SEC-010 | Security-sensitive commands require trusted human authorization and reject agent-safe/non-interactive invocation. | Approved | Pending |
 | HRC-SEC-011 | Audit logs record approvals and local actions. | Approved | Pending |
-| HRC-SEC-012 | Observed conflicting histories, rewrites, deletions, or substitutions stop synchronization. | Approved | Pending |
+| HRC-SEC-012 | Observed conflicting histories, rewrites, deletions, or substitutions stop synchronization. | Implemented | `crates/hrc-core/src/sync.rs` halts the channel with a sticky reason and audits it; a halted channel refuses to fetch again |
 | HRC-SEC-013 | Messages from stale epochs or devices revoked before object introduction are rejected. | Implemented | `crates/hrc-core/src/message.rs` checks both the claimed epoch and the epoch the object was introduced under |
 | HRC-SEC-014 | Pending bodies and approval capabilities are unavailable through agent-safe CLI and JSON surfaces. | Approved | Pending |
 | HRC-SEC-015 | Control entries use control-only publications, and merge or mixed control/data publications are rejected. | Implemented | `crates/hrc-transport/src/lib.rs` `validate_publication`, `crates/hrc-transport-git/src/lib.rs` merge and modification rejection, covered by `crates/hrc-transport-git/tests/git_adapter.rs` |
@@ -1996,7 +2001,7 @@ npx skills add <owner>/herdr-remote-channel `
 | Concurrent push | Fetch, rebuild on latest tip, retry. |
 | Lost push response | Fetch and recognize identical existing object. |
 | Duplicate delivery | Ignore by message ID and acknowledge again. |
-| History rewrite | Stop synchronization and show sticky tamper alert. |
+| History rewrite | Stop synchronization and show sticky tamper alert. The halt does not clear on the next poll, on restart, or on a later successful fetch; only an explicit human action resumes the channel. The first recorded reason is kept, so a cascade of later failures cannot bury the original cause. |
 | Modified object | Reject object and stop affected channel processing. |
 | Missing predecessor chain ID | Buffer temporarily, then display with warning. |
 | Expired message | Display as expired but do not allow action. |
@@ -2269,7 +2274,7 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 | HRC-MSG-008 and HRC-MSG-009 | M4 | `AC-DELEGATION-MESSAGES`: task, accept/decline, progress, and result states are exchanged without local execution. | Pending |
 | HRC-GATE-001 through HRC-GATE-008 | M3 | `AC-PROMPT-GATE`: pending bodies are unavailable through agent-safe interfaces; trusted UI issues a one-use digest-bound authorization; reuse, modification, and wrong-target delivery fail. | Pending |
 | HRC-CTX-001 through HRC-CTX-007 | M4 | `AC-CONTEXT`: supported context items round-trip with previews and verified hashes; excluded paths, detected secrets, oversized objects, and malformed archives are blocked. | Pending |
-| HRC-SYNC-001 through HRC-SYNC-010 | M2 | `AC-GIT-SYNC`: offline queues recover; concurrent peers publish without manual merges; lost responses deduplicate; non-descendant history and changed objects halt processing. | Pending |
+| HRC-SYNC-001 through HRC-SYNC-010 | M2 | `AC-GIT-SYNC`: offline queues recover; concurrent peers publish without manual merges; lost responses deduplicate; non-descendant history and changed objects halt processing. | Partial: `crates/hrc-core/src/sync/tests.rs` covers cursor resumption, conflict retry, security-conflict halting, history-rewrite halting, sticky halts, and adapter-reported anomalies; `crates/hrc-transport-git/tests/git_adapter.rs` covers concurrent peers publishing without manual merges. Remaining: the resident daemon and deduplication on replay. |
 | HRC-SYNC-011 | M2 | `AC-LOCAL-SEQUENCE`: concurrent local callers and process crashes cannot allocate duplicate device sequences or ambiguous predecessor chain IDs. | `crates/hrc-storage/src/tests.rs`: four threads on separate connections allocate 100 sequences with no duplicate, gap, or repeated predecessor link; a reservation survives reopening; an abandoned reservation is burned rather than reused. Verified on Linux, macOS, and Windows CI. |
 | HRC-TR-001 through HRC-TR-004 | M0 | `AC-ADAPTER-SPEC`: protocol schema, capability declaration, error model, and opaque-object boundary pass specification review. | Partial: `crates/hrc-transport/src/lib.rs` implements the capability declaration, error model, and opaque-object boundary as executable types. Remaining: specification review, and the JSON-RPC binding for out-of-process adapters. |
 | HRC-TR-005 and HRC-TR-006 | M2 | `AC-GIT-ADAPTER`: generic Git operation succeeds without GitHub API dependency; GitHub optimization preserves identical protocol behavior. | Partial: `crates/hrc-transport-git/tests/git_adapter.rs` drives create, publish, fetch, concurrent conflict and retry, merge rejection, and object substitution against a real bare repository using plain Git and no network or GitHub API. Remaining: the GitHub-specific optimization. |
@@ -2280,7 +2285,7 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 | HRC-SEC-006 through HRC-SEC-008 | M4 | `AC-CONTENT-SECURITY`: ciphertext/decompression limits, secret scanning, and preview reject malicious fixtures. | Pending |
 | HRC-SEC-009 | M3 | `AC-QUARANTINE`: every inbound body is quarantined and framed as untrusted before any approved disclosure. | Pending |
 | HRC-SEC-010, HRC-SEC-014 | M3 | `AC-HUMAN-AUTH`: agent-safe and non-interactive callers cannot read pending bodies, authorize actions, or reuse an authorization. | Pending |
-| HRC-SEC-011 and HRC-SEC-012 | M2 | `AC-AUDIT-AND-HISTORY`: local actions are audited and observed rewrite and substitution scenarios fail closed. | Pending |
+| HRC-SEC-011 and HRC-SEC-012 | M2 | `AC-AUDIT-AND-HISTORY`: local actions are audited and observed rewrite and substitution scenarios fail closed. | Partial: `crates/hrc-core/src/sync/tests.rs` proves rewrite and substitution halt the channel and are audited. Remaining: auditing approval decisions, which arrive with the prompt gate. |
 | HRC-GOV-001 through HRC-GOV-003, HRC-GOV-005 | M0 | `AC-PRD-CI`: representative pull-request fixtures fail when the PRD, ledger, update timestamp, exact requirement-row changes, or a valid no-progress rationale are missing; validation executes base-branch code. | `.github/scripts/check-prd-traceability.ps1`, `.github/workflows/prd-traceability.yml` |
 | HRC-GOV-004 | All | `AC-EVIDENCE`: every status transition to `Verified` includes a stable evidence reference in this registry or the primary requirement table. | Pending |
 | HRC-TECH-001, HRC-TECH-004 | M1 | `AC-RUST-FOUNDATION`: the Rust 2024 Cargo workspace builds and its Clap CLI passes command-contract tests on Windows, macOS, and Linux CI. | Partial: `.github/workflows/build-and-test.yml` builds, lints, and tests the workspace on all three platforms; `crates/hrc-cli/tests/command_contract.rs` covers the command surface and the section 22.7 boundary. Remaining: command behavior beyond the contract. |
@@ -2305,7 +2310,7 @@ Every implementation PR must update this table.
 |---|---:|---|---|---|
 | M0 Product and protocol | 55% | Adds an executable adapter contract, capability declaration, and error model to the written specification | Transport contract and reference adapter | Obtain product-owner approval and complete the JSON-RPC adapter binding |
 | M1 Secure foundation | 75% | Messages seal and open end to end against a real roster, with recipient commitment, revocation ordering, and expiry enforced | Message envelope and validation pipeline | Persist principal and device keys through the OS keychain, then wire channel creation and enrollment into the CLI |
-| M2 Git messaging | 55% | Git transport plus the message envelope and its normative validation pipeline | Message envelope and validation pipeline | Build the daemon fetch and publish loop with backoff, then receipts, threading, and deduplication |
+| M2 Git messaging | 70% | Adds the synchronization engine: cursor-resuming fetch, conflict-retrying publish, backoff policy, and fail-closed halting on observed tampering | Synchronization engine | Wire the resident daemon and the CLI, then receipts, threading, and deduplication |
 | M3 Herdr integration | 0% | Not started | N/A | Verify Herdr long-lived plugin process capabilities |
 | M4 Context/delegation | 0% | Not started | N/A | Finalize context package schema |
 | M5 Provider ecosystem | 0% | Not started | N/A | Deferred until core protocol stabilizes |
@@ -2393,6 +2398,8 @@ recorded either directly in this PRD or in a stable linked artifact.
 | DEC-016 | RFC 8785 canonical JSON uses a pinned Rust implementation, initially `serde_jcs`, guarded by protocol vectors. | Accepted | Avoids custom canonicalization while making signed bytes interoperable. |
 | DEC-017 | Build and test run in a separate `pull_request` workflow rather than being added to the `pull_request_target` traceability workflow. | Accepted | Compiling and running pull-request code under `pull_request_target` would hand a write-capable, secret-bearing context to untrusted code; the two triggers stay separated. |
 | DEC-018 | The CLI publishes a fixed numeric exit-code contract: 0 success, 1 runtime failure, 2 usage, 3 unimplemented, 4 authorization required. | Accepted | PRD section 11.1 requires documented exit codes, and the Herdr plugin and skill must branch on stable numbers rather than parsing prose. |
+| DEC-029 | Synchronization timing is expressed as pure policy functions; nothing in the core sleeps or reads a clock. | Accepted | Retry, backoff, and poll pacing are the parts most likely to be wrong and the hardest to test against real time. Returning durations for the daemon to wait on makes them ordinary unit tests, and leaves the choice of async runtime to the daemon rather than to the core. |
+| DEC-030 | The core re-verifies the publication parent chain that the adapter already guarantees. | Accepted | The conformance suite proves a conforming adapter chains correctly, but a transport is precisely the component an attacker controls. The check is cheap, and the property it protects — which roster epoch governs a message — is the one everything else rests on. |
 | DEC-028 | The recipient device set is derived from the roster inside the sealing operation, never accepted from the caller. | Accepted | HRC-SEC-016 requires the signed commitment to describe the set the encryption builder actually used. A caller that could pass the list separately could commit to one audience and encrypt to another, which is precisely the divergence the requirement exists to prevent. |
 | DEC-027 | A transport object has one identifier: its `name`, which is also its path in the channel layout. | Accepted | The earlier separate `name` and `path` fields let two conforming adapters disagree about what identifies an object: the in-memory adapter keyed on the name and ignored the path, while Git can only address an object by its path. Found when the Git adapter was run against the conformance suite the reference adapter already passed. |
 | DEC-025 | The adapter conformance suite ships with a negative test: a deliberately broken adapter that must fail it. | Accepted | Otherwise the suite's own correctness is unverified. `crates/hrc-transport/tests/reference_adapter.rs` runs an adapter that ignores `expectedRevision` and asserts the suite rejects it by name. |
