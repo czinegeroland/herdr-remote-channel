@@ -1439,14 +1439,6 @@ pub fn thread(context: &Context, thread_id: &str) -> Result<Value> {
     }))
 }
 
-/// Where a message object lives in the channel layout (PRD section 16.2).
-fn message_object_name(now: &str, message_id: &str) -> String {
-    let year = now.get(0..4).unwrap_or("0000");
-    let month = now.get(5..7).unwrap_or("00");
-
-    format!("messages/{year}/{month}/{message_id}.age")
-}
-
 /// Milliseconds since the Unix epoch, for a message identifier.
 ///
 /// Read from the system clock rather than derived from the RFC 3339
