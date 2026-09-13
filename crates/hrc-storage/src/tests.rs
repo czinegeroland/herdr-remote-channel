@@ -476,6 +476,42 @@ fn audit_records_are_appended_in_order() {
 }
 
 #[test]
+fn audit_entries_are_filtered_and_returned_newest_first() {
+    let database = database();
+    database
+        .append_audit(
+            Some(CHANNEL),
+            Some("msg-1"),
+            "quarantine",
+            Some("hash"),
+            Some("first"),
+            "2026-09-13T00:00:00Z",
+        )
+        .unwrap();
+    database
+        .append_audit(
+            Some(CHANNEL),
+            Some("msg-2"),
+            "approve_to_agent",
+            Some("hash"),
+            Some("second"),
+            "2026-09-13T01:00:00Z",
+        )
+        .unwrap();
+
+    let all = database.audit_entries(None).unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].message_id.as_deref(), Some("msg-2"));
+    assert_eq!(all[1].message_id.as_deref(), Some("msg-1"));
+
+    let filtered = database
+        .audit_entries(Some("2026-09-13T00:30:00Z"))
+        .unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].detail.as_deref(), Some("second"));
+}
+
+#[test]
 fn the_inbox_rejects_dispositions_outside_the_lifecycle() {
     // The disposition set is a CHECK constraint rather than a convention, so
     // no code path can quietly invent a state that bypasses the prompt gate.
