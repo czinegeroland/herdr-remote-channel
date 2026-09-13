@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-13T02:58:00+02:00 |
+| Last updated | 2026-09-13T03:24:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -501,14 +501,14 @@ The Herdr plugin must expose:
 | ID | Requirement | Priority | Status | Evidence |
 |---|---|---:|---|---|
 | HRC-CH-001 | Create a channel backed by a Git repository. | Must | Approved | Pending |
-| HRC-CH-002 | Use a signed genesis object as the channel identity authority. | Must | Approved | Pending |
+| HRC-CH-002 | Use a signed genesis object as the channel identity authority. | Must | In progress | `crates/hrc-protocol/src/control.rs`; publication pending |
 | HRC-CH-003 | Support private repositories by default. | Must | Approved | Pending |
 | HRC-CH-004 | Support public repositories after explicit risk confirmation. | Should | Approved | Pending |
 | HRC-CH-005 | Create expiring, single-use invites. | Must | Approved | Pending |
 | HRC-CH-006 | Generate separate principal and device identities. | Must | Approved | Pending |
 | HRC-CH-007 | Require explicit administrator approval for joins. | Must | Approved | Pending |
 | HRC-CH-008 | Support member and device revocation. | Should | Approved | Pending |
-| HRC-CH-009 | Maintain a signed, append-only membership/control log. | Must | Approved | Pending |
+| HRC-CH-009 | Maintain a signed, append-only membership/control log. | Must | In progress | `crates/hrc-protocol/src/control.rs` (entry shapes and hash chaining); roster evaluation pending |
 | HRC-CH-010 | Detect observed conflicting control histories, rewrites, deletions, and substitutions, then stop synchronization. | Must | Approved | Pending |
 
 ### 12.2 Messaging
@@ -1204,6 +1204,12 @@ The principal signs the complete certificate payload with domain
 `descriptor` before checking the principal signature. The protocol test suite
 must publish deterministic certificate and device-ID test vectors.
 
+Genesis and control entries carry devices as this same signed certificate
+envelope rather than as a flattened device object, so a verifier has one code
+path for checking that a principal vouched for a device. The genesis sketch
+above is illustrative; the certificate envelope is normative. See decision
+DEC-020.
+
 ### 18.0.2 Control entry payload
 
 ```json
@@ -1897,7 +1903,7 @@ npx skills add <owner>/herdr-remote-channel `
 | HRC-SEC-001 | Private keys never leave their device. | Approved | Pending |
 | HRC-SEC-002 | Messages are encrypted to explicit active recipient devices. | In progress | `crates/hrc-crypto/src/encryption.rs`; roster-derived recipient selection pending |
 | HRC-SEC-003 | Every message is authenticated by a valid sender-device signature. | Approved | Pending |
-| HRC-SEC-004 | Roster changes are signed and hash chained. | Approved | Pending |
+| HRC-SEC-004 | Roster changes are signed and hash chained. | In progress | `crates/hrc-protocol/src/control.rs`; chain evaluation across a fetched history pending |
 | HRC-SEC-005 | Removed devices cannot receive future-epoch messages. | Approved | Pending |
 | HRC-SEC-006 | Received attachments are size checked before decryption. | Approved | Pending |
 | HRC-SEC-007 | Decompressed data has strict size limits. | Approved | Pending |
@@ -1982,6 +1988,9 @@ npx skills add <owner>/herdr-remote-channel `
 - Protocol types must be versioned.
 - Unknown protocol fields should be ignored when safe.
 - Unknown message kinds must not execute.
+- Unknown control operations must be rejected rather than ignored, because a
+  roster change a client cannot interpret invalidates its membership view.
+  See decision DEC-021.
 - Adapter behavior must be covered by conformance tests.
 
 ### Accessibility
@@ -2213,7 +2222,7 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 
 | Requirements | Milestone | Acceptance criteria | Evidence |
 |---|---|---|---|
-| HRC-CH-001 through HRC-CH-007, HRC-CH-009 | M1 | `AC-ENROLL`: two clean devices create, invite, join, verify, and approve a channel using no shared private material. Invalid genesis, invite, proof, or signature is rejected. | Pending |
+| HRC-CH-001 through HRC-CH-007, HRC-CH-009 | M1 | `AC-ENROLL`: two clean devices create, invite, join, verify, and approve a channel using no shared private material. Invalid genesis, invite, proof, or signature is rejected. | Partial: `crates/hrc-protocol/src/control.rs` covers genesis identity derivation, control-entry shapes, operation round trips, and hash chaining. Remaining: enrollment flow, invite proof, safety phrase, and approval. |
 | HRC-CH-008 | M1 | `AC-REVOCATION`: a device is revoked, the epoch advances, and messages introduced afterward cannot be accepted from or decrypted by the revoked device. | Pending |
 | HRC-CH-010 | M1 | `AC-CONTROL-INTEGRITY`: observed same-parent successors, broken previous hashes, rewrites, deletions, and substitutions stop synchronization with a sticky alert. | Pending |
 | HRC-MSG-001 through HRC-MSG-007, HRC-MSG-010 | M2 | `AC-MESSAGING`: two devices exchange offline notes and threaded questions/answers with receipts, expiry, deduplication, ordering, and local audit evidence. | Pending |
@@ -2255,7 +2264,7 @@ Every implementation PR must update this table.
 | Milestone | Completion | Current state | Last PR | Evidence / next step |
 |---|---:|---|---|---|
 | M0 Product and protocol | 40% | Detailed PRD, Rust stack, and traceability enforcement validated | Initial branch | Obtain product-owner approval and complete dependency spikes |
-| M1 Secure foundation | 30% | Complete cryptographic layer: canonical JSON, signed envelopes, device-ID derivation, Ed25519 signing, age encryption, and the signed recipient-device commitment | age encryption and recipient commitment | Persist principal and device keys through the OS keychain, then build the signed genesis and roster |
+| M1 Secure foundation | 40% | Cryptographic layer complete; genesis identity, the ten control operations, and control-log hash chaining are defined and tested | Genesis and control-log object model | Evaluate a control chain into roster state with epochs and authority, then persist keys through the OS keychain |
 | M2 Git messaging | 0% | Not started | N/A | Define adapter fixtures and concurrent-push tests |
 | M3 Herdr integration | 0% | Not started | N/A | Verify Herdr long-lived plugin process capabilities |
 | M4 Context/delegation | 0% | Not started | N/A | Finalize context package schema |
@@ -2344,6 +2353,8 @@ recorded either directly in this PRD or in a stable linked artifact.
 | DEC-016 | RFC 8785 canonical JSON uses a pinned Rust implementation, initially `serde_jcs`, guarded by protocol vectors. | Accepted | Avoids custom canonicalization while making signed bytes interoperable. |
 | DEC-017 | Build and test run in a separate `pull_request` workflow rather than being added to the `pull_request_target` traceability workflow. | Accepted | Compiling and running pull-request code under `pull_request_target` would hand a write-capable, secret-bearing context to untrusted code; the two triggers stay separated. |
 | DEC-018 | The CLI publishes a fixed numeric exit-code contract: 0 success, 1 runtime failure, 2 usage, 3 unimplemented, 4 authorization required. | Accepted | PRD section 11.1 requires documented exit codes, and the Herdr plugin and skill must branch on stable numbers rather than parsing prose. |
+| DEC-020 | Genesis and control entries carry devices as the signed `hrc/v1/device-certificate` envelope, not as a flattened device object. | Accepted | One verification path for device authorization instead of two, and the device ID stays bound to the descriptor it was derived from. |
+| DEC-021 | An unrecognized control operation is a parse failure, not an ignorable field. | Accepted | PRD section 27 allows ignoring unknown fields when safe, but a roster change a client cannot interpret is never safe to skip: it would keep operating on a membership view it knows is incomplete. Unknown *message kinds* remain non-fatal per section 18.2. |
 | DEC-019 | Protocol integers that must round-trip exactly and can exceed 2^53 - 1 are carried as JSON strings. | Accepted | RFC 8785 canonicalizes numbers as ECMAScript doubles, so a larger integer is silently rounded and the signed bytes change. Confirmed by `integers_beyond_the_double_safe_range_lose_precision` in `crates/hrc-protocol/tests/rfc8785_vectors.rs`. |
 
 ---
