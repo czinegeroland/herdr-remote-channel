@@ -6,6 +6,15 @@
 //!
 //! See PRD sections 18.0 and 18.2.
 
+pub mod canonical;
+pub mod error;
+pub mod identity;
+pub mod signed;
+
+pub use error::{ProtocolError, Result};
+pub use identity::{DeviceCertificatePayload, DeviceDescriptor};
+pub use signed::{SignedObject, Signer, signature_input};
+
 /// Version carried by every signed protocol object.
 pub const PROTOCOL_VERSION: u32 = 1;
 
