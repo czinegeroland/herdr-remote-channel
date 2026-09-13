@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-13T01:33:47+02:00 |
+| Last updated | 2026-09-13T02:41:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -610,8 +610,8 @@ The Herdr plugin must expose:
 | HRC-TECH-002 | Ship one self-contained `hrc` executable with subcommands for CLI, daemon, Herdr actions, events, panes, and startup. | Must | In progress | `crates/hrc-cli/src/main.rs`, `crates/hrc-cli/tests/command_contract.rs` |
 | HRC-TECH-003 | Use Tokio for asynchronous scheduling, process management, polling, and cancellation. | Must | Approved | Decision DEC-015 |
 | HRC-TECH-004 | Use Clap for the public CLI and stable machine-readable command contracts. | Must | In progress | `crates/hrc-cli/src/cli.rs`, `crates/hrc-cli/src/exit.rs`, `crates/hrc-cli/tests/command_contract.rs` |
-| HRC-TECH-005 | Use Serde/serde_json and a pinned RFC 8785 implementation with protocol test vectors. | Must | Approved | Decision DEC-016 |
-| HRC-TECH-006 | Use maintained Rust cryptography crates, including `age` and `ed25519-dalek`, without custom cryptographic primitives. | Must | Approved | Decision DEC-015 |
+| HRC-TECH-005 | Use Serde/serde_json and a pinned RFC 8785 implementation with protocol test vectors. | Must | In progress | `crates/hrc-protocol/src/canonical.rs`, `crates/hrc-protocol/tests/rfc8785_vectors.rs` |
+| HRC-TECH-006 | Use maintained Rust cryptography crates, including `age` and `ed25519-dalek`, without custom cryptographic primitives. | Must | In progress | `crates/hrc-crypto/src/lib.rs` (Ed25519); `age` encryption pending |
 | HRC-TECH-007 | Store durable local state in SQLite using `rusqlite` with WAL mode and transactional allocation. | Must | Approved | Decision DEC-015 |
 | HRC-TECH-008 | Use `ratatui` and `crossterm` for the trusted inbox and approval TUI. | Must | Approved | Decision DEC-015 |
 | HRC-TECH-009 | Use a cross-platform local IPC abstraction supporting Unix-domain sockets and Windows named pipes. | Must | Approved | Pending compatibility spike |
@@ -1090,6 +1090,12 @@ checkpoint exchange, or another independent consistency service.
 
 Protocol objects use UTF-8 JSON serialized with RFC 8785 JSON Canonicalization
 Scheme (JCS). Binary values use unpadded base64url. Signatures use Ed25519.
+
+RFC 8785 numbers are ECMAScript doubles. A JSON number outside the range
+-(2^53 - 1) to 2^53 - 1 therefore does not survive canonicalization unchanged,
+which would alter signed bytes. Any protocol field that must round-trip
+exactly and can exceed that range MUST be encoded as a string rather than as
+a JSON number. See decision DEC-019.
 
 A signed object has this shape:
 
@@ -2226,7 +2232,7 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 | HRC-GOV-001 through HRC-GOV-003, HRC-GOV-005 | M0 | `AC-PRD-CI`: representative pull-request fixtures fail when the PRD, ledger, update timestamp, exact requirement-row changes, or a valid no-progress rationale are missing; validation executes base-branch code. | `.github/scripts/check-prd-traceability.ps1`, `.github/workflows/prd-traceability.yml` |
 | HRC-GOV-004 | All | `AC-EVIDENCE`: every status transition to `Verified` includes a stable evidence reference in this registry or the primary requirement table. | Pending |
 | HRC-TECH-001, HRC-TECH-004 | M1 | `AC-RUST-FOUNDATION`: the Rust 2024 Cargo workspace builds and its Clap CLI passes command-contract tests on Windows, macOS, and Linux CI. | Partial: `.github/workflows/build-and-test.yml` builds, lints, and tests the workspace on all three platforms; `crates/hrc-cli/tests/command_contract.rs` covers the command surface and the section 22.7 boundary. Remaining: command behavior beyond the contract. |
-| HRC-TECH-005, HRC-TECH-006 | M1 | `AC-RUST-PROTOCOL`: RFC 8785 vectors, signatures, age encryption, malformed-input cases, and cross-platform deterministic fixtures pass. | Pending |
+| HRC-TECH-005, HRC-TECH-006 | M1 | `AC-RUST-PROTOCOL`: RFC 8785 vectors, signatures, age encryption, malformed-input cases, and cross-platform deterministic fixtures pass. | Partial: `crates/hrc-protocol/tests/rfc8785_vectors.rs` covers canonicalization, and `crates/hrc-crypto/src/lib.rs` pins an OpenSSL-derived Ed25519 vector plus malformed-key, malformed-signature, wrong-domain, and tampered-payload cases. Remaining: age encryption. |
 | HRC-TECH-009 | M1 | `AC-RUST-IPC`: the selected IPC implementation exchanges framed requests over Unix-domain sockets and Windows named pipes with reconnect and permission tests. | Pending |
 | HRC-TECH-003, HRC-TECH-007, HRC-TECH-010 | M2 | `AC-RUST-DAEMON`: Tokio daemon, WAL-backed SQLite state, transactional allocation, and system-Git synchronization pass crash/retry integration tests. | Pending |
 | HRC-TECH-008 | M3 | `AC-RUST-TUI`: ratatui/crossterm inbox and approval flows pass terminal interaction tests on supported platforms. | Pending |
@@ -2246,7 +2252,7 @@ Every implementation PR must update this table.
 | Milestone | Completion | Current state | Last PR | Evidence / next step |
 |---|---:|---|---|---|
 | M0 Product and protocol | 40% | Detailed PRD, Rust stack, and traceability enforcement validated | Initial branch | Obtain product-owner approval and complete dependency spikes |
-| M1 Secure foundation | 10% | Cargo workspace, published CLI command contract, exit-code contract, and cross-platform build/lint/test CI | Rust workspace scaffold and build/test CI | Implement identity and device key management, then validate keychain and IPC portability |
+| M1 Secure foundation | 20% | Adds canonical JSON, the signed-object envelope, device-ID derivation, and Ed25519 signing to the workspace and CLI contract | Protocol canonicalization and signing primitives | Add age encryption, then principal/device key storage and the signed genesis and roster |
 | M2 Git messaging | 0% | Not started | N/A | Define adapter fixtures and concurrent-push tests |
 | M3 Herdr integration | 0% | Not started | N/A | Verify Herdr long-lived plugin process capabilities |
 | M4 Context/delegation | 0% | Not started | N/A | Finalize context package schema |
@@ -2335,15 +2341,18 @@ recorded either directly in this PRD or in a stable linked artifact.
 | DEC-016 | RFC 8785 canonical JSON uses a pinned Rust implementation, initially `serde_jcs`, guarded by protocol vectors. | Accepted | Avoids custom canonicalization while making signed bytes interoperable. |
 | DEC-017 | Build and test run in a separate `pull_request` workflow rather than being added to the `pull_request_target` traceability workflow. | Accepted | Compiling and running pull-request code under `pull_request_target` would hand a write-capable, secret-bearing context to untrusted code; the two triggers stay separated. |
 | DEC-018 | The CLI publishes a fixed numeric exit-code contract: 0 success, 1 runtime failure, 2 usage, 3 unimplemented, 4 authorization required. | Accepted | PRD section 11.1 requires documented exit codes, and the Herdr plugin and skill must branch on stable numbers rather than parsing prose. |
+| DEC-019 | Protocol integers that must round-trip exactly and can exceed 2^53 - 1 are carried as JSON strings. | Accepted | RFC 8785 canonicalizes numbers as ECMAScript doubles, so a larger integer is silently rounded and the signed bytes change. Confirmed by `integers_beyond_the_double_safe_range_lose_precision` in `crates/hrc-protocol/tests/rfc8785_vectors.rs`. |
 
 ---
 
 ## 35. Open questions
 
+Resolved questions move to section 34 as decisions and are removed from this
+table. OQ-002 was closed by decision DEC-019 and the RFC 8785 vector suite.
+
 | ID | Question | Owner | Target milestone |
 |---|---|---|---|
 | OQ-001 | Which secure fallback is allowed when the Rust `keyring` crate cannot access a platform credential store? | TBD | M1 |
-| OQ-002 | Does the selected `serde_jcs` version pass all required RFC 8785 and cross-language protocol vectors? | TBD | M0 |
 | OQ-003 | Does the selected local IPC crate behave consistently for Unix sockets and Windows named pipes under Tokio? | TBD | M1 |
 | OQ-004 | Can a Herdr plugin host a long-running process, or must the daemon be external? | TBD | M0 |
 | OQ-005 | Which GitHub ruleset features are available on supported account plans? | TBD | M1 |
