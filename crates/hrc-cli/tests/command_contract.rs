@@ -72,6 +72,24 @@ fn unimplemented_commands_report_a_stable_json_shape() {
 }
 
 #[test]
+fn audit_reports_a_stable_json_shape() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("state");
+
+    hrc_in(&home).arg("init").assert().success();
+
+    let output = hrc_in(&home)
+        .args(["audit", "--json"])
+        .output()
+        .expect("audit should run");
+    assert!(output.status.success());
+
+    let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(value["status"], "ok");
+    assert!(value["entries"].is_array());
+}
+
+#[test]
 fn trusted_interface_commands_refuse_json() {
     for command in ["review", "approve"] {
         let output = hrc()

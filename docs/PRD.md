@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-13T17:45:00+02:00 |
+| Last updated | 2026-09-13T12:43:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -524,7 +524,7 @@ The Herdr plugin must expose:
 | HRC-MSG-007 | Preserve per-device message ordering. | Must | Approved | Pending |
 | HRC-MSG-008 | Support structured task/delegation messages without execution. | Should | Approved | Pending |
 | HRC-MSG-009 | Support progress and result messages. | Should | Approved | Pending |
-| HRC-MSG-010 | Retain a local audit record of communication decisions. | Must | In progress | `crates/hrc-storage/src/lib.rs` append-only audit table; decision recording pending |
+| HRC-MSG-010 | Retain a local audit record of communication decisions. | Must | In progress | `crates/hrc-storage/src/lib.rs` keeps an append-only audit table and `crates/hrc-cli/src/commands.rs` / `src/main.rs` surface it through `hrc audit`; recording prompt and messaging decisions is still pending |
 
 ### 12.3 Prompt gate
 
@@ -607,7 +607,7 @@ The Herdr plugin must expose:
 | ID | Requirement | Priority | Status | Evidence |
 |---|---|---:|---|---|
 | HRC-TECH-001 | Implement the production CLI, daemon, protocol, crypto, transport core, and Herdr integration in Rust 2024 edition. | Must | In progress | `Cargo.toml`, `crates/`, `.github/workflows/build-and-test.yml` |
-| HRC-TECH-002 | Ship one self-contained `hrc` executable with subcommands for CLI, daemon, Herdr actions, events, panes, and startup. | Must | In progress | `crates/hrc-cli/src/main.rs`; `init`, `whoami`, `channels`, `status`, and `doctor` perform real work, the rest report the documented not-implemented code |
+| HRC-TECH-002 | Ship one self-contained `hrc` executable with subcommands for CLI, daemon, Herdr actions, events, panes, and startup. | Must | In progress | `crates/hrc-cli/src/main.rs`; `init`, `whoami`, `channels`, `status`, `doctor`, and `audit` perform real work, the rest report the documented not-implemented code |
 | HRC-TECH-003 | Use Tokio for asynchronous scheduling, process management, polling, and cancellation. | Must | Approved | Decision DEC-015 |
 | HRC-TECH-004 | Use Clap for the public CLI and stable machine-readable command contracts. | Must | Implemented | `crates/hrc-cli/src/cli.rs`, `crates/hrc-cli/src/render.rs`: both output modes render one value, so JSON and human output cannot diverge |
 | HRC-TECH-005 | Use Serde/serde_json and a pinned RFC 8785 implementation with protocol test vectors. | Must | In progress | `crates/hrc-protocol/src/canonical.rs`, `crates/hrc-protocol/tests/rfc8785_vectors.rs` |
@@ -2394,7 +2394,7 @@ Every implementation PR must update this table.
 |---|---:|---|---|---|
 | M0 Product and protocol | 55% | Adds an executable adapter contract, capability declaration, and error model to the written specification | Transport contract and reference adapter | Obtain product-owner approval and complete the JSON-RPC adapter binding |
 | M1 Secure foundation | 99% | Adds the framed local IPC layer, verified against a Unix socket and a Windows named pipe on CI, closing the compatibility spike | Local IPC | Persist the principal key, then integrate an OS keychain backend |
-| M2 Git messaging | 70% | Adds the synchronization engine: cursor-resuming fetch, conflict-retrying publish, backoff policy, and fail-closed halting on observed tampering | Synchronization engine | Wire the resident daemon and the CLI, then receipts, threading, and deduplication |
+| M2 Git messaging | 70% | Adds the synchronization engine plus a real `hrc audit` surface for the local append-only audit log | Synchronization engine | Wire the resident daemon and the CLI, then receipts, threading, deduplication, and audit decision recording |
 | M3 Herdr integration | 50% | Adds the daemon's two local interfaces as two request and response types, so an agent-safe caller has no request that means "a pending body" and no response that could hold one | Daemon surface split | Build the trusted approval TUI, then the Herdr inbox UI |
 | M4 Context/delegation | 30% | Context packages with previews, digest verification, default path exclusions, and blocking secret scanning | Context packages | Add git-ignored path checking and attachment limits, then structured delegation messages |
 | M5 Provider ecosystem | 0% | Not started | N/A | Deferred until core protocol stabilizes |

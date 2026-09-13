@@ -216,6 +216,30 @@ pub fn doctor(context: &Context) -> Result<Value> {
     }))
 }
 
+/// `hrc audit`: show the local audit log.
+pub fn audit(context: &Context, since: Option<&str>) -> Result<Value> {
+    let database = Database::open(context.paths.database())?;
+
+    let entries: Vec<Value> = database
+        .audit_entries(since)?
+        .into_iter()
+        .map(|entry| {
+            json!({
+                "occurredAt": entry.occurred_at,
+                "action": entry.action,
+                "channelId": entry.channel_id,
+                "messageId": entry.message_id,
+                "detail": entry.detail,
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "status": "ok",
+        "entries": entries,
+    }))
+}
+
 /// The installed Git version, if Git is on the path.
 fn git_version() -> Option<String> {
     let output = std::process::Command::new("git")

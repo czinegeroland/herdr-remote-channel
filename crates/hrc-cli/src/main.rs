@@ -94,6 +94,9 @@ fn run(cli: &Cli, _path: &str) -> std::result::Result<Value, Failure> {
         Command::Channels => commands::channels(&context).map_err(Failure::from),
         Command::Status => commands::status(&context).map_err(Failure::from),
         Command::Doctor => commands::doctor(&context).map_err(Failure::from),
+        Command::Audit(args) => {
+            commands::audit(&context, args.since.as_deref()).map_err(Failure::from)
+        }
 
         other => match dispatch::classify(other) {
             Outcome::Unimplemented { milestone } => Err(Failure::NotShipped { milestone }),

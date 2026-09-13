@@ -125,6 +125,21 @@ pub struct ChannelCounts {
     pub last_error: Option<String>,
 }
 
+/// One recorded audit entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditEntry {
+    /// Channel the action applied to, when any.
+    pub channel_id: Option<String>,
+    /// Message the action applied to, when any.
+    pub message_id: Option<String>,
+    /// Stable action name.
+    pub action: String,
+    /// Optional detail for a human.
+    pub detail: Option<String>,
+    /// RFC 3339 time the action occurred.
+    pub occurred_at: String,
+}
+
 /// The local state database.
 ///
 /// `Debug` prints the schema version only. The connection handle would
@@ -555,6 +570,26 @@ impl Database {
             .connection
             .prepare("SELECT action FROM audit ORDER BY id")?;
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Audit entries in reverse chronological order.
+    pub fn audit_entries(&self, since: Option<&str>) -> Result<Vec<AuditEntry>> {
+        let mut statement = self.connection.prepare(
+            "SELECT channel_id, message_id, action, detail, occurred_at
+             FROM audit
+             WHERE (?1 IS NULL OR occurred_at >= ?1)
+             ORDER BY occurred_at DESC, id DESC",
+        )?;
+        let rows = statement.query_map(params![since], |row| {
+            Ok(AuditEntry {
+                channel_id: row.get(0)?,
+                message_id: row.get(1)?,
+                action: row.get(2)?,
+                detail: row.get(3)?,
+                occurred_at: row.get(4)?,
+            })
+        })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 

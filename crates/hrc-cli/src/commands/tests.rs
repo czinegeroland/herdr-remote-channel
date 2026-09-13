@@ -267,3 +267,53 @@ fn doctor_finds_the_git_executable() {
     assert_eq!(git["ok"], true, "git is required and is present in CI");
     assert!(git["detail"].as_str().unwrap().starts_with("git version"));
 }
+
+#[test]
+fn audit_is_empty_before_any_action_is_recorded() {
+    let (_directory, context) = home();
+    init(&context).unwrap();
+
+    let value = audit(&context, None).unwrap();
+    assert_eq!(value["status"], "ok");
+    assert!(value["entries"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn audit_reports_entries_newest_first_and_can_filter_by_time() {
+    let (_directory, context) = home();
+    init(&context).unwrap();
+
+    let database = Database::open(context.paths.database()).unwrap();
+    database
+        .append_audit(
+            Some("channel-1"),
+            Some("msg-1"),
+            "draft_saved",
+            Some("hash-1"),
+            Some("first"),
+            "2026-09-13T00:00:00Z",
+        )
+        .unwrap();
+    database
+        .append_audit(
+            Some("channel-1"),
+            Some("msg-2"),
+            "synchronization_halted",
+            None,
+            Some("history rewritten"),
+            "2026-09-13T01:00:00Z",
+        )
+        .unwrap();
+
+    let value = audit(&context, None).unwrap();
+    let entries = value["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["action"], "synchronization_halted");
+    assert_eq!(entries[0]["detail"], "history rewritten");
+    assert_eq!(entries[1]["action"], "draft_saved");
+
+    let filtered = audit(&context, Some("2026-09-13T00:30:00Z")).unwrap();
+    let entries = filtered["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["messageId"], "msg-2");
+}

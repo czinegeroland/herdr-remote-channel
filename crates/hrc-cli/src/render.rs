@@ -23,6 +23,7 @@ pub fn success(as_json: bool, command: &str, value: &Value) {
         "channels" => render_channels(value),
         "status" => render_status(value),
         "doctor" => render_doctor(value),
+        "audit" => render_audit(value),
         _ => println!("{value}"),
     }
 }
@@ -124,6 +125,27 @@ fn render_doctor(value: &Value) {
         println!("All checks passed.");
     } else {
         println!("Some checks failed. See the lines marked FAILED above.");
+    }
+}
+
+fn render_audit(value: &Value) {
+    let entries = array(value, "entries");
+    if entries.is_empty() {
+        println!("No audit entries.");
+        return;
+    }
+
+    for entry in entries {
+        println!("{}  {}", text(entry, "occurredAt"), text(entry, "action"),);
+        if let Some(channel) = entry["channelId"].as_str() {
+            println!("  channel {}", channel);
+        }
+        if let Some(message) = entry["messageId"].as_str() {
+            println!("  message {}", message);
+        }
+        if let Some(detail) = entry["detail"].as_str() {
+            println!("  detail  {}", detail);
+        }
     }
 }
 
