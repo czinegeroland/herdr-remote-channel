@@ -110,8 +110,12 @@ pub struct MessageEnvelope {
     /// Kind-specific content.
     pub body: serde_json::Value,
     /// Attachment references.
+    ///
+    /// References rather than content: the declared size travels in the
+    /// signed envelope, so a receiver can refuse an attachment before
+    /// fetching or decrypting anything (PRD requirement HRC-SEC-006).
     #[serde(default)]
-    pub attachments: Vec<serde_json::Value>,
+    pub attachments: Vec<crate::attachment::Attachment>,
     /// Padding to a size bucket. Carries no meaning.
     pub padding: String,
 }
@@ -133,6 +137,7 @@ impl MessageEnvelope {
 
         canonical::expect_hex_digest("channelId", &self.channel_id, 32)?;
         self.recipients.verify()?;
+        crate::attachment::validate_attachments(&self.attachments)?;
 
         if self.message_id.is_empty() {
             return Err(ProtocolError::DerivedMismatch { field: "messageId" });
@@ -352,5 +357,45 @@ mod tests {
             padding_for(MAX_PLAINTEXT_BYTES + 1).unwrap_err(),
             ProtocolError::MessageTooLarge { .. }
         ));
+    }
+
+    #[test]
+    fn an_envelope_rejects_an_attachment_set_over_the_limit() {
+        // The check belongs on the envelope rather than at each call site,
+        // so a message carrying too much cannot be validated by a caller
+        // that forgot to look at its attachments.
+        use crate::attachment::Attachment;
+
+        let mut message = envelope();
+        message.attachments = (0..6)
+            .map(|index| Attachment {
+                name: format!("blob-{index}"),
+                media_type: "application/octet-stream".into(),
+                ciphertext_sha256: canonical::sha256_hex(&[index as u8]),
+                ciphertext_bytes: 5 * 1024 * 1024,
+                plaintext_bytes: 1024,
+            })
+            .collect();
+
+        assert!(matches!(
+            message.validate_shape().unwrap_err(),
+            ProtocolError::MessageTooLarge { .. }
+        ));
+    }
+
+    #[test]
+    fn an_envelope_accepts_attachments_within_the_limit() {
+        use crate::attachment::Attachment;
+
+        let mut message = envelope();
+        message.attachments = vec![Attachment {
+            name: "findings.txt".into(),
+            media_type: "text/plain".into(),
+            ciphertext_sha256: canonical::sha256_hex(b"blob"),
+            ciphertext_bytes: 4096,
+            plaintext_bytes: 4032,
+        }];
+
+        message.validate_shape().unwrap();
     }
 }

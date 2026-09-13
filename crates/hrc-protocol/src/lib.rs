@@ -6,6 +6,7 @@
 //!
 //! See PRD sections 18.0 and 18.2.
 
+pub mod attachment;
 pub mod canonical;
 pub mod control;
 pub mod delegation;
@@ -17,6 +18,7 @@ pub mod receipt;
 pub mod recipients;
 pub mod signed;
 
+pub use attachment::{Attachment, safe_file_name, validate_attachments};
 pub use control::{ControlEntryPayload, ControlOperation, GenesisPayload};
 pub use delegation::{DelegationState, ProgressBody, ResultBody, TaskBody};
 pub use error::{ProtocolError, Result};
