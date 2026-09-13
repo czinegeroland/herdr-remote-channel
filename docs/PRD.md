@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-13T03:58:00+02:00 |
+| Last updated | 2026-09-13T04:36:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -524,7 +524,7 @@ The Herdr plugin must expose:
 | HRC-MSG-007 | Preserve per-device message ordering. | Must | Approved | Pending |
 | HRC-MSG-008 | Support structured task/delegation messages without execution. | Should | Approved | Pending |
 | HRC-MSG-009 | Support progress and result messages. | Should | Approved | Pending |
-| HRC-MSG-010 | Retain a local audit record of communication decisions. | Must | Approved | Pending |
+| HRC-MSG-010 | Retain a local audit record of communication decisions. | Must | In progress | `crates/hrc-storage/src/lib.rs` append-only audit table; decision recording pending |
 
 ### 12.3 Prompt gate
 
@@ -555,17 +555,17 @@ The Herdr plugin must expose:
 
 | ID | Requirement | Priority | Status | Evidence |
 |---|---|---:|---|---|
-| HRC-SYNC-001 | Persist outgoing objects before attempting publication. | Must | Approved | Pending |
+| HRC-SYNC-001 | Persist outgoing objects before attempting publication. | Must | Implemented | `crates/hrc-storage/src/lib.rs` durable outbox |
 | HRC-SYNC-002 | Detect remote branch changes through polling. | Must | Approved | Pending |
 | HRC-SYNC-003 | Fetch only when the remote branch head changes. | Must | Approved | Pending |
-| HRC-SYNC-004 | Resume from a durable local commit cursor. | Must | Approved | Pending |
+| HRC-SYNC-004 | Resume from a durable local commit cursor. | Must | In progress | `crates/hrc-storage/src/lib.rs` cursor column and accessors; fetch loop pending |
 | HRC-SYNC-005 | Detect observed history rewrites, conflicting successors, deletions, and changed objects. | Must | Approved | Pending |
 | HRC-SYNC-006 | Retry non-fast-forward pushes automatically. | Must | Approved | Pending |
 | HRC-SYNC-007 | Never force-push during normal operation. | Must | Approved | Pending |
 | HRC-SYNC-008 | Re-encrypt unpublished messages after a roster-epoch change. | Must | Approved | Pending |
 | HRC-SYNC-009 | Back off with jitter after failures or inactivity. | Must | Approved | Pending |
 | HRC-SYNC-010 | Continue operating after process and Herdr restarts. | Must | Approved | Pending |
-| HRC-SYNC-011 | Allocate message ID, device sequence, predecessor chain ID, payload, and outbox record atomically. | Must | Approved | Pending |
+| HRC-SYNC-011 | Allocate message ID, device sequence, predecessor chain ID, payload, and outbox record atomically. | Must | Implemented | `crates/hrc-storage/src/lib.rs` `allocate_outgoing`, proven by a 100-allocation four-thread concurrency test |
 
 ### 12.6 Transport extensibility
 
@@ -612,7 +612,7 @@ The Herdr plugin must expose:
 | HRC-TECH-004 | Use Clap for the public CLI and stable machine-readable command contracts. | Must | In progress | `crates/hrc-cli/src/cli.rs`, `crates/hrc-cli/src/exit.rs`, `crates/hrc-cli/tests/command_contract.rs` |
 | HRC-TECH-005 | Use Serde/serde_json and a pinned RFC 8785 implementation with protocol test vectors. | Must | In progress | `crates/hrc-protocol/src/canonical.rs`, `crates/hrc-protocol/tests/rfc8785_vectors.rs` |
 | HRC-TECH-006 | Use maintained Rust cryptography crates, including `age` and `ed25519-dalek`, without custom cryptographic primitives. | Must | Implemented | `crates/hrc-crypto/src/lib.rs` (Ed25519), `crates/hrc-crypto/src/encryption.rs` (age X25519) |
-| HRC-TECH-007 | Store durable local state in SQLite using `rusqlite` with WAL mode and transactional allocation. | Must | Approved | Decision DEC-015 |
+| HRC-TECH-007 | Store durable local state in SQLite using `rusqlite` with WAL mode and transactional allocation. | Must | Implemented | `crates/hrc-storage/src/lib.rs`, `crates/hrc-storage/src/migrations/001_initial.sql` |
 | HRC-TECH-008 | Use `ratatui` and `crossterm` for the trusted inbox and approval TUI. | Must | Approved | Decision DEC-015 |
 | HRC-TECH-009 | Use a cross-platform local IPC abstraction supporting Unix-domain sockets and Windows named pipes. | Must | Approved | Pending compatibility spike |
 | HRC-TECH-010 | Invoke the system Git executable rather than embedding a Git implementation. | Must | Approved | Decision DEC-015 |
@@ -987,6 +987,14 @@ If the process crashes after reservation but before publication, recovery must
 either publish the reserved record or mark the sequence as an explicit local
 gap. A second concurrent caller must never receive the same sequence or
 predecessor chain ID.
+
+The allocation transaction MUST take the database write lock at the point it
+begins, rather than acquiring a read lock and upgrading. SQLite refuses a
+read-to-write upgrade with `SQLITE_BUSY` immediately and without consulting
+the busy timeout, because waiting could deadlock two upgraders, so a deferred
+transaction makes concurrent allocation fail under exactly the contention it
+must survive. In `rusqlite` this is `TransactionBehavior::Immediate`. See
+decision DEC-023.
 
 ### 17.3 Concurrent remote writes
 
@@ -2240,7 +2248,7 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 | HRC-GATE-001 through HRC-GATE-008 | M3 | `AC-PROMPT-GATE`: pending bodies are unavailable through agent-safe interfaces; trusted UI issues a one-use digest-bound authorization; reuse, modification, and wrong-target delivery fail. | Pending |
 | HRC-CTX-001 through HRC-CTX-007 | M4 | `AC-CONTEXT`: supported context items round-trip with previews and verified hashes; excluded paths, detected secrets, oversized objects, and malformed archives are blocked. | Pending |
 | HRC-SYNC-001 through HRC-SYNC-010 | M2 | `AC-GIT-SYNC`: offline queues recover; concurrent peers publish without manual merges; lost responses deduplicate; non-descendant history and changed objects halt processing. | Pending |
-| HRC-SYNC-011 | M2 | `AC-LOCAL-SEQUENCE`: concurrent local callers and process crashes cannot allocate duplicate device sequences or ambiguous predecessor chain IDs. | Pending |
+| HRC-SYNC-011 | M2 | `AC-LOCAL-SEQUENCE`: concurrent local callers and process crashes cannot allocate duplicate device sequences or ambiguous predecessor chain IDs. | `crates/hrc-storage/src/tests.rs`: four threads on separate connections allocate 100 sequences with no duplicate, gap, or repeated predecessor link; a reservation survives reopening; an abandoned reservation is burned rather than reused. Verified on Linux, macOS, and Windows CI. |
 | HRC-TR-001 through HRC-TR-004 | M0 | `AC-ADAPTER-SPEC`: protocol schema, capability declaration, error model, and opaque-object boundary pass specification review. | Pending |
 | HRC-TR-005 and HRC-TR-006 | M2 | `AC-GIT-ADAPTER`: generic Git operation succeeds without GitHub API dependency; GitHub optimization preserves identical protocol behavior. | Pending |
 | HRC-TR-007 | M2 | `AC-ADAPTER-CONFORMANCE`: the in-memory reference adapter and Git adapter both pass the publication-revision, ordering, conflict, durability, and opaque-object conformance suite. | Pending |
@@ -2274,8 +2282,8 @@ Every implementation PR must update this table.
 | Milestone | Completion | Current state | Last PR | Evidence / next step |
 |---|---:|---|---|---|
 | M0 Product and protocol | 40% | Detailed PRD, Rust stack, and traceability enforcement validated | Initial branch | Obtain product-owner approval and complete dependency spikes |
-| M1 Secure foundation | 55% | Roster evaluation replays a signed control chain into membership state with epochs, authority, and revocation, on top of the complete cryptographic layer | Roster evaluation | Persist principal and device keys through the OS keychain, then wire channel creation and enrollment into the CLI |
-| M2 Git messaging | 0% | Not started | N/A | Define adapter fixtures and concurrent-push tests |
+| M1 Secure foundation | 65% | Adds the durable local state store: WAL-backed SQLite, the atomic sequence allocation, the outbox lifecycle, the quarantined inbox schema, and the append-only audit log | Local state store | Persist principal and device keys through the OS keychain, then wire channel creation and enrollment into the CLI |
+| M2 Git messaging | 5% | Outbox durability, retry accounting, and crash recovery are in place ahead of the transport | Local state store | Define adapter fixtures and concurrent-push tests |
 | M3 Herdr integration | 0% | Not started | N/A | Verify Herdr long-lived plugin process capabilities |
 | M4 Context/delegation | 0% | Not started | N/A | Finalize context package schema |
 | M5 Provider ecosystem | 0% | Not started | N/A | Deferred until core protocol stabilizes |
@@ -2363,6 +2371,8 @@ recorded either directly in this PRD or in a stable linked artifact.
 | DEC-016 | RFC 8785 canonical JSON uses a pinned Rust implementation, initially `serde_jcs`, guarded by protocol vectors. | Accepted | Avoids custom canonicalization while making signed bytes interoperable. |
 | DEC-017 | Build and test run in a separate `pull_request` workflow rather than being added to the `pull_request_target` traceability workflow. | Accepted | Compiling and running pull-request code under `pull_request_target` would hand a write-capable, secret-bearing context to untrusted code; the two triggers stay separated. |
 | DEC-018 | The CLI publishes a fixed numeric exit-code contract: 0 success, 1 runtime failure, 2 usage, 3 unimplemented, 4 authorization required. | Accepted | PRD section 11.1 requires documented exit codes, and the Herdr plugin and skill must branch on stable numbers rather than parsing prose. |
+| DEC-023 | The local sequence-allocation transaction begins in SQLite IMMEDIATE mode. | Accepted | A deferred transaction upgrades from a read lock to a write lock, and SQLite fails that upgrade with `SQLITE_BUSY` without waiting on the busy timeout. Found by the concurrency test in `crates/hrc-storage/src/tests.rs`, which failed under four concurrent allocators before the change. |
+| DEC-024 | A sequence reserved before a crash is burned as an explicit gap, never reused. | Accepted | PRD section 17.2 permits either publishing the reservation or recording a gap. Reuse is not among the options: a peer may already have observed a message claiming that sequence, and reissuing it would create two messages with one chain position. |
 | DEC-022 | Genesis is signed by an administrator device, and the first control entry names the channel ID as its predecessor hash. | Accepted | Keeps one signer shape and one verification path for every signed object, and makes the control chain unbroken from genesis onward without a special case. |
 | DEC-020 | Genesis and control entries carry devices as the signed `hrc/v1/device-certificate` envelope, not as a flattened device object. | Accepted | One verification path for device authorization instead of two, and the device ID stays bound to the descriptor it was derived from. |
 | DEC-021 | An unrecognized control operation is a parse failure, not an ignorable field. | Accepted | PRD section 27 allows ignoring unknown fields when safe, but a roster change a client cannot interpret is never safe to skip: it would keep operating on a membership view it knows is incomplete. Unknown *message kinds* remain non-fatal per section 18.2. |

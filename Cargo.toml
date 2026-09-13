@@ -40,7 +40,9 @@ thiserror = "2"
 age = "0.12"
 ed25519-dalek = { version = "3", features = ["zeroize"] }
 getrandom = "0.4"
+rusqlite = { version = "0.40", features = ["bundled"] }
 secrecy = "0.10"
+tempfile = "3"
 zeroize = "1"
 
 [workspace.lints.rust]
