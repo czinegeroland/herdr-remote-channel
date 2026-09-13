@@ -162,6 +162,16 @@ fn run(cli: &Cli, _path: &str) -> std::result::Result<Value, Failure> {
             // boundary, so anything reaching here is a private channel.
             commands::create(&context, &args.repo, None).map_err(Failure::from)
         }
+        Command::Join(join) => match (&join.invite_code, &join.action) {
+            (Some(code), _) => commands::join(&context, code).map_err(Failure::from),
+            (None, Some(cli::JoinAction::Pending)) => {
+                commands::join_pending(&context).map_err(Failure::from)
+            }
+            _ => match dispatch::classify(&cli.command) {
+                Outcome::Unimplemented { milestone } => Err(Failure::NotShipped { milestone }),
+                Outcome::AuthorizationRequired => Err(Failure::AuthorizationRequired),
+            },
+        },
         Command::Invite(invite) => match &invite.action {
             cli::InviteAction::Create {
                 github_user,

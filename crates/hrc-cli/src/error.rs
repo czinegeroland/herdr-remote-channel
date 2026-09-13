@@ -91,6 +91,29 @@ pub enum CliError {
     /// This installation's device is not in the channel's roster.
     #[error("this device is not a member of the channel")]
     LocalDeviceNotInChannel,
+
+    /// The invite lapsed before it was redeemed.
+    #[error("this invite expired at {expires_at}")]
+    InviteExpired {
+        /// When it lapsed.
+        expires_at: String,
+    },
+
+    /// A lifetime such as `24h` could not be understood.
+    #[error("`{value}` is not a lifetime like `30m`, `24h`, or `7d`")]
+    InvalidLifetime {
+        /// What was supplied.
+        value: String,
+    },
+
+    /// The invite names a different channel than the repository holds.
+    #[error("the invite is for channel {expected}, but the repository holds {found}")]
+    InviteChannelMismatch {
+        /// The channel the invite named.
+        expected: String,
+        /// The channel the repository actually holds.
+        found: String,
+    },
 }
 
 impl CliError {
@@ -114,6 +137,9 @@ impl CliError {
             CliError::AmbiguousChannel => "ambiguous_channel",
             CliError::ChannelNotPublished { .. } => "channel_not_published",
             CliError::LocalDeviceNotInChannel => "device_not_in_channel",
+            CliError::InviteExpired { .. } => "invite_expired",
+            CliError::InvalidLifetime { .. } => "invalid_lifetime",
+            CliError::InviteChannelMismatch { .. } => "invite_channel_mismatch",
         }
     }
 
@@ -128,7 +154,9 @@ impl CliError {
             | CliError::AlreadyInitialized
             | CliError::ChannelExists { .. }
             | CliError::NoChannel
-            | CliError::AmbiguousChannel => exit::USAGE,
+            | CliError::AmbiguousChannel
+            | CliError::InviteExpired { .. }
+            | CliError::InvalidLifetime { .. } => exit::USAGE,
             CliError::Io { .. }
             | CliError::Storage(_)
             | CliError::Crypto(_)
@@ -139,7 +167,8 @@ impl CliError {
             | CliError::Transport(_)
             | CliError::Entropy
             | CliError::ChannelNotPublished { .. }
-            | CliError::LocalDeviceNotInChannel => exit::FAILURE,
+            | CliError::LocalDeviceNotInChannel
+            | CliError::InviteChannelMismatch { .. } => exit::FAILURE,
         }
     }
 }

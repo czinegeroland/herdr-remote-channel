@@ -481,6 +481,10 @@ fn an_invite_is_published_and_its_code_is_returned_once() {
 
     let printed = String::from_utf8_lossy(&output.stdout);
     assert!(printed.contains("hrc1-"), "no invite code was returned");
+    assert!(
+        printed.contains("It works once"),
+        "the code was printed without saying it is single use"
+    );
 
     // Listing it afterwards shows the invite but never the secret.
     let listed = hrc_in(home.path())
@@ -589,6 +593,151 @@ fn inviting_without_a_channel_says_so() {
     assert_eq!(value["code"], "no_channel");
 }
 
+/// Pulls the invite code out of `hrc invite create`'s human output.
+fn invite_code_from(stdout: &[u8]) -> String {
+    String::from_utf8_lossy(stdout)
+        .split_whitespace()
+        .find(|word| word.starts_with("hrc1-"))
+        .expect("an invite code")
+        .to_owned()
+}
+
+#[test]
+fn two_installations_create_invite_join_and_review() {
+    // `AC-ENROLL` end to end: two clean homes, one repository, and no shared
+    // private material. The joiner proves possession of the invite secret
+    // without it ever being published, and both sides derive the same safety
+    // phrase from public material alone.
+    let (admin, remote) = channel_fixture();
+    let joiner = tempfile::tempdir().expect("temporary joiner home");
+
+    hrc_in(joiner.path()).arg("init").assert().success();
+
+    let created = hrc_in(admin.path())
+        .args(["invite", "create", "--github-user", "bob"])
+        .output()
+        .expect("command should run");
+    let code = invite_code_from(&created.stdout);
+
+    let joined = hrc_in(joiner.path())
+        .args(["join", &code, "--json"])
+        .output()
+        .expect("command should run");
+    assert!(
+        joined.status.success(),
+        "join failed: {}",
+        String::from_utf8_lossy(&joined.stdout)
+    );
+
+    let joined: Value = serde_json::from_slice(&joined.stdout).expect("stdout should be JSON");
+    let joiner_phrase = joined["safetyPhrase"].as_str().expect("a safety phrase");
+    assert_eq!(joiner_phrase.split_whitespace().count(), 6);
+
+    // The administrator sees the request, validated rather than merely
+    // listed, and derives the same phrase without either side sending it.
+    let pending = hrc_in(admin.path())
+        .args(["join", "pending", "--json"])
+        .output()
+        .expect("command should run");
+    let pending: Value = serde_json::from_slice(&pending.stdout).expect("stdout should be JSON");
+
+    let requests = pending["pending"].as_array().expect("a pending array");
+    assert_eq!(requests.len(), 1, "{pending}");
+    assert_eq!(requests[0]["principalId"], joined["principalId"]);
+    assert_eq!(
+        requests[0]["safetyPhrase"].as_str(),
+        Some(joiner_phrase),
+        "the two sides derived different safety phrases"
+    );
+
+    // The invite secret never reached the repository.
+    let published = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(remote.path())
+        .args(["grep", "-i", "hrc1-", "hrc"])
+        .output()
+        .expect("git grep should run");
+    assert!(
+        published.stdout.is_empty(),
+        "an invite code was published: {}",
+        String::from_utf8_lossy(&published.stdout)
+    );
+}
+
+#[test]
+fn a_join_request_under_an_unknown_invite_is_not_listed() {
+    // A request naming an invite this installation did not issue cannot have
+    // its proof checked, and an unverifiable request is not something to put
+    // in front of a human to approve.
+    let (admin, _remote) = channel_fixture();
+
+    let pending = hrc_in(admin.path())
+        .args(["join", "pending", "--json"])
+        .output()
+        .expect("command should run");
+    let pending: Value = serde_json::from_slice(&pending.stdout).expect("stdout should be JSON");
+
+    assert!(pending["pending"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn a_revoked_invite_can_no_longer_be_reviewed() {
+    // Revoking releases the secret, so a request naming that invite stops
+    // being verifiable — which is the same thing as stopping being
+    // admissible.
+    let (admin, _remote) = channel_fixture();
+    let joiner = tempfile::tempdir().expect("temporary joiner home");
+    hrc_in(joiner.path()).arg("init").assert().success();
+
+    let created = hrc_in(admin.path())
+        .args(["invite", "create", "--github-user", "bob"])
+        .output()
+        .expect("command should run");
+    let code = invite_code_from(&created.stdout);
+
+    hrc_in(joiner.path())
+        .args(["join", &code, "--json"])
+        .assert()
+        .success();
+
+    let listed = hrc_in(admin.path())
+        .args(["invite", "list", "--json"])
+        .output()
+        .expect("command should run");
+    let listed: Value = serde_json::from_slice(&listed.stdout).expect("stdout should be JSON");
+    let invite_id = listed["invites"][0]["inviteId"]
+        .as_str()
+        .expect("an invite id")
+        .to_owned();
+
+    hrc_in(admin.path())
+        .args(["invite", "revoke", &invite_id, "--json"])
+        .assert()
+        .success();
+
+    let pending = hrc_in(admin.path())
+        .args(["join", "pending", "--json"])
+        .output()
+        .expect("command should run");
+    let pending: Value = serde_json::from_slice(&pending.stdout).expect("stdout should be JSON");
+
+    assert!(
+        pending["pending"].as_array().unwrap().is_empty(),
+        "a request under a revoked invite was still offered for approval"
+    );
+}
+
+#[test]
+fn approving_a_join_still_requires_the_trusted_interface() {
+    // Listing requests is ordinary work; admitting someone is not.
+    let (admin, _remote) = channel_fixture();
+
+    hrc_in(admin.path())
+        .args(["join", "approve", "request-1", "--json"])
+        .assert()
+        .code(AUTHORIZATION_REQUIRED);
+}
+
 #[test]
 fn herdr_entry_points_are_dispatched_by_the_same_binary() {
     for args in [
@@ -603,11 +752,28 @@ fn herdr_entry_points_are_dispatched_by_the_same_binary() {
 
 #[test]
 fn an_invite_code_and_the_join_subcommands_both_parse() {
+    // The bare code and the subcommands share one argument position, so
+    // clap has to keep them apart. Both reach a command rather than a
+    // parsing error; what they then report depends on local state.
+    for args in [
+        vec!["join", "hrc1-invite-code", "--json"],
+        vec!["join", "pending", "--json"],
+    ] {
+        let output = hrc().args(&args).output().expect("command should run");
+        let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+
+        assert_ne!(value["code"], "usage_error", "{args:?} failed to parse");
+        assert_ne!(
+            value["code"], "unimplemented",
+            "{args:?} is implemented now"
+        );
+    }
+
+    // Approving remains on the trusted surface.
     hrc()
-        .args(["join", "hrc1-invite-code"])
+        .args(["join", "approve", "request-1", "--json"])
         .assert()
-        .code(UNIMPLEMENTED);
-    hrc().args(["join", "pending"]).assert().code(UNIMPLEMENTED);
+        .code(AUTHORIZATION_REQUIRED);
 }
 
 /// Runs `hrc` against a private state directory, so a test never touches the

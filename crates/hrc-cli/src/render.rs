@@ -26,6 +26,8 @@ pub fn success(as_json: bool, command: &str, value: &Value) {
         "sync" => render_sync(value),
         "daemon" => render_daemon(value),
         "audit" => render_audit(value),
+        "invite create" | "invite list" | "invite revoke" => render_invite(value),
+        "join" | "join pending" => render_join(value),
         _ => println!("{value}"),
     }
 }
@@ -259,6 +261,79 @@ fn number(value: &Value, key: &str) -> u64 {
 /// An array field, or an empty slice.
 fn array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
     value[key].as_array().map(Vec::as_slice).unwrap_or_default()
+}
+
+/// Renders invite output.
+///
+/// The code is printed on its own line and labelled as a secret, because the
+/// next thing that happens to it is a human copying it somewhere.
+fn render_invite(value: &Value) {
+    if let Some(invites) = value["invites"].as_array() {
+        if invites.is_empty() {
+            println!("No invites.");
+            return;
+        }
+
+        for invite in invites {
+            println!(
+                "{}  {}  expires {}  for {}",
+                invite["state"].as_str().unwrap_or("?"),
+                invite["inviteId"].as_str().unwrap_or("?"),
+                invite["expiresAt"].as_str().unwrap_or("?"),
+                invite["intendedFor"].as_str().unwrap_or("?")
+            );
+        }
+        return;
+    }
+
+    if let Some(code) = value["inviteCode"].as_str() {
+        println!(
+            "Invite for {} expires {}",
+            value["intendedFor"].as_str().unwrap_or("?"),
+            value["expiresAt"].as_str().unwrap_or("?")
+        );
+        println!();
+        println!("{code}");
+        println!();
+        println!("Give this to them through a channel you trust. It works once.");
+        return;
+    }
+
+    println!("{}", value["inviteId"].as_str().unwrap_or("done"));
+}
+
+/// Renders join output.
+fn render_join(value: &Value) {
+    if let Some(pending) = value["pending"].as_array() {
+        if pending.is_empty() {
+            println!("No join requests.");
+            return;
+        }
+
+        for request in pending {
+            println!(
+                "{}  from {}",
+                request["requestId"].as_str().unwrap_or("?"),
+                request["principalId"].as_str().unwrap_or("?")
+            );
+            println!(
+                "  safety phrase: {}",
+                request["safetyPhrase"].as_str().unwrap_or("?")
+            );
+        }
+        return;
+    }
+
+    println!(
+        "Join requested on channel {}",
+        value["channelId"].as_str().unwrap_or("?")
+    );
+    println!();
+    println!(
+        "Safety phrase: {}",
+        value["safetyPhrase"].as_str().unwrap_or("?")
+    );
+    println!("Compare it with the administrator out loud before they approve.");
 }
 
 #[cfg(test)]

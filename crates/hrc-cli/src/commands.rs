@@ -11,7 +11,7 @@ use hrc_core::Roster;
 use hrc_core::rpc::{AgentRequest, Broker, ChannelStatus, Request, TrustedRequest, dispatch_agent};
 use hrc_core::sync::{PollActivity, poll_interval};
 use hrc_crypto::enrollment::Invite;
-use hrc_crypto::{DeviceSecrets, KeyStore, PassphraseStore, PrincipalSecrets};
+use hrc_crypto::{DeviceSecrets, InviteSecret, KeyStore, PassphraseStore, PrincipalSecrets};
 use hrc_ipc::endpoint::{Endpoint, Interface, prepare_runtime_dir};
 use hrc_ipc::serve;
 use hrc_protocol::canonical;
@@ -367,13 +367,14 @@ fn only_channel(database: &Database) -> Result<hrc_storage::ChannelRecord> {
 /// What is published is only the invite's identifier and expiry. The secret
 /// never reaches the channel, because anyone who could read the repository
 /// could then enroll.
-pub fn invite_create(context: &Context, intended_for: &str, expires_at: &str) -> Result<Value> {
+pub fn invite_create(context: &Context, intended_for: &str, expires_in: &str) -> Result<Value> {
     let store = context.key_store()?;
     let device: DeviceSecrets = store.load::<DeviceSecrets>(DEVICE_KEY_NAME)?;
     let principal: PrincipalSecrets = store.load(PRINCIPAL_KEY_NAME)?;
 
     let database = Database::open(context.paths.database())?;
     let now = database.utc_now()?;
+    let expires_at = expiry_from(&now, expires_in)?;
     let channel = only_channel(&database)?;
 
     let mut transport = GitTransport::open(
@@ -389,7 +390,7 @@ pub fn invite_create(context: &Context, intended_for: &str, expires_at: &str) ->
         &channel.channel_id,
         principal.signing_key().verifying_key().to_base64url(),
         &invite_id,
-        expires_at,
+        &expires_at,
     )?;
 
     let signer = Signer {
@@ -405,16 +406,24 @@ pub fn invite_create(context: &Context, intended_for: &str, expires_at: &str) ->
         signer,
         ControlOperation::CreateInvite {
             invite_id: invite_id.clone(),
-            expires_at: expires_at.to_owned(),
+            expires_at: expires_at.clone(),
         },
         &now,
+    )?;
+
+    // Retained by its issuer, protected at rest by the same passphrase as a
+    // signing key. Verifying a join proof later needs this exact value, and
+    // holding it is a different thing from publishing it (DEC-047).
+    store.save(
+        &invite_store_name(&invite_id),
+        &InviteSecret::new(invite.to_code()?),
     )?;
 
     database.record_invite(
         &channel.channel_id,
         &invite_id,
         intended_for,
-        expires_at,
+        &expires_at,
         &now,
     )?;
     database.append_audit(
@@ -495,6 +504,10 @@ pub fn invite_revoke(context: &Context, invite_id: &str) -> Result<Value> {
         &now,
     )?;
 
+    // A withdrawn invite can admit nobody, so its secret has no remaining
+    // purpose and keeping it would be keeping a bearer credential for
+    // nothing.
+    store.delete(&invite_store_name(invite_id))?;
     database.set_invite_state(&channel.channel_id, invite_id, "revoked")?;
     database.append_audit(
         Some(&channel.channel_id),
@@ -510,6 +523,361 @@ pub fn invite_revoke(context: &Context, invite_id: &str) -> Result<Value> {
         "inviteId": invite_id,
         "state": "revoked",
     }))
+}
+
+/// `hrc join <invite-code>`: ask to be admitted to a channel.
+///
+/// The joiner has no channel yet, so everything is derived from the invite:
+/// where the repository is, which channel it holds, and the one-time secret
+/// that authorizes the request. The repository is cloned and its genesis
+/// replayed before anything is sent, because the administrator's devices are
+/// the only ones the request may be encrypted to and the roster is where that
+/// set comes from.
+///
+/// The safety phrase is returned for the human to read aloud. It is not a
+/// confirmation: nothing here can check it, and an implementation that could
+/// would be the thing an attacker compromises.
+pub fn join(context: &Context, invite_code: &str) -> Result<Value> {
+    let paths = &context.paths;
+    paths.ensure()?;
+
+    let store = context.key_store()?;
+    let device: DeviceSecrets = store.load::<DeviceSecrets>(DEVICE_KEY_NAME)?;
+    let principal: PrincipalSecrets = store.load(PRINCIPAL_KEY_NAME)?;
+
+    let invite = Invite::from_code(invite_code)?;
+    let database = Database::open(paths.database())?;
+    let now = database.utc_now()?;
+
+    if invite.is_expired_at(&now) {
+        return Err(CliError::InviteExpired {
+            expires_at: invite.expires_at.clone(),
+        });
+    }
+
+    let transport =
+        GitTransport::open(paths.channel_transport(&invite.channel_id), &invite.locator)?;
+    transport.sync_from_remote()?;
+
+    let (roster, _) = load_roster(&transport, &invite.channel_id)?;
+
+    // The invite names a channel; the repository contains one. If they
+    // disagree, the invite is for somewhere else and nothing about this
+    // repository is what the joiner was told it is.
+    if roster.channel_id() != invite.channel_id {
+        return Err(CliError::InviteChannelMismatch {
+            expected: invite.channel_id.clone(),
+            found: roster.channel_id().to_owned(),
+        });
+    }
+
+    let principal_key = principal.signing_key();
+    let principal_id = principal_key.verifying_key().to_base64url();
+    let device_key = device.signing_key();
+
+    let descriptor = DeviceDescriptor {
+        version: hrc_protocol::PROTOCOL_VERSION,
+        principal_id: principal_id.clone(),
+        encryption_recipient: device.device_identity()?.recipient().to_string(),
+        signing_key: device_key.verifying_key().to_base64url(),
+        created_at: now.clone(),
+        expires_at: None,
+        nonce: canonical::encode_base64url(&random_nonce()?),
+    };
+
+    let certificate_payload = DeviceCertificatePayload::new(descriptor)?;
+    let certificate = principal_key.sign_object(
+        domain::DEVICE_CERTIFICATE,
+        Signer {
+            principal_id: principal_id.clone(),
+            device_id: certificate_payload.device_id.clone(),
+        },
+        certificate_payload,
+    )?;
+
+    let phrase =
+        hrc_core::enrollment::joiner_safety_phrase(&roster, &invite, &principal_id, &certificate)?;
+
+    let request = hrc_core::enrollment::request_join(
+        &roster,
+        &invite,
+        &principal_key,
+        &principal_id,
+        certificate,
+        &now,
+    )?;
+
+    let request_id = canonical::encode_base64url(&random_nonce()?);
+    let mut transport = transport;
+    let revision =
+        transport
+            .open_group()?
+            .revision
+            .ok_or_else(|| CliError::ChannelNotPublished {
+                channel_id: invite.channel_id.clone(),
+            })?;
+
+    transport.publish(hrc_transport::PublishRequest {
+        expected_revision: Some(revision),
+        class: hrc_transport::PublicationClass::Data,
+        objects: vec![PublishObject {
+            name: format!("joins/{}/{request_id}.age", invite.invite_id),
+            class: ObjectClass::Join,
+            bytes: request,
+        }],
+    })?;
+
+    // Registered locally as soon as the request is out, so the joiner can
+    // see the channel they are waiting on rather than having to remember it.
+    if database.channel(&invite.channel_id)?.is_none() {
+        database.insert_channel(
+            &invite.channel_id,
+            "git",
+            &invite.locator,
+            &invite.locator,
+            &now,
+        )?;
+    }
+
+    database.append_audit(
+        Some(&invite.channel_id),
+        None,
+        "request_join",
+        None,
+        Some(&request_id),
+        &now,
+    )?;
+
+    Ok(json!({
+        "status": "ok",
+        "channelId": invite.channel_id,
+        "requestId": request_id,
+        "principalId": principal_id,
+        // Read this aloud to the administrator and compare it. Nothing on
+        // either machine can confirm it for you.
+        "safetyPhrase": phrase.to_string(),
+        "wordlist": phrase.wordlist,
+    }))
+}
+
+/// `hrc join pending`: join requests awaiting this administrator.
+///
+/// Every request is validated before it is listed, so the list contains
+/// proposals rather than claims: a request with a bad proof, a certificate
+/// signed by someone else, or an invite this log never opened does not appear
+/// at all. Listing it with a warning would put a decision in front of a human
+/// that the machine had already answered.
+pub fn join_pending(context: &Context) -> Result<Value> {
+    let store = context.key_store()?;
+    let device: DeviceSecrets = store.load::<DeviceSecrets>(DEVICE_KEY_NAME)?;
+
+    let database = Database::open(context.paths.database())?;
+    let now = database.utc_now()?;
+    let channel = only_channel(&database)?;
+
+    let transport = GitTransport::open(
+        context.paths.channel_transport(&channel.channel_id),
+        &channel.transport_locator,
+    )?;
+    transport.sync_from_remote()?;
+
+    let (roster, _) = load_roster(&transport, &channel.channel_id)?;
+    let identity = device.device_identity()?;
+
+    let mut pending = Vec::new();
+    let mut cursor = None;
+
+    loop {
+        let page = transport.fetch(cursor.as_deref(), 100)?;
+
+        for publication in &page.publications {
+            for object in &publication.objects {
+                if object.class != ObjectClass::Join {
+                    continue;
+                }
+
+                let Some(invite_id) = object
+                    .name
+                    .strip_prefix("joins/")
+                    .and_then(|rest| rest.split('/').next())
+                else {
+                    continue;
+                };
+
+                let Some(invite) = local_invite(&store, &database, &channel.channel_id, invite_id)?
+                else {
+                    // An invite this installation did not issue. The secret
+                    // is not here, so the proof cannot be checked, and an
+                    // unverifiable request is not something to show a human.
+                    continue;
+                };
+
+                let ciphertext = transport.get_object(&object.name, &object.sha256)?;
+
+                if let Ok(review) = hrc_core::enrollment::review_join(
+                    &roster,
+                    &invite,
+                    &identity,
+                    &ciphertext,
+                    &now,
+                ) {
+                    pending.push(json!({
+                        "requestId": object.name.rsplit('/').next().unwrap_or_default(),
+                        "inviteId": review.invite_id,
+                        "principalId": review.principal_id,
+                        "deviceId": review.device_id(),
+                        "createdAt": review.created_at,
+                        "safetyPhrase": review.safety_phrase.to_string(),
+                        "wordlist": review.safety_phrase.wordlist,
+                    }));
+                }
+            }
+        }
+
+        if !page.more {
+            break;
+        }
+        cursor = page.cursor;
+    }
+
+    Ok(json!({
+        "status": "ok",
+        "channelId": channel.channel_id,
+        "pending": pending,
+    }))
+}
+
+/// The invite this installation issued under `invite_id`, if it still holds it.
+///
+/// `None` means the invite is not one this installation issued, or its secret
+/// has already been released because it was spent or withdrawn. Either way
+/// the proof on a request naming it cannot be checked, and an unverifiable
+/// request is not something to put in front of a human.
+fn local_invite(
+    store: &PassphraseStore,
+    database: &Database,
+    channel_id: &str,
+    invite_id: &str,
+) -> Result<Option<Invite>> {
+    let known = database
+        .invites(channel_id)?
+        .into_iter()
+        .any(|invite| invite.invite_id == invite_id && invite.state == "open");
+
+    if !known {
+        return Ok(None);
+    }
+
+    let name = invite_store_name(invite_id);
+    if !store.contains(&name)? {
+        return Ok(None);
+    }
+
+    let secret: InviteSecret = store.load(&name)?;
+    Ok(Some(Invite::from_code(secret.code())?))
+}
+
+/// Turns a lifetime such as `24h` into an absolute RFC 3339 expiry.
+///
+/// The protocol compares timestamps, not durations: an invite carrying "24h"
+/// would be compared lexicographically against a date and lapse at some
+/// arbitrary moment that depends on the year. Resolving it here means the
+/// value the channel sees is one every participant can evaluate.
+fn expiry_from(now: &str, lifetime: &str) -> Result<String> {
+    let seconds = parse_lifetime(lifetime).ok_or_else(|| CliError::InvalidLifetime {
+        value: lifetime.to_owned(),
+    })?;
+
+    let start = time_from_rfc3339(now).ok_or_else(|| CliError::InvalidLifetime {
+        value: now.to_owned(),
+    })?;
+
+    Ok(rfc3339_from(start + seconds))
+}
+
+/// Parses `30m`, `24h`, or `7d` into seconds.
+fn parse_lifetime(value: &str) -> Option<i64> {
+    let value = value.trim();
+    let (digits, unit) = value.split_at(value.len().checked_sub(1)?);
+    let amount: i64 = digits.parse().ok()?;
+
+    if amount <= 0 {
+        return None;
+    }
+
+    match unit {
+        "m" => Some(amount * 60),
+        "h" => Some(amount * 3600),
+        "d" => Some(amount * 86_400),
+        _ => None,
+    }
+}
+
+/// Seconds since the Unix epoch for an RFC 3339 UTC timestamp.
+///
+/// Only the shape this project emits is accepted: `YYYY-MM-DDTHH:MM:SSZ`.
+/// Accepting more would mean accepting offsets and fractions nothing here
+/// produces, and quietly mis-parsing one of those is worse than refusing it.
+fn time_from_rfc3339(value: &str) -> Option<i64> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 20 || bytes[4] != b'-' || bytes[10] != b'T' || bytes[19] != b'Z' {
+        return None;
+    }
+
+    let field = |range: std::ops::Range<usize>| value.get(range)?.parse::<i64>().ok();
+    let (year, month, day) = (field(0..4)?, field(5..7)?, field(8..10)?);
+    let (hour, minute, second) = (field(11..13)?, field(14..16)?, field(17..19)?);
+
+    Some(days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second)
+}
+
+/// Renders seconds since the Unix epoch as an RFC 3339 UTC timestamp.
+fn rfc3339_from(seconds: i64) -> String {
+    let days = seconds.div_euclid(86_400);
+    let remainder = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        remainder / 3600,
+        (remainder % 3600) / 60,
+        remainder % 60
+    )
+}
+
+/// Days since the Unix epoch for a civil date (Howard Hinnant's algorithm).
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// The inverse of [`days_from_civil`].
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let days = days + 719_468;
+    let era = days.div_euclid(146_097);
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = month_index + if month_index < 10 { 3 } else { -9 };
+
+    (year + i64::from(month <= 2), month, day)
+}
+
+/// Where an invite secret is kept in the key store.
+///
+/// Invite identifiers are base64url, which contains `-` and `_` but no path
+/// separator, so this cannot address anything outside the store directory.
+fn invite_store_name(invite_id: &str) -> String {
+    format!("invite-{invite_id}")
 }
 
 /// This installation's device, as the roster knows it.
@@ -1165,3 +1533,100 @@ fn git_version() -> Option<String> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod time_tests {
+    use super::*;
+
+    #[test]
+    fn a_lifetime_resolves_to_an_absolute_expiry() {
+        assert_eq!(
+            expiry_from("2026-09-13T00:00:00Z", "24h").unwrap(),
+            "2026-09-14T00:00:00Z"
+        );
+        assert_eq!(
+            expiry_from("2026-09-13T23:30:00Z", "30m").unwrap(),
+            "2026-09-14T00:00:00Z"
+        );
+        assert_eq!(
+            expiry_from("2026-09-13T00:00:00Z", "7d").unwrap(),
+            "2026-09-20T00:00:00Z"
+        );
+    }
+
+    #[test]
+    fn a_duration_is_never_stored_as_if_it_were_a_timestamp() {
+        // The bug this replaced: "24h" compared lexicographically against a
+        // date lapses at a moment that depends on the year.
+        let resolved = expiry_from("2026-09-13T00:00:00Z", "24h").unwrap();
+
+        assert!(resolved.starts_with("2026-"), "{resolved}");
+        assert!(resolved.ends_with('Z'));
+    }
+
+    #[test]
+    fn month_and_year_boundaries_are_handled() {
+        assert_eq!(
+            expiry_from("2026-01-31T12:00:00Z", "1d").unwrap(),
+            "2026-02-01T12:00:00Z"
+        );
+        assert_eq!(
+            expiry_from("2026-12-31T23:00:00Z", "2h").unwrap(),
+            "2027-01-01T01:00:00Z"
+        );
+        // A leap year, which a naive day count gets wrong.
+        assert_eq!(
+            expiry_from("2028-02-28T00:00:00Z", "1d").unwrap(),
+            "2028-02-29T00:00:00Z"
+        );
+    }
+
+    #[test]
+    fn a_timestamp_round_trips_through_both_directions() {
+        for stamp in [
+            "1970-01-01T00:00:00Z",
+            "2000-02-29T12:34:56Z",
+            "2026-09-13T07:08:09Z",
+            "2100-03-01T00:00:00Z",
+        ] {
+            let seconds = time_from_rfc3339(stamp).expect(stamp);
+            assert_eq!(rfc3339_from(seconds), stamp);
+        }
+    }
+
+    #[test]
+    fn a_lifetime_that_is_not_one_is_refused() {
+        for bad in ["", "h", "0h", "-1h", "24", "24y", "twenty4h", "24 h"] {
+            assert!(
+                expiry_from("2026-09-13T00:00:00Z", bad).is_err(),
+                "{bad:?} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_timestamp_shape_this_project_emits_is_parsed() {
+        // Accepting offsets and fractions nothing here produces would mean
+        // quietly mis-parsing one of them later.
+        for bad in [
+            "2026-09-13T00:00:00+02:00",
+            "2026-09-13T00:00:00.500Z",
+            "2026-09-13 00:00:00Z",
+            "2026-09-13",
+        ] {
+            assert!(time_from_rfc3339(bad).is_none(), "{bad:?} was parsed");
+        }
+    }
+
+    #[test]
+    fn an_invite_store_name_cannot_escape_the_store() {
+        // Invite identifiers are base64url, but the name is built rather
+        // than trusted, so this is worth pinning.
+        let name = invite_store_name("iFeQifaw9tVbdMRboDaYqg");
+
+        assert!(!name.contains('/'));
+        assert!(!name.contains('\\'));
+        assert!(!name.contains(".."));
+        assert!(name.starts_with("invite-"));
+    }
+}
