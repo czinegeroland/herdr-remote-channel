@@ -52,6 +52,12 @@ use crate::message::QuarantinedMessage;
 /// agent-safe surface, which is the thing section 19.1 forbids.
 pub const UNKNOWN_ENDPOINT: &str = "unknown endpoint";
 
+/// The label shown instead of a thread identifier that fails validation.
+pub const UNKNOWN_THREAD: &str = "unknown thread";
+
+/// The one capability the PRD names (section 18.1).
+pub const PROMPT_CAPABILITY: &str = "prompt:request";
+
 /// What a human decided to do with a quarantined message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
@@ -250,12 +256,56 @@ pub struct AgentView {
     pub ciphertext_bytes: u64,
     /// Size of the decrypted content in bytes.
     pub plaintext_bytes: u64,
-    /// Parsed RFC 3339 creation time.
+    /// Parsed RFC 3339 creation time, as the sender stated it.
     pub created_at: String,
+    /// Parsed RFC 3339 time this installation first held the message.
+    ///
+    /// Locally observed rather than sender-supplied, so the inbox can order
+    /// by when something actually arrived here (PRD section 23.2).
+    pub arrival_at: String,
     /// Parsed RFC 3339 expiry, when the message has one.
     pub expires_at: Option<String>,
+    /// Validated thread identifier, or a fixed local label.
+    ///
+    /// A thread ID travels in the envelope, so it is sender-chosen text
+    /// until something checks it. It is passed through only when it is a
+    /// well-formed ULID, on the same reasoning as `endpoint_label`.
+    pub thread_label: String,
+    /// Whether the sender is requesting the prompt capability.
+    ///
+    /// A boolean rather than the capability string, because
+    /// `requestedCapability` is sender-chosen text and section 19.1 admits
+    /// no free-form label. `prompt:request` is the one capability the PRD
+    /// names, so the closed set has exactly one member and anything else is
+    /// simply not a prompt request.
+    pub prompt_request: bool,
+    /// How many attachments the envelope declares.
+    pub attachment_count: u32,
+    /// Total declared ciphertext size of those attachments.
+    pub attachment_bytes: u64,
     /// Whether the message is still awaiting a local decision.
     pub awaiting_decision: bool,
+}
+
+/// The endpoint label a surface may show, given what the sender sent.
+///
+/// Shared so that every path producing a row — the daemon's agent-safe view
+/// and the Herdr plugin reading stored metadata — substitutes the same fixed
+/// label for the same invalid input, rather than each deciding separately.
+pub fn endpoint_label(endpoint: Option<&str>) -> String {
+    match endpoint {
+        Some(endpoint) if is_valid_endpoint(endpoint) => endpoint.to_owned(),
+        Some(_) => UNKNOWN_ENDPOINT.to_owned(),
+        None => String::new(),
+    }
+}
+
+/// The thread label a surface may show, given what the sender sent.
+pub fn thread_label(thread_id: Option<&str>) -> String {
+    match thread_id {
+        Some(thread_id) if hrc_protocol::ulid::is_ulid(thread_id) => thread_id.to_owned(),
+        _ => UNKNOWN_THREAD.to_owned(),
+    }
 }
 
 /// Builds the agent-safe view of a quarantined message.
@@ -270,17 +320,27 @@ pub fn agent_view(
     channel_local_name: &str,
     plaintext_bytes: u64,
     ciphertext_bytes: u64,
+    arrival_at: &str,
 ) -> AgentView {
     let kind = match hrc_protocol::MessageKind::parse(&message.envelope.kind) {
         Some(kind) => kind.as_str().to_owned(),
         None => "unsupported".to_owned(),
     };
 
-    let endpoint_label = match message.envelope.to.endpoint.as_deref() {
-        Some(endpoint) if is_valid_endpoint(endpoint) => endpoint.to_owned(),
-        Some(_) => UNKNOWN_ENDPOINT.to_owned(),
-        None => String::new(),
-    };
+    let endpoint_label = endpoint_label(message.envelope.to.endpoint.as_deref());
+
+    let thread_label = thread_label(Some(&message.envelope.thread_id));
+
+    // Saturating rather than wrapping: an envelope declaring more attachment
+    // bytes than a u64 holds is a sender problem, and a total that silently
+    // wrapped to a small number would understate the cost of accepting it.
+    let attachment_bytes = message
+        .envelope
+        .attachments
+        .iter()
+        .fold(0u64, |total, attachment| {
+            total.saturating_add(attachment.ciphertext_bytes)
+        });
 
     AgentView {
         sender_principal: message.sender_principal.clone(),
@@ -291,7 +351,12 @@ pub fn agent_view(
         ciphertext_bytes,
         plaintext_bytes,
         created_at: message.envelope.created_at.clone(),
+        arrival_at: arrival_at.to_owned(),
         expires_at: message.envelope.expires_at.clone(),
+        thread_label,
+        prompt_request: message.envelope.requested_capability.as_deref() == Some(PROMPT_CAPABILITY),
+        attachment_count: u32::try_from(message.envelope.attachments.len()).unwrap_or(u32::MAX),
+        attachment_bytes,
         awaiting_decision: true,
     }
 }

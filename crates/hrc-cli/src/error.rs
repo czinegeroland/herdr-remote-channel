@@ -77,6 +77,22 @@ pub enum CliError {
     #[error("no channel is configured; run `hrc create` or `hrc join` first")]
     NoChannel,
 
+    /// A Herdr manifest named an action or pane this build does not have.
+    #[error("`{name}` is not a Herdr {kind} this build provides")]
+    UnknownHerdrTarget {
+        /// Whether an action or a pane was named.
+        kind: &'static str,
+        /// The name the manifest used.
+        name: String,
+    },
+
+    /// The JSON Herdr wrote to standard input was not an event.
+    #[error("could not read the Herdr event: {reason}")]
+    MalformedEvent {
+        /// Why parsing failed.
+        reason: String,
+    },
+
     /// Several channels exist and the command did not say which.
     #[error("several channels are configured; pass --channel to choose one")]
     AmbiguousChannel,
@@ -156,6 +172,8 @@ impl CliError {
             CliError::Entropy => "entropy_unavailable",
             CliError::NoChannel => "no_channel",
             CliError::AmbiguousChannel => "ambiguous_channel",
+            CliError::UnknownHerdrTarget { .. } => "unknown_herdr_target",
+            CliError::MalformedEvent { .. } => "malformed_event",
             CliError::ChannelNotPublished { .. } => "channel_not_published",
             CliError::LocalDeviceNotInChannel => "device_not_in_channel",
             CliError::InviteExpired { .. } => "invite_expired",
@@ -183,7 +201,9 @@ impl CliError {
             | CliError::InvalidLifetime { .. }
             | CliError::NoSuchMessage { .. }
             | CliError::ContextRepositoryRequired { .. }
-            | CliError::InvalidContextSource { .. } => exit::USAGE,
+            | CliError::InvalidContextSource { .. }
+            | CliError::UnknownHerdrTarget { .. }
+            | CliError::MalformedEvent { .. } => exit::USAGE,
             CliError::Io { .. }
             | CliError::Storage(_)
             | CliError::Crypto(_)

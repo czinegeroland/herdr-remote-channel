@@ -16,6 +16,7 @@ clap = { workspace = true }
 getrandom = { workspace = true }
 hrc-core = { workspace = true }
 hrc-crypto = { workspace = true }
+hrc-herdr = { workspace = true }
 hrc-ipc = { workspace = true }
 hrc-protocol = { workspace = true }
 hrc-storage = { workspace = true }

@@ -1248,6 +1248,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hrc-core",
  "hrc-crypto",
+ "hrc-herdr",
  "hrc-ipc",
  "hrc-protocol",
  "hrc-storage",
@@ -1296,6 +1297,13 @@ dependencies = [
 [[package]]
 name = "hrc-herdr"
 version = "0.1.0"
+dependencies = [
+ "hrc-core",
+ "hrc-protocol",
+ "hrc-storage",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "hrc-ipc"

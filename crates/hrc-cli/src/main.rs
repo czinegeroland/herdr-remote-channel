@@ -214,6 +214,31 @@ fn run(cli: &Cli, _path: &str) -> std::result::Result<Value, Failure> {
             }
         },
         Command::Sync(args) if args.once => commands::sync_once(&context).map_err(Failure::from),
+        Command::Herdr(herdr) => match &herdr.action {
+            cli::HerdrAction::Startup => commands::herdr_startup(&context).map_err(Failure::from),
+            cli::HerdrAction::Action { name } => {
+                commands::herdr_action(&context, name).map_err(Failure::from)
+            }
+            cli::HerdrAction::Event => {
+                // Herdr writes one JSON object to standard input. Reading it
+                // here rather than in `commands` keeps the command functions
+                // testable without a process to feed.
+                let mut input = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).map_err(
+                    |source| {
+                        Failure::from(CliError::Io {
+                            action: "read the Herdr event from standard input",
+                            source,
+                        })
+                    },
+                )?;
+
+                commands::herdr_event(&context, &input).map_err(Failure::from)
+            }
+            cli::HerdrAction::Pane { name } => {
+                commands::herdr_pane(&context, name).map_err(Failure::from)
+            }
+        },
 
         other => match dispatch::classify(other) {
             Outcome::Unimplemented { milestone } => Err(Failure::NotShipped { milestone }),

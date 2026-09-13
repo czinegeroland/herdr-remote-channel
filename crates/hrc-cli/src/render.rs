@@ -33,6 +33,8 @@ pub fn success(as_json: bool, command: &str, value: &Value) {
         "members" => render_members(value),
         "device list" => render_devices(value),
         "thread" => render_thread(value),
+        "herdr startup" => render_herdr_startup(value),
+        "herdr action" | "herdr pane" => render_herdr_pane(value),
         _ => println!("{value}"),
     }
 }
@@ -246,6 +248,72 @@ fn render_daemon(value: &Value) {
             array(channel, "publishedMessages").len()
         );
     }
+}
+
+/// Renders what the plugin reports at startup.
+fn render_herdr_startup(value: &Value) {
+    println!("{}", text(value, "sidebar"));
+}
+
+/// Renders the plugin inbox pane (PRD section 23.2).
+///
+/// One line per message, then its detail. Every field here is locally
+/// resolved or a validated identifier; there is no body to print, which is
+/// the point.
+fn render_herdr_pane(value: &Value) {
+    for notification in array(value, "notifications") {
+        // Urgency is a word, not a color (PRD section 27).
+        let mark = if notification["urgent"].as_bool().unwrap_or(false) {
+            "! "
+        } else {
+            "  "
+        };
+        println!("{mark}{}", text(notification, "text"));
+    }
+
+    let rows = array(value, "rows");
+    if rows.is_empty() {
+        println!("Inbox is empty.");
+        return;
+    }
+
+    println!();
+    for row in rows {
+        println!(
+            "{}  {} from {}",
+            text(row, "arrival_at"),
+            text(row, "kind"),
+            text(row, "sender_local_name")
+        );
+        println!(
+            "  thread {}  endpoint {}",
+            text(row, "thread_label"),
+            if text(row, "endpoint_label").is_empty() {
+                "none"
+            } else {
+                text(row, "endpoint_label")
+            }
+        );
+        println!(
+            "  {}  attachments {} ({} bytes)",
+            text(row, "verification"),
+            number(row, "attachment_count"),
+            number(row, "attachment_bytes")
+        );
+        if let Some(expires_at) = row["expires_at"].as_str() {
+            println!("  expires {expires_at}");
+        }
+
+        let decisions = array(row, "decisions");
+        if decisions.is_empty() {
+            println!("  no decision available");
+        } else {
+            println!("  awaiting your decision in `hrc review`");
+        }
+    }
+
+    println!();
+    println!("{} awaiting a decision", number(value, "pending"));
 }
 
 /// A string field, or an empty string.

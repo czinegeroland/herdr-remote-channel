@@ -33,7 +33,12 @@ fn view(sender: &str, kind: &str) -> AgentView {
         ciphertext_bytes: 1024,
         plaintext_bytes: BODY.len() as u64,
         created_at: "2026-09-13T00:00:00Z".into(),
+        arrival_at: "2026-09-13T00:00:05Z".into(),
         expires_at: None,
+        thread_label: "01ARYZ6S41000000000000000A".into(),
+        prompt_request: false,
+        attachment_count: 0,
+        attachment_bytes: 0,
         awaiting_decision: true,
     }
 }
