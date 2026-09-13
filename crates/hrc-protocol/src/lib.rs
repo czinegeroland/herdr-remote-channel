@@ -9,10 +9,12 @@
 pub mod canonical;
 pub mod error;
 pub mod identity;
+pub mod recipients;
 pub mod signed;
 
 pub use error::{ProtocolError, Result};
 pub use identity::{DeviceCertificatePayload, DeviceDescriptor};
+pub use recipients::RecipientDevices;
 pub use signed::{SignedObject, Signer, signature_input};
 
 /// Version carried by every signed protocol object.
