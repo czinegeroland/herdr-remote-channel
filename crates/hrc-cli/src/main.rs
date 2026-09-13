@@ -162,6 +162,10 @@ fn run(cli: &Cli, _path: &str) -> std::result::Result<Value, Failure> {
             // boundary, so anything reaching here is a private channel.
             commands::create(&context, &args.repo, None).map_err(Failure::from)
         }
+        Command::Members => commands::members(&context).map_err(Failure::from),
+        Command::Device(device) if matches!(device.action, cli::DeviceAction::List) => {
+            commands::device_list(&context).map_err(Failure::from)
+        }
         Command::Send(args) => {
             commands::send(&context, &args.recipient, &args.message).map_err(Failure::from)
         }

@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-14T11:40:00+02:00 |
+| Last updated | 2026-09-14T14:10:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -507,7 +507,7 @@ The Herdr plugin must expose:
 | HRC-CH-005 | Create expiring, single-use invites. | Must | Implemented | `crates/hrc-crypto/src/enrollment.rs` generates, encodes, and validates expiring invites; `crates/hrc-core/src/roster.rs` tracks invite state from the control log so a second admission under one invite is rejected by every participant; `hrc invite create` publishes the authorizing control entry and returns the code once |
 | HRC-CH-006 | Generate separate principal and device identities. | Must | Implemented | `crates/hrc-crypto/src/store.rs` `PrincipalSecrets` is a distinct type with no encryption identity, and `hrc init` generates and stores both keys or neither |
 | HRC-CH-007 | Require explicit administrator approval for joins. | Must | Implemented | `crates/hrc-core/src/enrollment.rs`: `review_join` validates but admits nobody, and `admit` — the approval itself — refuses a signer who is not an active administrator; `hrc join pending` lists only requests that already validate, and `hrc join approve` stays on the section 22.7 boundary |
-| HRC-CH-008 | Support member and device revocation. | Should | In progress | `crates/hrc-core/src/roster.rs`; publication and CLI surface pending |
+| HRC-CH-008 | Support member and device revocation. | Should | Implemented | `crates/hrc-core/src/roster.rs` evaluates the operations, and the daemon's trusted interface publishes them as control entries; `hrc member remove` and `hrc device revoke` stay on the section 22.7 boundary, and `hrc members` and `hrc device list` read the published roster |
 | HRC-CH-009 | Maintain a signed, append-only membership/control log. | Must | Implemented | `crates/hrc-protocol/src/control.rs`, `crates/hrc-core/src/roster.rs` |
 | HRC-CH-010 | Detect observed conflicting control histories, rewrites, deletions, and substitutions, then stop synchronization. | Must | Approved | Pending |
 
@@ -607,7 +607,7 @@ The Herdr plugin must expose:
 | ID | Requirement | Priority | Status | Evidence |
 |---|---|---:|---|---|
 | HRC-TECH-001 | Implement the production CLI, daemon, protocol, crypto, transport core, and Herdr integration in Rust 2024 edition. | Must | In progress | `Cargo.toml`, `crates/`, `.github/workflows/build-and-test.yml` |
-| HRC-TECH-002 | Ship one self-contained `hrc` executable with subcommands for CLI, daemon, Herdr actions, events, panes, and startup. | Must | In progress | `crates/hrc-cli/src/main.rs`; `init`, `whoami`, `channels`, `status`, `doctor`, `sync --once`, `daemon`, and `audit` perform real work, and `hrc daemon` now binds the agent-safe and trusted local IPC listeners before entering the resident loop; the Herdr entry points still report the documented not-implemented code |
+| HRC-TECH-002 | Ship one self-contained `hrc` executable with subcommands for CLI, daemon, Herdr actions, events, panes, and startup. | Must | In progress | `crates/hrc-cli/src/main.rs`; identity, channel, invite, join, messaging, membership, synchronization, daemon, and audit commands perform real work, and the daemon serves both local interfaces with the trusted one performing membership changes; the Herdr entry points still report the documented not-implemented code |
 | HRC-TECH-003 | Use Tokio for asynchronous scheduling, process management, polling, and cancellation. | Must | In progress | Decision DEC-015, plus `crates/hrc-cli/src/main.rs` and `src/commands.rs` now host the resident daemon loop and both local IPC listeners on a Tokio runtime; cancellation and process-management wiring are still pending |
 | HRC-TECH-004 | Use Clap for the public CLI and stable machine-readable command contracts. | Must | Implemented | `crates/hrc-cli/src/cli.rs`, `crates/hrc-cli/src/render.rs`: both output modes render one value, so JSON and human output cannot diverge |
 | HRC-TECH-005 | Use Serde/serde_json and a pinned RFC 8785 implementation with protocol test vectors. | Must | In progress | `crates/hrc-protocol/src/canonical.rs`, `crates/hrc-protocol/tests/rfc8785_vectors.rs` |
@@ -1408,10 +1408,11 @@ without discarding any.
 This envelope is the `payload` of an `hrc/v1/message` signed object. The signed
 object is then age-encrypted to the intended active recipient devices.
 
-Message identifiers are ULIDs, so identifiers generated later sort later as
-plain strings. A store can therefore order by identifier without parsing a
-timestamp out of it and without trusting a separate field that a sender
-controls.
+Message identifiers are ULIDs, so identifiers generated in different
+milliseconds sort in that order as plain strings. Two generated within one
+millisecond have no defined order between them, which is all a ULID promises;
+per-device order does not depend on it, because the chain below establishes
+that and the inbox reads by local arrival.
 
 For per-device ordering, each logical message has a stable chain ID:
 
@@ -2007,6 +2008,11 @@ hrc audit [--since <time>]
 
 ### 22.7 Human authorization boundary
 
+The trusted interface performs these operations itself rather than returning
+a plan for a caller to carry out. An operation that handed back instructions
+would put the decision and its execution in two places, and only one of them
+is behind the human interface.
+
 The following operations are unavailable through agent-safe RPC and `--json`:
 
 - Reading a pending inbound body
@@ -2519,7 +2525,7 @@ Every implementation PR must update this table.
 | M0 Product and protocol | 55% | Adds an executable adapter contract, capability declaration, and error model to the written specification | Transport contract and reference adapter | Obtain product-owner approval and complete the JSON-RPC adapter binding |
 | M1 Secure foundation | 100% | Adds real channel creation: separate principal and device keys, a self-verified genesis, and publication to a Git remote | Channel creation | Integrate an OS keychain backend |
 | M2 Git messaging | 99% | Adds the synchronization engine plus real `hrc sync --once`, `hrc daemon`, `hrc audit`, and live daemon IPC hosting over the local store and Git transport | Daemon IPC hosting | Add receipts, threading, deduplication, end-to-end restart coverage, and audit decision recording |
-| M3 Herdr integration | 75% | Adds the daemon's two local interfaces as two request and response types, and now hosts them from the resident daemon so agent-safe callers still cannot name a pending body | Live daemon boundary | Build the trusted approval TUI, then the Herdr inbox UI |
+| M3 Herdr integration | 80% | Adds the daemon's two local interfaces as two request and response types, and now hosts them from the resident daemon so agent-safe callers still cannot name a pending body | Live daemon boundary | Build the trusted approval TUI, then the Herdr inbox UI |
 | M4 Context/delegation | 65% | Adds attachment limits checked before any fetch and again on arrival, and sender-chosen file names treated as hostile text | Attachment limits | Add git-ignored path checking, then wire context and delegation to the CLI |
 | M5 Provider ecosystem | 0% | Not started | N/A | Deferred until core protocol stabilizes |
 

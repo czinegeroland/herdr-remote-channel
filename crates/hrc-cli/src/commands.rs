@@ -723,7 +723,12 @@ pub fn join_pending(context: &Context) -> Result<Value> {
                     &now,
                 ) {
                     pending.push(json!({
-                        "requestId": object.name.rsplit('/').next().unwrap_or_default(),
+                        "requestId": object
+                            .name
+                            .rsplit('/')
+                            .next()
+                            .and_then(|file| file.strip_suffix(".age"))
+                            .unwrap_or_default(),
                         "inviteId": review.invite_id,
                         "principalId": review.principal_id,
                         "deviceId": review.device_id(),
@@ -776,6 +781,245 @@ fn local_invite(
 
     let secret: InviteSecret = store.load(&name)?;
     Ok(Some(Invite::from_code(secret.code())?))
+}
+
+/// Publishes one membership change as a control entry.
+///
+/// Reached only from the trusted interface: removing a member and revoking a
+/// device are both on the section 22.7 list, so this is never called from an
+/// agent-safe path.
+fn publish_membership_change(context: &Context, operation: ControlOperation) -> Result<String> {
+    let store = context.key_store()?;
+    let device: DeviceSecrets = store.load::<DeviceSecrets>(DEVICE_KEY_NAME)?;
+    let principal: PrincipalSecrets = store.load(PRINCIPAL_KEY_NAME)?;
+
+    let database = Database::open(context.paths.database())?;
+    let now = database.utc_now()?;
+    let channel = only_channel(&database)?;
+
+    let mut transport = GitTransport::open(
+        context.paths.channel_transport(&channel.channel_id),
+        &channel.transport_locator,
+    )?;
+    transport.sync_from_remote()?;
+    let (roster, revision) = load_roster(&transport, &channel.channel_id)?;
+
+    let action = operation.name();
+    let signer = Signer {
+        principal_id: principal.signing_key().verifying_key().to_base64url(),
+        device_id: local_device_id(&roster, &device)?,
+    };
+
+    let name = publish_control(
+        &mut transport,
+        &roster,
+        revision,
+        &device.signing_key(),
+        signer,
+        operation,
+        &now,
+    )?;
+
+    database.append_audit(
+        Some(&channel.channel_id),
+        None,
+        action,
+        None,
+        Some(&name),
+        &now,
+    )?;
+
+    Ok(name)
+}
+
+/// Admits a pending joiner, on the administrator's decision.
+///
+/// The request is validated again here rather than trusted from the listing:
+/// the channel may have moved between the human reading a safety phrase and
+/// answering, and the entry that gets published has to be built from what is
+/// true now.
+fn admit_join(context: &Context, request_id: &str) -> Result<()> {
+    let store = context.key_store()?;
+    let device: DeviceSecrets = store.load::<DeviceSecrets>(DEVICE_KEY_NAME)?;
+    let principal: PrincipalSecrets = store.load(PRINCIPAL_KEY_NAME)?;
+
+    let database = Database::open(context.paths.database())?;
+    let now = database.utc_now()?;
+    let channel = only_channel(&database)?;
+
+    let mut transport = GitTransport::open(
+        context.paths.channel_transport(&channel.channel_id),
+        &channel.transport_locator,
+    )?;
+    transport.sync_from_remote()?;
+    let (roster, revision) = load_roster(&transport, &channel.channel_id)?;
+    let identity = device.device_identity()?;
+
+    let mut cursor = None;
+    let mut admitted = None;
+
+    'outer: loop {
+        let page = transport.fetch(cursor.as_deref(), 100)?;
+
+        for publication in &page.publications {
+            for object in &publication.objects {
+                if object.class != ObjectClass::Join
+                    || !object.name.ends_with(&format!("/{request_id}.age"))
+                {
+                    continue;
+                }
+
+                let Some(invite_id) = object
+                    .name
+                    .strip_prefix("joins/")
+                    .and_then(|rest| rest.split('/').next())
+                else {
+                    continue;
+                };
+
+                let Some(invite) = local_invite(&store, &database, &channel.channel_id, invite_id)?
+                else {
+                    continue;
+                };
+
+                let ciphertext = transport.get_object(&object.name, &object.sha256)?;
+                admitted = Some((
+                    hrc_core::enrollment::review_join(
+                        &roster,
+                        &invite,
+                        &identity,
+                        &ciphertext,
+                        &now,
+                    )?,
+                    invite_id.to_owned(),
+                ));
+                break 'outer;
+            }
+        }
+
+        if !page.more {
+            break;
+        }
+        cursor = page.cursor;
+    }
+
+    let (pending, invite_id) = admitted.ok_or_else(|| CliError::NoSuchMessage {
+        message_id: request_id.to_owned(),
+    })?;
+
+    let entry = hrc_core::enrollment::admit(
+        &roster,
+        &device.signing_key(),
+        Signer {
+            principal_id: principal.signing_key().verifying_key().to_base64url(),
+            device_id: local_device_id(&roster, &device)?,
+        },
+        &pending,
+        &now,
+    )?;
+
+    transport.publish(hrc_transport::PublishRequest {
+        expected_revision: Some(revision),
+        class: hrc_transport::PublicationClass::Control,
+        objects: vec![PublishObject {
+            name: format!(
+                "control/log/{:08}-{}.json",
+                entry.payload.sequence,
+                &entry.payload.entry_hash()?[..16]
+            ),
+            class: ObjectClass::Control,
+            bytes: canonical::to_canonical_bytes(&entry)?,
+        }],
+    })?;
+
+    // The invite is spent, so its secret has no further purpose.
+    store.delete(&invite_store_name(&invite_id))?;
+    database.set_invite_state(&channel.channel_id, &invite_id, "consumed")?;
+    database.append_audit(
+        Some(&channel.channel_id),
+        None,
+        "approve_join",
+        None,
+        Some(&pending.principal_id),
+        &now,
+    )?;
+
+    Ok(())
+}
+
+/// `hrc members`: who is in the channel, from the published control log.
+pub fn members(context: &Context) -> Result<Value> {
+    let database = Database::open(context.paths.database())?;
+    let channel = only_channel(&database)?;
+
+    let transport = GitTransport::open(
+        context.paths.channel_transport(&channel.channel_id),
+        &channel.transport_locator,
+    )?;
+    transport.sync_from_remote()?;
+    let (roster, _) = load_roster(&transport, &channel.channel_id)?;
+
+    let members: Vec<Value> = roster
+        .members()
+        .map(|member| {
+            json!({
+                "principalId": member.principal_id,
+                "administrator": member.is_administrator,
+                "active": member.is_active,
+                "devices": roster
+                    .devices()
+                    .filter(|device| device.principal_id == member.principal_id)
+                    .map(|device| json!({
+                        "deviceId": device.device_id,
+                        "active": device.status == hrc_core::DeviceStatus::Active,
+                        "addedInEpoch": device.added_in_epoch,
+                    }))
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "status": "ok",
+        "channelId": channel.channel_id,
+        "rosterEpoch": roster.epoch(),
+        "members": members,
+    }))
+}
+
+/// `hrc device list`: this principal's devices.
+pub fn device_list(context: &Context) -> Result<Value> {
+    let store = context.key_store()?;
+    let principal: PrincipalSecrets = store.load(PRINCIPAL_KEY_NAME)?;
+    let principal_id = principal.signing_key().verifying_key().to_base64url();
+
+    let database = Database::open(context.paths.database())?;
+    let channel = only_channel(&database)?;
+
+    let transport = GitTransport::open(
+        context.paths.channel_transport(&channel.channel_id),
+        &channel.transport_locator,
+    )?;
+    transport.sync_from_remote()?;
+    let (roster, _) = load_roster(&transport, &channel.channel_id)?;
+
+    let devices: Vec<Value> = roster
+        .devices()
+        .filter(|device| device.principal_id == principal_id)
+        .map(|device| {
+            json!({
+                "deviceId": device.device_id,
+                "active": device.status == hrc_core::DeviceStatus::Active,
+                "addedInEpoch": device.added_in_epoch,
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "status": "ok",
+        "principalId": principal_id,
+        "devices": devices,
+    }))
 }
 
 /// Opens a fresh transport and device identity for the receive pass.
@@ -979,7 +1223,7 @@ fn compose(
     let (roster, _) = load_roster(&transport, &channel.channel_id)?;
 
     let device_id = local_device_id(&roster, &device)?;
-    let message_id = hrc_protocol::ulid_at(unix_milliseconds(&now)?)?;
+    let message_id = hrc_protocol::ulid_at(unix_milliseconds()?)?;
 
     let (thread_id, in_reply_to) = match in_reply_to {
         // A reply continues the thread of what it answers, so the thread is
@@ -1197,13 +1441,23 @@ fn message_object_name(now: &str, message_id: &str) -> String {
     format!("messages/{year}/{month}/{message_id}.age")
 }
 
-/// Milliseconds since the Unix epoch for an RFC 3339 UTC timestamp.
-fn unix_milliseconds(now: &str) -> Result<u64> {
-    let seconds = time_from_rfc3339(now).ok_or_else(|| CliError::InvalidLifetime {
-        value: now.to_owned(),
-    })?;
+/// Milliseconds since the Unix epoch, for a message identifier.
+///
+/// Read from the system clock rather than derived from the RFC 3339
+/// timestamp the rest of the record uses, because that one has second
+/// precision. A ULID built from it would give every message sent within the
+/// same second an identical time prefix, and their order would then be
+/// decided by the random half — which is to say, not ordered at all.
+///
+/// Sub-second ties remain possible and remain unordered; that is what a ULID
+/// promises and no more. Per-device order does not depend on this: the chain
+/// in section 18.1 establishes it, and the inbox reads by arrival.
+fn unix_milliseconds() -> Result<u64> {
+    let since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| CliError::Entropy)?;
 
-    Ok((seconds.max(0) as u64) * 1000)
+    Ok(since_epoch.as_millis() as u64)
 }
 
 /// Turns a lifetime such as `24h` into an absolute RFC 3339 expiry.
@@ -1648,15 +1902,58 @@ fn handle_agent_request(context: &Context, request: Request) -> Value {
     }
 }
 
-fn handle_trusted_request(_context: &Context, request: TrustedRequest) -> Value {
-    json!({
-        "status": "error",
-        "code": "unimplemented",
-        "message": format!(
-            "the trusted daemon method `{}` is not implemented yet",
-            request.method()
-        ),
-    })
+fn handle_trusted_request(context: &Context, request: TrustedRequest) -> Value {
+    let method = request.method();
+
+    let mut broker = match DaemonBroker::new(context) {
+        Ok(broker) => broker,
+        Err(error) => {
+            return json!({
+                "status": "error",
+                "code": error.code(),
+                "message": error.to_string(),
+            });
+        }
+    };
+
+    // A fresh ledger per connection is deliberate for now: an authorization
+    // is issued, consumed, and discarded inside one call (DEC-040), so
+    // nothing needs to outlive the request that created it.
+    let mut ledger = hrc_core::AuthorizationLedger::new();
+    let now = match broker.now() {
+        Ok(now) => now,
+        Err(error) => {
+            return json!({
+                "status": "error",
+                "code": error.code(),
+                "message": error.to_string(),
+            });
+        }
+    };
+
+    match hrc_core::rpc::dispatch_trusted(&mut broker, &mut ledger, request, &now) {
+        Ok(hrc_core::rpc::TrustedResponse::Delivered { agent, framed }) => json!({
+            "status": "ok",
+            "method": method,
+            "agent": agent,
+            "framed": framed,
+        }),
+        Ok(hrc_core::rpc::TrustedResponse::Pending { message_id, body }) => json!({
+            "status": "ok",
+            "method": method,
+            "messageId": message_id,
+            "body": body,
+        }),
+        Ok(hrc_core::rpc::TrustedResponse::Done) => json!({
+            "status": "ok",
+            "method": method,
+        }),
+        Err(error) => json!({
+            "status": "error",
+            "code": core_error_code(&error),
+            "message": error.to_string(),
+        }),
+    }
 }
 
 fn core_error_code(error: &hrc_core::CoreError) -> &'static str {
@@ -1676,6 +1973,13 @@ struct DaemonBroker {
     /// Where the database lives, so a decision can be appended durably
     /// rather than held in memory until the daemon exits.
     database_path: std::path::PathBuf,
+    /// Everything a trusted operation needs to publish a control entry.
+    ///
+    /// The broker performs membership changes itself rather than handing a
+    /// plan back to a caller. A trusted operation that returned instructions
+    /// would put the decision and its execution in two places, and only one
+    /// of them is behind the human interface.
+    context: Context,
 }
 
 impl DaemonBroker {
@@ -1731,7 +2035,15 @@ impl DaemonBroker {
             checks,
             audit,
             database_path: context.paths.database(),
+            context: context.clone(),
         })
+    }
+}
+
+impl DaemonBroker {
+    /// The local clock, from the database so every record agrees on it.
+    fn now(&self) -> Result<String> {
+        Ok(Database::open(&self.database_path)?.utc_now()?)
     }
 }
 
@@ -1818,8 +2130,31 @@ impl Broker for DaemonBroker {
         Ok(())
     }
 
-    fn apply_trusted(&mut self, _request: &TrustedRequest) -> hrc_core::Result<()> {
-        Ok(())
+    fn apply_trusted(&mut self, request: &TrustedRequest) -> hrc_core::Result<()> {
+        let operation = match request {
+            TrustedRequest::RemoveMember { principal_id } => ControlOperation::RemoveMember {
+                principal_id: principal_id.clone(),
+            },
+            TrustedRequest::RevokeDevice { device_id } => ControlOperation::RevokeDevice {
+                device_id: device_id.clone(),
+            },
+            TrustedRequest::ApproveJoin { request_id } => {
+                return admit_join(&self.context, request_id)
+                    .map_err(|error| hrc_core::CoreError::Transport(error.to_string()));
+            }
+
+            // Declining a join publishes nothing. A refusal that left a
+            // record in the channel would tell everyone who was turned away,
+            // which is the administrator's business and not the channel's.
+            TrustedRequest::RejectJoin { .. } => return Ok(()),
+
+            // The rest are not membership changes and have no control entry.
+            _ => return Ok(()),
+        };
+
+        publish_membership_change(&self.context, operation)
+            .map(|_| ())
+            .map_err(|error| hrc_core::CoreError::Transport(error.to_string()))
     }
 }
 

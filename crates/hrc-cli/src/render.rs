@@ -30,6 +30,8 @@ pub fn success(as_json: bool, command: &str, value: &Value) {
         "join" | "join pending" => render_join(value),
         "send" | "ask" | "reply" => render_sent(value),
         "inbox" => render_inbox(value),
+        "members" => render_members(value),
+        "device list" => render_devices(value),
         "thread" => render_thread(value),
         _ => println!("{value}"),
     }
@@ -400,6 +402,79 @@ fn render_thread(value: &Value) {
         if let Some(body) = entry["body"].as_str() {
             println!("      {body}");
         }
+    }
+}
+
+/// Renders the member list.
+fn render_members(value: &Value) {
+    println!(
+        "Roster epoch {}",
+        value["rosterEpoch"].as_u64().unwrap_or(0)
+    );
+
+    for member in value["members"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+    {
+        // Role and state are words rather than colours, so a terminal
+        // without colour shows the same information (PRD section 27).
+        println!(
+            "{}  {}  {}",
+            if member["active"].as_bool() == Some(true) {
+                "active  "
+            } else {
+                "removed "
+            },
+            if member["administrator"].as_bool() == Some(true) {
+                "admin "
+            } else {
+                "member"
+            },
+            member["principalId"].as_str().unwrap_or("?")
+        );
+
+        for device in member["devices"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+        {
+            println!(
+                "    {}  {}",
+                if device["active"].as_bool() == Some(true) {
+                    "active "
+                } else {
+                    "revoked"
+                },
+                device["deviceId"].as_str().unwrap_or("?")
+            );
+        }
+    }
+}
+
+/// Renders this principal's devices.
+fn render_devices(value: &Value) {
+    let devices = value["devices"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+
+    if devices.is_empty() {
+        println!("No devices in this channel.");
+        return;
+    }
+
+    for device in devices {
+        println!(
+            "{}  {}  added in epoch {}",
+            if device["active"].as_bool() == Some(true) {
+                "active "
+            } else {
+                "revoked"
+            },
+            device["deviceId"].as_str().unwrap_or("?"),
+            device["addedInEpoch"].as_u64().unwrap_or(0)
+        );
     }
 }
 
