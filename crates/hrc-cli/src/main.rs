@@ -162,6 +162,16 @@ fn run(cli: &Cli, _path: &str) -> std::result::Result<Value, Failure> {
             // boundary, so anything reaching here is a private channel.
             commands::create(&context, &args.repo, None).map_err(Failure::from)
         }
+        Command::Invite(invite) => match &invite.action {
+            cli::InviteAction::Create {
+                github_user,
+                expires,
+            } => commands::invite_create(&context, github_user, expires).map_err(Failure::from),
+            cli::InviteAction::List => commands::invite_list(&context).map_err(Failure::from),
+            cli::InviteAction::Revoke { id } => {
+                commands::invite_revoke(&context, id).map_err(Failure::from)
+            }
+        },
         Command::Sync(args) if args.once => commands::sync_once(&context).map_err(Failure::from),
 
         other => match dispatch::classify(other) {

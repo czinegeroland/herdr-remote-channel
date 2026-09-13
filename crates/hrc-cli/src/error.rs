@@ -72,6 +72,25 @@ pub enum CliError {
     /// The operating system would not supply randomness.
     #[error("could not obtain randomness from the operating system")]
     Entropy,
+
+    /// This installation has no channel configured.
+    #[error("no channel is configured; run `hrc create` or `hrc join` first")]
+    NoChannel,
+
+    /// Several channels exist and the command did not say which.
+    #[error("several channels are configured; pass --channel to choose one")]
+    AmbiguousChannel,
+
+    /// The channel has no published control log to replay.
+    #[error("channel {channel_id} has no published control log")]
+    ChannelNotPublished {
+        /// The channel in question.
+        channel_id: String,
+    },
+
+    /// This installation's device is not in the channel's roster.
+    #[error("this device is not a member of the channel")]
+    LocalDeviceNotInChannel,
 }
 
 impl CliError {
@@ -91,6 +110,10 @@ impl CliError {
             CliError::Transport(_) => "transport_error",
             CliError::ChannelExists { .. } => "channel_exists",
             CliError::Entropy => "entropy_unavailable",
+            CliError::NoChannel => "no_channel",
+            CliError::AmbiguousChannel => "ambiguous_channel",
+            CliError::ChannelNotPublished { .. } => "channel_not_published",
+            CliError::LocalDeviceNotInChannel => "device_not_in_channel",
         }
     }
 
@@ -103,7 +126,9 @@ impl CliError {
             CliError::NoStateDirectory
             | CliError::NoPassphrase
             | CliError::AlreadyInitialized
-            | CliError::ChannelExists { .. } => exit::USAGE,
+            | CliError::ChannelExists { .. }
+            | CliError::NoChannel
+            | CliError::AmbiguousChannel => exit::USAGE,
             CliError::Io { .. }
             | CliError::Storage(_)
             | CliError::Crypto(_)
@@ -112,7 +137,9 @@ impl CliError {
             | CliError::Ipc(_)
             | CliError::Protocol(_)
             | CliError::Transport(_)
-            | CliError::Entropy => exit::FAILURE,
+            | CliError::Entropy
+            | CliError::ChannelNotPublished { .. }
+            | CliError::LocalDeviceNotInChannel => exit::FAILURE,
         }
     }
 }

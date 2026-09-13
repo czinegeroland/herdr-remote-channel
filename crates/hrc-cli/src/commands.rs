@@ -10,16 +10,19 @@ use std::time::Duration;
 use hrc_core::Roster;
 use hrc_core::rpc::{AgentRequest, Broker, ChannelStatus, Request, TrustedRequest, dispatch_agent};
 use hrc_core::sync::{PollActivity, poll_interval};
+use hrc_crypto::enrollment::Invite;
 use hrc_crypto::{DeviceSecrets, KeyStore, PassphraseStore, PrincipalSecrets};
 use hrc_ipc::endpoint::{Endpoint, Interface, prepare_runtime_dir};
 use hrc_ipc::serve;
 use hrc_protocol::canonical;
-use hrc_protocol::control::{GenesisPayload, PrincipalMaterial, TransportLocator};
+use hrc_protocol::control::{
+    ControlEntryPayload, ControlOperation, GenesisPayload, PrincipalMaterial, TransportLocator,
+};
 use hrc_protocol::domain;
 use hrc_protocol::identity::{DeviceCertificatePayload, DeviceDescriptor};
-use hrc_protocol::signed::Signer;
+use hrc_protocol::signed::{SignedObject, Signer};
 use hrc_storage::Database;
-use hrc_transport::{ObjectClass, PublishObject, Transport};
+use hrc_transport::{ObjectClass, PublishObject, Revision, Transport};
 use hrc_transport_git::GitTransport;
 use secrecy::SecretString;
 use serde_json::{Value, json};
@@ -223,6 +226,301 @@ pub fn create(context: &Context, repo: &str, local_name: Option<&str>) -> Result
         "principalId": principal_id,
         "deviceId": device_id,
     }))
+}
+
+/// Replays a channel's published control log into a roster.
+///
+/// The control log is the authority on membership, so it is read from the
+/// transport rather than from local state: a local cache could be stale or
+/// edited, and the point of the chain is that every participant can derive
+/// the same answer from the same published objects.
+fn load_roster(transport: &GitTransport, channel_id: &str) -> Result<(Roster, Revision)> {
+    let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut cursor = None;
+    let mut head = None;
+
+    loop {
+        let page = transport.fetch(cursor.as_deref(), 100)?;
+
+        for publication in &page.publications {
+            head = Some(publication.revision.clone());
+
+            for object in &publication.objects {
+                if object.class == ObjectClass::Control {
+                    let bytes = transport.get_object(&object.name, &object.sha256)?;
+                    entries.push((object.name.clone(), bytes));
+                }
+            }
+        }
+
+        if !page.more {
+            break;
+        }
+        cursor = page.cursor;
+    }
+
+    // Names carry the control sequence as a zero-padded prefix, so sorting
+    // by name is sorting by position in the chain.
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut objects = entries.into_iter();
+    let (_, genesis_bytes) = objects
+        .next()
+        .ok_or_else(|| CliError::ChannelNotPublished {
+            channel_id: channel_id.to_owned(),
+        })?;
+
+    let genesis: SignedObject<GenesisPayload> =
+        canonical::from_json_str(std::str::from_utf8(&genesis_bytes).map_err(|_| {
+            CliError::ChannelNotPublished {
+                channel_id: channel_id.to_owned(),
+            }
+        })?)?;
+
+    let mut roster = Roster::from_genesis(&genesis)?;
+
+    for (_, bytes) in objects {
+        let entry: SignedObject<ControlEntryPayload> =
+            canonical::from_json_str(std::str::from_utf8(&bytes).map_err(|_| {
+                CliError::ChannelNotPublished {
+                    channel_id: channel_id.to_owned(),
+                }
+            })?)?;
+        roster.apply(&entry)?;
+    }
+
+    let head = head.ok_or_else(|| CliError::ChannelNotPublished {
+        channel_id: channel_id.to_owned(),
+    })?;
+
+    Ok((roster, head))
+}
+
+/// Signs and publishes one control entry, advancing the chain.
+fn publish_control(
+    transport: &mut GitTransport,
+    roster: &Roster,
+    revision: Revision,
+    device_key: &hrc_crypto::SigningKey,
+    signer: Signer,
+    operation: ControlOperation,
+    now: &str,
+) -> Result<String> {
+    let epoch = if operation.advances_epoch() {
+        roster.epoch() + 1
+    } else {
+        roster.epoch()
+    };
+
+    let payload = ControlEntryPayload {
+        version: hrc_protocol::PROTOCOL_VERSION,
+        channel_id: roster.channel_id().to_owned(),
+        sequence: roster.sequence() + 1,
+        previous_hash: roster.head_hash().to_owned(),
+        epoch,
+        created_at: now.to_owned(),
+        operation,
+    };
+    payload.validate_shape()?;
+
+    let name = format!(
+        "control/log/{:08}-{}.json",
+        payload.sequence,
+        &payload.entry_hash()?[..16]
+    );
+    let entry = device_key.sign_object(domain::CONTROL, signer, payload)?;
+
+    // A control-only publication, as PRD section 16.3 requires: a commit
+    // that mixed control and data would leave the resulting epoch ambiguous
+    // about which objects it applies to.
+    transport.publish(hrc_transport::PublishRequest {
+        expected_revision: Some(revision),
+        class: hrc_transport::PublicationClass::Control,
+        objects: vec![PublishObject {
+            name: name.clone(),
+            class: ObjectClass::Control,
+            bytes: canonical::to_canonical_bytes(&entry)?,
+        }],
+    })?;
+
+    Ok(name)
+}
+
+/// The single channel this installation is configured for, if there is one.
+fn only_channel(database: &Database) -> Result<hrc_storage::ChannelRecord> {
+    let mut channels = database.channels()?;
+
+    match channels.len() {
+        1 => Ok(channels.remove(0)),
+        0 => Err(CliError::NoChannel),
+        _ => Err(CliError::AmbiguousChannel),
+    }
+}
+
+/// `hrc invite create`: authorize one enrollment.
+///
+/// The invite code is returned to the caller for the human to hand over. It
+/// is deliberately *not* available under `--json`: the whole output is a
+/// secret, and machine-readable output is the form most likely to end up in
+/// a transcript, a log, or an agent's context. See decision DEC-047.
+///
+/// What is published is only the invite's identifier and expiry. The secret
+/// never reaches the channel, because anyone who could read the repository
+/// could then enroll.
+pub fn invite_create(context: &Context, intended_for: &str, expires_at: &str) -> Result<Value> {
+    let store = context.key_store()?;
+    let device: DeviceSecrets = store.load::<DeviceSecrets>(DEVICE_KEY_NAME)?;
+    let principal: PrincipalSecrets = store.load(PRINCIPAL_KEY_NAME)?;
+
+    let database = Database::open(context.paths.database())?;
+    let now = database.utc_now()?;
+    let channel = only_channel(&database)?;
+
+    let mut transport = GitTransport::open(
+        context.paths.channel_transport(&channel.channel_id),
+        &channel.transport_locator,
+    )?;
+    transport.sync_from_remote()?;
+    let (roster, revision) = load_roster(&transport, &channel.channel_id)?;
+
+    let invite_id = canonical::encode_base64url(&random_nonce()?);
+    let invite = Invite::generate(
+        &channel.transport_locator,
+        &channel.channel_id,
+        principal.signing_key().verifying_key().to_base64url(),
+        &invite_id,
+        expires_at,
+    )?;
+
+    let signer = Signer {
+        principal_id: principal.signing_key().verifying_key().to_base64url(),
+        device_id: local_device_id(&roster, &device)?,
+    };
+
+    publish_control(
+        &mut transport,
+        &roster,
+        revision,
+        &device.signing_key(),
+        signer,
+        ControlOperation::CreateInvite {
+            invite_id: invite_id.clone(),
+            expires_at: expires_at.to_owned(),
+        },
+        &now,
+    )?;
+
+    database.record_invite(
+        &channel.channel_id,
+        &invite_id,
+        intended_for,
+        expires_at,
+        &now,
+    )?;
+    database.append_audit(
+        Some(&channel.channel_id),
+        None,
+        "create_invite",
+        None,
+        Some(&invite_id),
+        &now,
+    )?;
+
+    Ok(json!({
+        "status": "ok",
+        "inviteId": invite_id,
+        "expiresAt": expires_at,
+        "intendedFor": intended_for,
+        // The one place this value appears. Hand it over through a channel
+        // the user chooses; it works once and then it is spent.
+        "inviteCode": invite.to_code()?,
+    }))
+}
+
+/// `hrc invite list`: outstanding invites, without their secrets.
+pub fn invite_list(context: &Context) -> Result<Value> {
+    let database = Database::open(context.paths.database())?;
+    let channel = only_channel(&database)?;
+
+    let invites: Vec<Value> = database
+        .invites(&channel.channel_id)?
+        .into_iter()
+        .map(|invite| {
+            json!({
+                "inviteId": invite.invite_id,
+                "intendedFor": invite.intended_for,
+                "expiresAt": invite.expires_at,
+                "state": invite.state,
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "status": "ok",
+        "invites": invites,
+    }))
+}
+
+/// `hrc invite revoke`: withdraw an unused invite.
+pub fn invite_revoke(context: &Context, invite_id: &str) -> Result<Value> {
+    let store = context.key_store()?;
+    let device: DeviceSecrets = store.load::<DeviceSecrets>(DEVICE_KEY_NAME)?;
+    let principal: PrincipalSecrets = store.load(PRINCIPAL_KEY_NAME)?;
+
+    let database = Database::open(context.paths.database())?;
+    let now = database.utc_now()?;
+    let channel = only_channel(&database)?;
+
+    let mut transport = GitTransport::open(
+        context.paths.channel_transport(&channel.channel_id),
+        &channel.transport_locator,
+    )?;
+    transport.sync_from_remote()?;
+    let (roster, revision) = load_roster(&transport, &channel.channel_id)?;
+
+    let signer = Signer {
+        principal_id: principal.signing_key().verifying_key().to_base64url(),
+        device_id: local_device_id(&roster, &device)?,
+    };
+
+    publish_control(
+        &mut transport,
+        &roster,
+        revision,
+        &device.signing_key(),
+        signer,
+        ControlOperation::RevokeInvite {
+            invite_id: invite_id.to_owned(),
+        },
+        &now,
+    )?;
+
+    database.set_invite_state(&channel.channel_id, invite_id, "revoked")?;
+    database.append_audit(
+        Some(&channel.channel_id),
+        None,
+        "revoke_invite",
+        None,
+        Some(invite_id),
+        &now,
+    )?;
+
+    Ok(json!({
+        "status": "ok",
+        "inviteId": invite_id,
+        "state": "revoked",
+    }))
+}
+
+/// This installation's device, as the roster knows it.
+fn local_device_id(roster: &Roster, device: &DeviceSecrets) -> Result<String> {
+    let signing_key = device.signing_key().verifying_key().to_base64url();
+
+    roster
+        .devices()
+        .find(|candidate| candidate.signing_key == signing_key)
+        .map(|candidate| candidate.device_id.clone())
+        .ok_or(CliError::LocalDeviceNotInChannel)
 }
 
 /// A fresh descriptor nonce.

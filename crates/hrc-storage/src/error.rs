@@ -70,6 +70,13 @@ pub enum StorageError {
         /// What arrived claiming it.
         arriving: String,
     },
+
+    /// No invite with that identifier is recorded locally.
+    #[error("invite {invite_id} is not recorded locally")]
+    UnknownInvite {
+        /// The unknown invite.
+        invite_id: String,
+    },
 }
 
 /// Convenience alias for storage results.
