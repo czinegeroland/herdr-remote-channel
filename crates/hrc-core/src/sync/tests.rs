@@ -652,3 +652,61 @@ fn fetching_an_unregistered_channel_is_an_error() {
         CoreError::UnknownChannelState { .. }
     ));
 }
+
+#[test]
+fn a_polling_adapter_is_polled_at_its_activity_interval() {
+    let check = next_check(PollActivity::Background, Duration::from_secs(1), false);
+
+    assert_eq!(check, NextCheck::Poll(Duration::from_secs(30)));
+}
+
+#[test]
+fn a_push_capable_adapter_is_waited_on_rather_than_polled() {
+    // PRD requirement HRC-TR-003. A provider that can say when something
+    // changed should be asked to, not asked repeatedly whether anything has.
+    let check = next_check(PollActivity::Background, Duration::from_secs(1), true);
+
+    assert_eq!(check, NextCheck::Wait(MAXIMUM_WAIT));
+}
+
+#[test]
+fn activity_does_not_shorten_a_wait() {
+    // Activity level trades latency against request volume, and a wait makes
+    // no requests while it blocks. Shortening it would give up the whole
+    // advantage of push support.
+    for activity in [
+        PollActivity::Waiting,
+        PollActivity::ActiveThread,
+        PollActivity::Background,
+        PollActivity::Idle,
+    ] {
+        assert_eq!(
+            next_check(activity, Duration::from_secs(1), true),
+            NextCheck::Wait(MAXIMUM_WAIT),
+            "{activity:?} should not change how long a wait blocks"
+        );
+    }
+}
+
+#[test]
+fn a_providers_minimum_still_bounds_a_wait() {
+    // Reissuing a wait is contact. An adapter that asks not to be contacted
+    // more than every five minutes means that whether the core is polling or
+    // long-polling.
+    let demanding = Duration::from_secs(300);
+    let check = next_check(PollActivity::Waiting, demanding, true);
+
+    assert_eq!(check, NextCheck::Wait(demanding));
+}
+
+#[test]
+fn both_kinds_of_check_report_their_duration() {
+    assert_eq!(
+        NextCheck::Wait(Duration::from_secs(60)).duration(),
+        Duration::from_secs(60)
+    );
+    assert_eq!(
+        NextCheck::Poll(Duration::from_secs(30)).duration(),
+        Duration::from_secs(30)
+    );
+}

@@ -20,7 +20,7 @@
 
 use crate::{
     LINEAR_APPEND_ONLY, ObjectClass, PublicationClass, PublishObject, PublishRequest, Transport,
-    TransportError,
+    TransportError, WaitOutcome,
 };
 
 /// A conformance failure: which check failed, and what the protocol needs.
@@ -99,7 +99,47 @@ pub fn run_suite<T: Transport, F: FnMut() -> T>(mut factory: F) -> Result<()> {
     control_and_data_are_never_mixed(&mut factory())?;
     an_empty_publication_is_rejected(&mut factory())?;
     genesis_cannot_be_republished(&mut factory())?;
+    waiting_matches_what_was_declared(&mut factory())?;
     Ok(())
+}
+
+/// An adapter's `supports_wait` declaration must match what `wait` does.
+///
+/// PRD requirement HRC-TR-003: the core supports polling and push-capable
+/// adapters, and it chooses between them from this declaration. A capability
+/// that disagrees with behavior is worse than an absent one — the core would
+/// either poll a provider that asked it not to, or block on one that never
+/// answers.
+fn waiting_matches_what_was_declared<T: Transport>(transport: &mut T) -> Result<()> {
+    const CHECK: &str = "waiting_matches_what_was_declared";
+    const WHY: &str = "The core decides whether to poll or to wait from \
+                       `supports_wait`. An adapter whose declaration and \
+                       behavior disagree makes that decision wrong in one \
+                       direction or the other.";
+
+    let declared = transport.capabilities().supports_wait;
+
+    // A zero timeout: this check is about which answer comes back, not about
+    // how long an adapter is willing to block for.
+    let outcome = match transport.wait(None, std::time::Duration::ZERO) {
+        Ok(outcome) => outcome,
+        Err(error) => return fail(CHECK, WHY, format!("wait failed: {error}")),
+    };
+
+    match (declared, &outcome) {
+        (false, WaitOutcome::Unsupported) => Ok(()),
+        (true, WaitOutcome::Unsupported) => fail(
+            CHECK,
+            WHY,
+            "the adapter declares supports_wait but its wait reports Unsupported",
+        ),
+        (false, other) => fail(
+            CHECK,
+            WHY,
+            format!("the adapter declares supports_wait: false but its wait returned {other:?}"),
+        ),
+        (true, _) => Ok(()),
+    }
 }
 
 fn capabilities_are_declared<T: Transport>(transport: &T) -> Result<()> {

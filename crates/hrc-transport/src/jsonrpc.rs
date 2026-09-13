@@ -62,6 +62,8 @@ pub mod method {
     pub const FETCH: &str = "fetch";
     /// Retrieve one object by name and expected hash.
     pub const GET_OBJECT: &str = "get_object";
+    /// Block until the revision differs or the timeout elapses.
+    pub const WAIT: &str = "wait";
     /// Report provider reachability.
     pub const HEALTH: &str = "health";
     /// Ask the adapter to exit.
@@ -555,6 +557,28 @@ fn answer<T: Transport>(
                 .map_err(|error| error_object(&error))
         }
 
+        method::WAIT => {
+            let value = params()?;
+            let current = value.get("revision").and_then(serde_json::Value::as_str);
+            let timeout = value
+                .get("timeoutSeconds")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| invalid("timeoutSeconds is required"))?;
+
+            transport
+                .wait(current, std::time::Duration::from_secs(timeout))
+                .map(|outcome| match outcome {
+                    crate::WaitOutcome::Changed(revision) => {
+                        serde_json::json!({ "outcome": "changed", "revision": revision })
+                    }
+                    crate::WaitOutcome::TimedOut => serde_json::json!({ "outcome": "timed_out" }),
+                    crate::WaitOutcome::Unsupported => {
+                        serde_json::json!({ "outcome": "unsupported" })
+                    }
+                })
+                .map_err(|error| error_object(&error))
+        }
+
         method::HEALTH => transport
             .health()
             .map(|()| serde_json::json!({}))
@@ -962,6 +986,40 @@ impl Transport for AdapterProcess {
 
     fn health(&self) -> Result<()> {
         self.call(method::HEALTH, None).map(|_| ())
+    }
+
+    fn wait(
+        &self,
+        current: Option<&str>,
+        timeout: std::time::Duration,
+    ) -> Result<crate::WaitOutcome> {
+        // An adapter that never declared push support is not asked. Sending
+        // `wait` anyway would make the caller sit through a timeout to learn
+        // what the handshake already said.
+        if !self.capabilities.supports_wait {
+            return Ok(crate::WaitOutcome::Unsupported);
+        }
+
+        let params = serde_json::json!({
+            "revision": current,
+            "timeoutSeconds": timeout.as_secs(),
+        });
+        let result = self.call(method::WAIT, Some(params))?;
+
+        match result.get("outcome").and_then(serde_json::Value::as_str) {
+            Some("changed") => result
+                .get("revision")
+                .and_then(serde_json::Value::as_str)
+                .map(|revision| crate::WaitOutcome::Changed(revision.to_owned()))
+                .ok_or_else(|| {
+                    TransportError::Provider("wait reported a change without a revision".into())
+                }),
+            Some("timed_out") => Ok(crate::WaitOutcome::TimedOut),
+            Some("unsupported") => Ok(crate::WaitOutcome::Unsupported),
+            other => Err(TransportError::Provider(format!(
+                "wait reported an unknown outcome {other:?}"
+            ))),
+        }
     }
 }
 
