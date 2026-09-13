@@ -1921,6 +1921,110 @@ fn a_herdr_event_that_is_not_an_event_is_refused() {
 }
 
 #[test]
+fn a_message_can_carry_an_expiry_and_the_inbox_shows_it() {
+    // PRD requirement HRC-MSG-005: messages support expiration. Section 11.5
+    // lists creation and expiration times as things a message must carry, so
+    // a sender has to be able to set one.
+    let (home, remote) = channel_fixture();
+    let principal = principal_of(home.path(), remote.path());
+
+    hrc_in(home.path())
+        .args(["send", &principal, "expires in a day", "--expires", "24h"])
+        .assert()
+        .success();
+    hrc_in(home.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+    hrc_in(home.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+
+    let output = hrc_in(home.path())
+        .args(["inbox", "--json"])
+        .output()
+        .expect("command should run");
+    let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+
+    let entry = value["entries"]
+        .as_array()
+        .and_then(|entries| entries.first())
+        .expect("the message should have arrived");
+
+    let expires_at = entry["expiresAt"]
+        .as_str()
+        .expect("the inbox should surface the expiry");
+    assert!(
+        expires_at.ends_with('Z') && expires_at.len() == 20,
+        "`{expires_at}` should be an absolute RFC 3339 UTC timestamp, not the lifetime as sent"
+    );
+    assert_eq!(entry["disposition"], "quarantined");
+}
+
+#[test]
+fn a_message_without_an_expiry_reports_none() {
+    let (home, remote) = channel_fixture();
+    let principal = principal_of(home.path(), remote.path());
+
+    hrc_in(home.path())
+        .args(["send", &principal, "no expiry"])
+        .assert()
+        .success();
+    hrc_in(home.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+    hrc_in(home.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+
+    let output = hrc_in(home.path())
+        .args(["inbox", "--json"])
+        .output()
+        .expect("command should run");
+    let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+
+    assert!(value["entries"][0]["expiresAt"].is_null());
+}
+
+#[test]
+fn a_lifetime_that_is_not_a_lifetime_is_a_usage_error() {
+    let (home, remote) = channel_fixture();
+    let principal = principal_of(home.path(), remote.path());
+
+    let output = hrc_in(home.path())
+        .args(["send", &principal, "text", "--expires", "soon", "--json"])
+        .output()
+        .expect("command should run");
+
+    assert_eq!(output.status.code(), Some(USAGE));
+
+    let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(value["code"], "invalid_lifetime");
+}
+
+#[test]
+fn synchronization_reports_the_messages_it_swept() {
+    // The sweep runs on every pass, so the field is always present even when
+    // nothing lapsed. A caller that only sees it sometimes cannot tell an
+    // empty sweep from an old binary.
+    let (home, _remote) = channel_fixture();
+
+    let output = hrc_in(home.path())
+        .args(["sync", "--once", "--json"])
+        .output()
+        .expect("command should run");
+    let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+
+    assert!(
+        value["expired"].is_array(),
+        "sync should always report what it swept"
+    );
+}
+
+#[test]
 fn an_invite_code_and_the_join_subcommands_both_parse() {
     // The bare code and the subcommands share one argument position, so
     // clap has to keep them apart. Both reach a command rather than a

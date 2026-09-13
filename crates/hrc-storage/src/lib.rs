@@ -262,6 +262,8 @@ pub struct InboxEntry {
     pub in_reply_to: Option<String>,
     /// Local arrival order.
     pub arrival_sequence: u64,
+    /// Sender-declared expiry, when the message has one.
+    pub expires_at: Option<String>,
     /// Current disposition.
     pub disposition: String,
 }
@@ -1097,6 +1099,52 @@ impl Database {
         self.query_inbox(channel_id, None)
     }
 
+    /// Marks every quarantined message whose expiry has passed.
+    ///
+    /// PRD section 26 requires an expired message to be displayed as expired
+    /// and to allow no action, and section 16.3 says expiration is logical:
+    /// the row stays and the published history is untouched. What does go is
+    /// the quarantined plaintext. A body the local human can no longer act
+    /// on has no remaining purpose, and an unapproved remote body sitting in
+    /// local storage indefinitely is precisely what the quarantine model
+    /// exists to avoid. The object is still in Git if it is ever needed
+    /// again, because that history is immutable.
+    ///
+    /// Only `quarantined` rows are swept. A message already approved,
+    /// edited, or declined has had its decision, and a decision does not
+    /// lapse.
+    ///
+    /// Returns the message IDs swept, so a caller can report and audit them.
+    pub fn sweep_expired(&self, now: &str) -> Result<Vec<String>> {
+        let swept: Vec<String> = {
+            let mut statement = self.connection.prepare(
+                "SELECT message_id FROM inbox
+                 WHERE disposition = 'quarantined'
+                   AND arrival_sequence IS NOT NULL
+                   AND expires_at IS NOT NULL
+                   AND expires_at <= ?1
+                 ORDER BY arrival_sequence",
+            )?;
+            let rows = statement.query_map(params![now], |row| row.get::<_, String>(0))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+
+        if swept.is_empty() {
+            return Ok(swept);
+        }
+
+        self.connection.execute(
+            "UPDATE inbox SET disposition = 'expired', body = NULL
+             WHERE disposition = 'quarantined'
+               AND arrival_sequence IS NOT NULL
+               AND expires_at IS NOT NULL
+               AND expires_at <= ?1",
+            params![now],
+        )?;
+
+        Ok(swept)
+    }
+
     /// Returns the metadata the Herdr plugin inbox renders.
     ///
     /// Deliberately separate from [`Database::pending_inbound`], which
@@ -1276,7 +1324,7 @@ impl Database {
     fn query_inbox(&self, channel_id: &str, thread_id: Option<&str>) -> Result<Vec<InboxEntry>> {
         let mut statement = self.connection.prepare(
             "SELECT message_id, sender_principal, sender_device, kind, thread_id,
-                    in_reply_to, arrival_sequence, disposition
+                    in_reply_to, arrival_sequence, expires_at, disposition
              FROM inbox
              WHERE channel_id = ?1 AND (?2 IS NULL OR thread_id = ?2)
                AND arrival_sequence IS NOT NULL
@@ -1292,7 +1340,8 @@ impl Database {
                 thread_id: row.get(4)?,
                 in_reply_to: row.get(5)?,
                 arrival_sequence: row.get::<_, Option<i64>>(6)?.unwrap_or(0) as u64,
-                disposition: row.get(7)?,
+                expires_at: row.get(7)?,
+                disposition: row.get(8)?,
             })
         })?;
 

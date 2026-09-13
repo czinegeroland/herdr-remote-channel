@@ -1278,3 +1278,128 @@ fn the_audit_log_has_no_update_or_delete_path() {
         );
     }
 }
+
+/// An arrival carrying an expiry.
+fn expiring(sequence: u64, expires_at: &str) -> (Arrival, String) {
+    (arrival(sequence), expires_at.to_owned())
+}
+
+#[test]
+fn a_lapsed_message_is_swept_and_its_body_goes_with_it() {
+    // PRD requirement HRC-MSG-005 and section 26: display as expired, allow
+    // no action. Section 16.3: expiration is logical, so the row stays.
+    let mut database = database();
+
+    let (arrival, expires_at) = expiring(1, "2026-09-12T00:00:00Z");
+    let mut message = arrival.message();
+    message.expires_at = Some(&expires_at);
+    database.record_inbound(&message, NOW).unwrap();
+
+    let swept = database.sweep_expired(NOW).unwrap();
+    assert_eq!(swept, vec!["msg-1".to_owned()]);
+
+    let entries = database.inbox_entries(CHANNEL).unwrap();
+    assert_eq!(entries.len(), 1, "the row is kept; expiry is logical");
+    assert_eq!(entries[0].disposition, "expired");
+
+    // The quarantined plaintext is gone, so nothing can approve it later.
+    assert!(
+        database
+            .pending_inbound()
+            .unwrap()
+            .iter()
+            .all(|pending| pending.message_id != "msg-1"),
+        "a swept message must leave the approval queue"
+    );
+}
+
+#[test]
+fn a_message_that_has_not_lapsed_is_left_alone() {
+    let mut database = database();
+
+    let (arrival, expires_at) = expiring(1, "2026-09-14T00:00:00Z");
+    let mut message = arrival.message();
+    message.expires_at = Some(&expires_at);
+    database.record_inbound(&message, NOW).unwrap();
+
+    assert!(database.sweep_expired(NOW).unwrap().is_empty());
+    assert_eq!(
+        database.inbox_entries(CHANNEL).unwrap()[0].disposition,
+        "quarantined"
+    );
+}
+
+#[test]
+fn a_message_without_an_expiry_never_lapses() {
+    let mut database = database();
+    database.record_inbound(&arrival(1).message(), NOW).unwrap();
+
+    assert!(
+        database
+            .sweep_expired("2099-01-01T00:00:00Z")
+            .unwrap()
+            .is_empty(),
+        "a message with no expiry has nothing to lapse"
+    );
+}
+
+#[test]
+fn sweeping_is_idempotent() {
+    // The daemon sweeps on every tick. A second pass must not re-report a
+    // message that already expired, or the audit log would fill with one
+    // entry per poll for the same lapse.
+    let mut database = database();
+
+    let (arrival, expires_at) = expiring(1, "2026-09-12T00:00:00Z");
+    let mut message = arrival.message();
+    message.expires_at = Some(&expires_at);
+    database.record_inbound(&message, NOW).unwrap();
+
+    assert_eq!(database.sweep_expired(NOW).unwrap().len(), 1);
+    assert!(database.sweep_expired(NOW).unwrap().is_empty());
+}
+
+#[test]
+fn a_decision_does_not_lapse() {
+    // Expiry is what happens when nobody says anything. Once a human has
+    // decided, the record of that decision is not something a clock revises.
+    let mut database = database();
+
+    let (arrival, expires_at) = expiring(1, "2026-09-12T00:00:00Z");
+    let mut message = arrival.message();
+    message.expires_at = Some(&expires_at);
+    database.record_inbound(&message, NOW).unwrap();
+
+    database
+        .commit_decision(&decision("decline", None))
+        .unwrap();
+
+    assert!(database.sweep_expired(NOW).unwrap().is_empty());
+    assert_eq!(
+        database.inbox_entries(CHANNEL).unwrap()[0].disposition,
+        "declined"
+    );
+}
+
+#[test]
+fn a_message_kept_in_the_inbox_still_lapses() {
+    // `keep_in_inbox` deliberately leaves the message quarantined, so it is
+    // still waiting on a human and expiry still applies to it. This is the
+    // case most likely to be got wrong by treating "has a decision record"
+    // as "is decided".
+    let mut database = database();
+
+    let (arrival, expires_at) = expiring(1, "2026-09-12T00:00:00Z");
+    let mut message = arrival.message();
+    message.expires_at = Some(&expires_at);
+    database.record_inbound(&message, NOW).unwrap();
+
+    database
+        .commit_decision(&decision("keep_in_inbox", None))
+        .unwrap();
+
+    assert_eq!(
+        database.sweep_expired(NOW).unwrap(),
+        vec!["msg-1".to_owned()]
+    );
+}

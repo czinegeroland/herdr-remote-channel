@@ -139,7 +139,7 @@ request as the work it describes, or it will lie.*
 
 ### State
 
-**79 of 94 requirement rows Implemented.** Milestones: **M0 55%, M1 100%,
+**80 of 94 requirement rows Implemented.** Milestones: **M0 55%, M1 100%,
 M2 99%, M3 95%, M4 85%, M5 0%.**
 
 `main` is at the Herdr plugin entry points; the development branch is level
@@ -158,50 +158,43 @@ and `hrc herdr event` reads one JSON event from standard input.
 
 ### Most recent implementation
 
-The Herdr plugin, completing `HRC-TECH-002`.
+Message expiry, completing `HRC-MSG-005`.
 
-- `crates/hrc-herdr/` is no longer a stub. Seven modules: the generated
-  manifest, the section 23.1 sidebar, the section 23.2 inbox view, the
-  section 23.3 notification set, panes, events, and local agent selection.
-  Every function is pure — the crate opens no sockets and decrypts nothing,
-  so the plugin's behavior is testable without a daemon.
-- `AgentView` gained the fields section 23.2 requires: local arrival time, a
-  validated thread label, attachment count and total bytes, and a
-  `prompt_request` boolean. A thread ID is sender-chosen text, so it is
-  passed through only when it is a well-formed ULID and replaced with a fixed
-  label otherwise — the same treatment `endpoint_label` already gave
-  endpoints. `prompt:request` is the one capability the PRD names, so it is
-  recorded as a boolean rather than as a free-form string.
-- Migration 008 records the attachment count, attachment bytes, and prompt
-  flag on the inbox row at acceptance. Rows accepted earlier report zero,
-  which is a gap in the record rather than a claim about those messages.
-- `Database::plugin_inbox` feeds the pane. Its SELECT list does not contain
-  the `body` column at all, which is a stronger guarantee than discarding it
-  afterwards, and a contract test sends a known string and asserts it appears
-  nowhere in the rendered pane.
-- `LocalAgent` deliberately does not implement `Serialize`, so a local pane ID
-  has no path onto the wire (constraint 8, section 23.4).
-- Two defects my own tests caught before CI did: the action and the pane both
-  claimed the manifest ID `inbox`, and the first draft treated
-  `prompt_request` as a message kind when it is a requested capability.
+- `hrc send --expires` and `hrc ask --expires` take a lifetime such as `24h`
+  and resolve it to an absolute RFC 3339 timestamp in the signed envelope,
+  for the same reason an invite's is resolved: a signed envelope carrying
+  "24h" would lapse at a moment that depends on when someone read it.
+- `Database::sweep_expired` runs at the start of every `sync --once` and
+  every daemon tick. A lapsed quarantined row moves to the `expired`
+  disposition and its plaintext is dropped; the row itself stays, because
+  section 16.3 says expiration is logical and section 26 says an expired
+  message is still displayed. The object is still in Git if it is ever
+  needed, since that history is immutable.
+- Only `quarantined` rows are swept. A decided message does not lapse; a
+  message the human chose to *keep in the inbox* is still quarantined and so
+  still does. That second case is the one most likely to be got wrong by
+  treating "has a decision record" as "is decided", and it has its own test.
+- The sweep is idempotent, so a daemon polling every few seconds writes one
+  audit entry per lapse rather than one per poll.
+
+The Herdr plugin landed just before this and already renders an expired row
+correctly: `Verification::Expired` and an empty decision list.
 
 ### The remaining work, in the order that unblocks the most
 
-1. **`HRC-MSG-005`** — expiry display and sweeping. Opening already refuses an
-   expired message; what is missing is surfacing and reaping.
-2. **`HRC-TR-001`, `HRC-TR-003`, `HRC-TR-006`** — the out-of-process JSON-RPC
+1. **`HRC-TR-001`, `HRC-TR-003`, `HRC-TR-006`** — the out-of-process JSON-RPC
    adapter binding, push-capable adapters, and the GitHub optimization. The
    conformance suite exists and a deliberately broken adapter is already
    proven to fail it, so a new adapter has a target to hit.
-3. **`HRC-TECH-011`, `HRC-TECH-012`** — `cargo-dist` release artifacts and a
+2. **`HRC-TECH-011`, `HRC-TECH-012`** — `cargo-dist` release artifacts and a
    clean-host install fixture. `OQ-012` asks whether to pin an exact toolchain
    first; answer it in that pull request.
-4. **`HRC-CH-004`** — public repositories after typed confirmation. `OQ-008`
+3. **`HRC-CH-004`** — public repositories after typed confirmation. `OQ-008`
    asks for the warning wording and is unanswered. It needs a human: implement
    the mechanism and leave the wording marked, or ask.
-5. **`HRC-CTX-004`, `HRC-CTX-007`** — patch and command-output provenance,
+4. **`HRC-CTX-004`, `HRC-CTX-007`** — patch and command-output provenance,
    left open by the context PR pending controlled capture.
-6. **`HRC-GOV-004`** — the evidence pass. Every row claiming `Verified` must
+5. **`HRC-GOV-004`** — the evidence pass. Every row claiming `Verified` must
    cite something stable. Do this last, once the rows have stopped moving.
 
 `HRC-TECH-001`, `HRC-TECH-003`, `HRC-TECH-005`, and `HRC-TECH-010` are

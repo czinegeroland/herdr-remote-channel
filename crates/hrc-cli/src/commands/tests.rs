@@ -747,7 +747,7 @@ fn an_unresealable_predecessor_blocks_later_messages_from_the_same_device() {
     admit_join(&context, joined["requestId"].as_str().unwrap()).unwrap();
 
     let recipient = principal.signing_key().verifying_key().to_base64url();
-    let sent = send(&context, &recipient, "must wait for the predecessor").unwrap();
+    let sent = send(&context, &recipient, "must wait for the predecessor", None).unwrap();
     assert_eq!(sent["published"], false);
     assert_eq!(sent["deferred"], true);
 
@@ -801,6 +801,7 @@ fn a_signed_malformed_context_is_rejected_without_halting_the_channel() {
             "context": package,
             "contextDigest": "0".repeat(64),
         }),
+        None,
         None,
     )
     .unwrap();

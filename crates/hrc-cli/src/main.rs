@@ -166,12 +166,20 @@ fn run(cli: &Cli, _path: &str) -> std::result::Result<Value, Failure> {
         Command::Device(device) if matches!(device.action, cli::DeviceAction::List) => {
             commands::device_list(&context).map_err(Failure::from)
         }
-        Command::Send(args) => {
-            commands::send(&context, &args.recipient, &args.message).map_err(Failure::from)
-        }
-        Command::Ask(args) => {
-            commands::ask(&context, &args.recipient, &args.question).map_err(Failure::from)
-        }
+        Command::Send(args) => commands::send(
+            &context,
+            &args.recipient,
+            &args.message,
+            args.expires.as_deref(),
+        )
+        .map_err(Failure::from),
+        Command::Ask(args) => commands::ask(
+            &context,
+            &args.recipient,
+            &args.question,
+            args.expires.as_deref(),
+        )
+        .map_err(Failure::from),
         Command::Reply(args) => commands::reply(
             &context,
             &args.message_id,
