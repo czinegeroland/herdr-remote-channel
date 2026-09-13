@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-13T10:44:00+02:00 |
+| Last updated | 2026-09-13T12:20:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -583,14 +583,14 @@ The Herdr plugin must expose:
 
 | ID | Requirement | Priority | Status | Evidence |
 |---|---|---:|---|---|
-| HRC-SKILL-001 | Ship an installable `herdr-remote-channel` skill. | Must | Approved | Pending |
-| HRC-SKILL-002 | Teach agents to discover the installed `hrc` CLI before use. | Must | Approved | Pending |
-| HRC-SKILL-003 | Allow agents to create note, question, reply, and delegation-message drafts. | Must | Approved | Pending |
-| HRC-SKILL-004 | Prevent non-interactive callers from approving joins or grants. | Must | Approved | Pending |
-| HRC-SKILL-005 | Keep invite secrets and private keys out of agent-visible JSON output. | Must | Approved | Pending |
-| HRC-SKILL-006 | Require human confirmation for sending sensitive context. | Must | Approved | Pending |
-| HRC-SKILL-007 | Guide GitHub repository setup and diagnostics. | Must | Approved | Pending |
-| HRC-SKILL-008 | Allow agents to create context-package drafts after context packages are implemented. | Should | Approved | Pending |
+| HRC-SKILL-001 | Ship an installable `herdr-remote-channel` skill. | Must | Implemented | `.agents/skills/herdr-remote-channel/SKILL.md`, held to the CLI and to section 24 by `crates/hrc-cli/tests/skill_contract.rs` |
+| HRC-SKILL-002 | Teach agents to discover the installed `hrc` CLI before use. | Must | Implemented | The skill opens with `hrc --help` and `hrc doctor`; a test proves every `hrc` invocation it shows exists in the CLI |
+| HRC-SKILL-003 | Allow agents to create note, question, reply, and delegation-message drafts. | Must | Implemented | The skill documents `send`, `ask`, `reply`, and `delegate` as drafting only, with the user sending |
+| HRC-SKILL-004 | Prevent non-interactive callers from approving joins or grants. | Must | Implemented | Enforced in the CLI (`crates/hrc-cli/tests/command_contract.rs`) and stated in the skill's exit-code table and prohibition list |
+| HRC-SKILL-005 | Keep invite secrets and private keys out of agent-visible JSON output. | Must | Partial | The skill forbids both and a test holds it to that; the `invite` command that must also refuse `--json` is not implemented yet |
+| HRC-SKILL-006 | Require human confirmation for sending sensitive context. | Must | Partial | `crates/hrc-core/src/context.rs` blocks a package carrying a secret and the skill forbids working around the block; the interactive confirmation is not wired up |
+| HRC-SKILL-007 | Guide GitHub repository setup and diagnostics. | Must | Implemented | The skill's setup and diagnosis sections cover private-repository creation, enrollment, `hrc doctor`, and the halted-channel case |
+| HRC-SKILL-008 | Allow agents to create context-package drafts after context packages are implemented. | Should | Partial | The skill covers drafting and preview against the implemented `crates/hrc-core/src/context.rs`; the CLI surface for building a package is not implemented yet |
 
 ### 12.8 Delivery governance
 
@@ -2341,8 +2341,8 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 | HRC-TR-001 through HRC-TR-004 | M0 | `AC-ADAPTER-SPEC`: protocol schema, capability declaration, error model, and opaque-object boundary pass specification review. | Partial: `crates/hrc-transport/src/lib.rs` implements the capability declaration, error model, and opaque-object boundary as executable types. Remaining: specification review, and the JSON-RPC binding for out-of-process adapters. |
 | HRC-TR-005 and HRC-TR-006 | M2 | `AC-GIT-ADAPTER`: generic Git operation succeeds without GitHub API dependency; GitHub optimization preserves identical protocol behavior. | Partial: `crates/hrc-transport-git/tests/git_adapter.rs` drives create, publish, fetch, concurrent conflict and retry, merge rejection, and object substitution against a real bare repository using plain Git and no network or GitHub API. Remaining: the GitHub-specific optimization. |
 | HRC-TR-007 | M2 | `AC-ADAPTER-CONFORMANCE`: the in-memory reference adapter and Git adapter both pass the publication-revision, ordering, conflict, durability, and opaque-object conformance suite. | Both adapters pass all fifteen checks (`crates/hrc-transport/tests/reference_adapter.rs`, `crates/hrc-transport-git/tests/git_adapter.rs`), and a deliberately broken adapter is proven to fail the suite. Verified on Linux, macOS, and Windows CI. |
-| HRC-SKILL-001 through HRC-SKILL-007 | M3 | `AC-SKILL`: an agent guides setup and drafts communication while tests prove it cannot retrieve private keys/invite secrets, approve joins, or bypass the prompt gate. | Pending |
-| HRC-SKILL-008 | M4 | `AC-SKILL-CONTEXT`: an agent can draft supported context packages while preview and send remain human-controlled. | Pending |
+| HRC-SKILL-001 through HRC-SKILL-007 | M3 | `AC-SKILL`: an agent guides setup and drafts communication while tests prove it cannot retrieve private keys/invite secrets, approve joins, or bypass the prompt gate. | Partial: `.agents/skills/herdr-remote-channel/SKILL.md` ships at the section 24 path, and `crates/hrc-cli/tests/skill_contract.rs` proves it states every section 24.2 prohibition, documents every exit code the CLI produces, covers every section 24.1 responsibility, invokes no command the CLI does not define, frames inbound content as data rather than instructions, and contains no secret material. Remaining: the enrollment and context commands the skill describes. |
+| HRC-SKILL-008 | M4 | `AC-SKILL-CONTEXT`: an agent can draft supported context packages while preview and send remain human-controlled. | Partial: the skill states that preview reports the exact bytes, that a detected secret blocks the send, and that pasting the content elsewhere to defeat the scan is prohibited. Remaining: the CLI commands that build and preview a package. |
 | HRC-SEC-001 through HRC-SEC-005, HRC-SEC-013, HRC-SEC-015, HRC-SEC-016 | M1 | `AC-KEYS-AND-ROSTER`: key isolation, signed recipient intent, signature validation, control-chain validation, control-only publication ordering, revocation, and stale-epoch rejection pass adversarial tests. | Partial: `crates/hrc-core/src/message/tests.rs` and `crates/hrc-core/src/roster/tests.rs` cover forged signatures, unknown signing devices, foreign channels, stale epochs, a revoked device's message reintroduced after revocation, and a recipient set that disagrees with the roster; `crates/hrc-crypto/src/store.rs` proves the stored key file contains no plaintext secret and that a wrong passphrase, a tampered file, and a corrupt document all fail closed. Remaining: the OS keychain backend. |
 | HRC-SEC-006 through HRC-SEC-008 | M4 | `AC-CONTENT-SECURITY`: ciphertext/decompression limits, secret scanning, and preview reject malicious fixtures. | Partial: `crates/hrc-crypto/src/encryption.rs` enforces ciphertext and plaintext limits before decryption, and `crates/hrc-core/src/context/tests.rs` covers secret scanning and preview. Remaining: decompression limits and archive fixtures. |
 | HRC-SEC-009 | M3 | `AC-QUARANTINE`: every inbound body is quarantined and framed as untrusted before any approved disclosure. | `crates/hrc-core/src/message.rs` and `crates/hrc-core/src/gate/tests.rs`: opening yields quarantined content, and delivery is impossible without a consumed authorization that applies the provenance banner. |
@@ -2460,6 +2460,7 @@ recorded either directly in this PRD or in a stable linked artifact.
 | DEC-016 | RFC 8785 canonical JSON uses a pinned Rust implementation, initially `serde_jcs`, guarded by protocol vectors. | Accepted | Avoids custom canonicalization while making signed bytes interoperable. |
 | DEC-017 | Build and test run in a separate `pull_request` workflow rather than being added to the `pull_request_target` traceability workflow. | Accepted | Compiling and running pull-request code under `pull_request_target` would hand a write-capable, secret-bearing context to untrusted code; the two triggers stay separated. |
 | DEC-018 | The CLI publishes a fixed numeric exit-code contract: 0 success, 1 runtime failure, 2 usage, 3 unimplemented, 4 authorization required. | Accepted | PRD section 11.1 requires documented exit codes, and the Herdr plugin and skill must branch on stable numbers rather than parsing prose. |
+| DEC-038 | The agent skill is held to the CLI and to PRD section 24 by tests in the build rather than by review. | Accepted | A skill file ships instructions to an agent, and nothing else in the build notices when it drifts from the exit codes, the command surface, or the prohibitions. The tests assert the substance of each rule rather than its wording, so the prose can improve without becoming a transcription exercise. |
 | DEC-037 | Context secret scanning blocks the send, uses conservative prefix-anchored rules, and never quotes a match. | Accepted | Stripping would send something the user did not approve; entropy-based rules produce enough false positives to get the check disabled; and quoting the match copies the secret into logs. Narrows OQ-006 without closing it. |
 | DEC-036 | The agent-safe view is a distinct type with no field capable of carrying a body, and it has no method that yields content. | Accepted | Enforcing the section 19.1 boundary by convention means one future caller can breach it. Enforcing it in the type system means there is nothing to reach through, and a reviewer can confirm the property by reading one struct. |
 | DEC-035 | The safety-phrase wordlist is the EFF Long Wordlist of 2016, vendored in-tree under CC BY 3.0 US with attribution, and identified as `eff-large-2016`. | Accepted | Deriving the phrase must not require a network fetch, and two peers must be able to prove they used the same vocabulary. Redistribution carries an attribution obligation, which the vendored file header satisfies. |
