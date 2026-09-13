@@ -911,3 +911,93 @@ fn two_sender_devices_have_independent_chains() {
     assert!(matches!(outcome, InboundOutcome::Accepted { .. }));
     assert_eq!(database.inbox_entries(CHANNEL).unwrap().len(), 2);
 }
+
+// --- Receipts (PRD sections 18.2 and 18.3) ---
+
+fn receipt(device: &str, state: &str) -> RecordedReceipt {
+    RecordedReceipt {
+        message_id: "msg-1".into(),
+        reporter_principal: "bob".into(),
+        reporter_device: device.into(),
+        state: state.into(),
+        rejection_code: None,
+        reported_at: NOW.into(),
+    }
+}
+
+#[test]
+fn a_receipt_is_recorded_once_per_device_and_state() {
+    let database = database();
+
+    assert!(
+        database
+            .record_receipt(CHANNEL, &receipt("bob-1", "delivered"), NOW)
+            .unwrap()
+    );
+    assert!(
+        !database
+            .record_receipt(CHANNEL, &receipt("bob-1", "delivered"), NOW)
+            .unwrap(),
+        "a repeated report should be recognized, not stored again"
+    );
+
+    // The same device reaching a later state is a new report.
+    assert!(
+        database
+            .record_receipt(CHANNEL, &receipt("bob-1", "read"), NOW)
+            .unwrap()
+    );
+
+    assert_eq!(database.receipts_for("msg-1").unwrap().len(), 2);
+}
+
+#[test]
+fn receipts_are_tracked_per_device_not_per_message() {
+    // One device saying "delivered" is not the same claim as a principal's
+    // whole fleet saying it, and collapsing them would overstate what the
+    // sender actually heard.
+    let database = database();
+
+    database
+        .record_receipt(CHANNEL, &receipt("bob-1", "delivered"), NOW)
+        .unwrap();
+    database
+        .record_receipt(CHANNEL, &receipt("bob-2", "delivered"), NOW)
+        .unwrap();
+
+    assert_eq!(
+        database.devices_reporting("msg-1", "delivered").unwrap(),
+        vec!["bob-1", "bob-2"]
+    );
+    assert!(
+        database
+            .devices_reporting("msg-1", "read")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_rejection_keeps_its_code() {
+    let database = database();
+    let mut rejected = receipt("bob-1", "rejected");
+    rejected.rejection_code = Some("unsupported_kind".into());
+
+    database.record_receipt(CHANNEL, &rejected, NOW).unwrap();
+
+    let recorded = database.receipts_for("msg-1").unwrap();
+    assert_eq!(
+        recorded[0].rejection_code.as_deref(),
+        Some("unsupported_kind")
+    );
+}
+
+#[test]
+fn an_unknown_receipt_state_is_refused_by_the_schema() {
+    // The state set is closed. A column that accepted anything would let a
+    // future bug record a state nothing else understands.
+    let database = database();
+    let bogus = receipt("bob-1", "acknowledged");
+
+    assert!(database.record_receipt(CHANNEL, &bogus, NOW).is_err());
+}

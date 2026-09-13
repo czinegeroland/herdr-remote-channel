@@ -200,6 +200,39 @@ pub enum CoreError {
         message_id: String,
     },
 
+    /// A receipt reported on a message this installation did not send.
+    #[error("receipt references message {message_id}, which this installation did not send")]
+    ReceiptForUnknownMessage {
+        /// The referenced message.
+        message_id: String,
+    },
+
+    /// A receipt came from a device the message was never addressed to.
+    ///
+    /// Refused rather than recorded and discounted: a stored claim tends to
+    /// be read as a fact.
+    #[error("device {reporter_device} was not a recipient of message {message_id}")]
+    ReceiptFromNonRecipient {
+        /// The message reported on.
+        message_id: String,
+        /// The device that reported on it.
+        reporter_device: String,
+    },
+
+    /// Correlation was attempted on a message that is not an answer.
+    #[error("message kind `{kind}` is not an answer")]
+    NotAnAnswer {
+        /// The kind that was passed.
+        kind: String,
+    },
+
+    /// An answer could not be tied to a question this installation asked.
+    #[error("the answer cannot be correlated: {reason}")]
+    UncorrelatedAnswer {
+        /// Which check failed.
+        reason: &'static str,
+    },
+
     /// A message addressed no active device.
     #[error("no active recipient device matches this message's addressing")]
     NoRecipients,
