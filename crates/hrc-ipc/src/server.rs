@@ -81,14 +81,36 @@ fn bind(endpoint: &Endpoint) -> Result<interprocess::local_socket::tokio::Listen
         Ok(listener) => Ok(listener),
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
             // Either a live daemon or a socket file left behind by one that
-            // was killed. Removing and retrying distinguishes them: a live
-            // daemon still holds the name and the retry fails.
+            // was killed. Probe first; removing a live daemon's socket path
+            // would make it unreachable to new clients even though the
+            // listener still owns the bound name.
             if let Some(path) = endpoint.path() {
+                if live_listener(path.as_path())? {
+                    return Err(error.into());
+                }
                 std::fs::remove_file(&path)?;
                 let retry = ListenerOptions::new().name(name);
                 let listener = retry.create_tokio()?;
                 restrict(endpoint)?;
                 return Ok(listener);
+            }
+
+            #[cfg(unix)]
+            fn live_listener(path: &std::path::Path) -> Result<bool> {
+                match std::os::unix::net::UnixStream::connect(path) {
+                    Ok(_) => Ok(true),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::ConnectionRefused
+                                | std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::NotFound
+                        ) =>
+                    {
+                        Ok(false)
+                    }
+                    Err(error) => Err(error.into()),
+                }
             }
             Err(error.into())
         }

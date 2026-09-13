@@ -236,6 +236,40 @@ async fn the_two_interfaces_are_separate_listeners() {
     trusted_server.abort();
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn a_live_listener_keeps_its_socket_path_when_another_bind_fails() {
+    let fixture = Fixture::new(Interface::AgentSafe);
+    let server = start(&fixture.endpoint).await;
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(1),
+        serve(&fixture.endpoint, answer as fn(Request) -> Response),
+    )
+    .await
+    .expect("a duplicate bind should return promptly")
+    .unwrap_err();
+    assert!(
+        matches!(error, IpcError::Io(_)),
+        "unexpected error: {error}"
+    );
+
+    let path = fixture.endpoint.path().expect("unix endpoint has a path");
+    assert!(
+        path.exists(),
+        "a failed duplicate bind removed the live daemon's socket path"
+    );
+
+    let mut client = Client::connect_with_retry(&fixture.endpoint, 20, Duration::from_millis(25))
+        .await
+        .expect("the original listener should still accept clients");
+    let response: Response = client.call(&Request::Status).await.unwrap();
+    assert_eq!(response, Response::Status { pending: 1 });
+
+    client.close().await.unwrap();
+    server.abort();
+}
+
 #[tokio::test]
 async fn the_client_refuses_to_send_an_oversized_frame() {
     // Refused locally, so the daemon never sees it and the connection stays

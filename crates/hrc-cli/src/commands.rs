@@ -329,12 +329,12 @@ pub async fn daemon(context: &Context) -> Result<()> {
 
 async fn daemon_sync_loop(context: &Context) -> Result<()> {
     loop {
-        let delay = daemon_poll_interval(context)?;
-        tokio::time::sleep(delay).await;
-
         if let Err(error) = daemon_tick(context) {
             eprintln!("error: {error}");
         }
+
+        let delay = daemon_poll_interval(context)?;
+        tokio::time::sleep(delay).await;
     }
 }
 
