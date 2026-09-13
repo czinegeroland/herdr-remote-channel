@@ -319,10 +319,128 @@ fn boundary_commands_report_authorization_required_in_json() {
 
 #[test]
 fn private_channel_creation_stays_on_the_agent_safe_path() {
-    hrc()
-        .args(["create", "--repo", "owner/channel"])
+    // Private creation is ordinary work. Reaching the key store rather than
+    // the authorization boundary is the property under test; without an
+    // initialized installation it stops at the missing passphrase.
+    let output = hrc()
+        .args(["create", "--repo", "owner/channel", "--json"])
+        .env_remove("HRC_PASSPHRASE")
+        .output()
+        .expect("command should run");
+
+    let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_ne!(
+        value["code"], "authorization_required",
+        "private creation must not cross the section 22.7 boundary"
+    );
+    assert_eq!(value["code"], "no_passphrase");
+}
+
+#[test]
+fn a_channel_is_created_published_and_registered() {
+    // The whole path: two keys, a signed certificate, a signed genesis, a
+    // real Git publication, and a local record — in that order, because a
+    // channel registered locally but never published would be one this
+    // installation believes in and nobody else can see.
+    let home = tempfile::tempdir().expect("temporary home");
+    let remote = tempfile::tempdir().expect("temporary remote");
+
+    std::process::Command::new("git")
+        .args(["init", "--bare", "--initial-branch=main"])
+        .arg(remote.path())
+        .output()
+        .expect("git should create a bare repository");
+
+    hrc_in(home.path()).arg("init").assert().success();
+
+    let output = hrc_in(home.path())
+        .args(["create", "--repo"])
+        .arg(remote.path())
+        .arg("--json")
+        .output()
+        .expect("command should run");
+
+    assert!(
+        output.status.success(),
+        "create failed: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    let channel_id = value["channelId"].as_str().expect("a channel id");
+    assert_eq!(channel_id.len(), 64, "the channel id is a sha256 digest");
+    assert_ne!(value["principalId"], value["deviceId"]);
+
+    // The channel is visible locally...
+    let channels = hrc_in(home.path())
+        .args(["channels", "--json"])
+        .output()
+        .expect("command should run");
+    let channels: Value = serde_json::from_slice(&channels.stdout).expect("stdout should be JSON");
+    assert_eq!(channels["channels"].as_array().unwrap().len(), 1);
+
+    // ...and the genesis really reached the remote.
+    let branches = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(remote.path())
+        .args(["ls-tree", "-r", "--name-only", "hrc"])
+        .output()
+        .expect("git should list the published tree");
+    let listing = String::from_utf8_lossy(&branches.stdout);
+
+    assert!(listing.contains("protocol.json"), "{listing}");
+    assert!(listing.contains("control/log/00000000-"), "{listing}");
+}
+
+#[test]
+fn creating_the_same_channel_twice_is_refused() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let remote = tempfile::tempdir().expect("temporary remote");
+
+    std::process::Command::new("git")
+        .args(["init", "--bare", "--initial-branch=main"])
+        .arg(remote.path())
+        .output()
+        .expect("git should create a bare repository");
+
+    hrc_in(home.path()).arg("init").assert().success();
+    hrc_in(home.path())
+        .args(["create", "--repo"])
+        .arg(remote.path())
         .assert()
-        .code(UNIMPLEMENTED);
+        .success();
+
+    // The second attempt builds a different genesis — a fresh nonce and a
+    // later timestamp — so it is refused by the transport rather than by the
+    // local record: the remote already has a channel on that branch.
+    let output = hrc_in(home.path())
+        .args(["create", "--repo"])
+        .arg(remote.path())
+        .arg("--json")
+        .output()
+        .expect("command should run");
+
+    assert!(!output.status.success());
+}
+
+#[test]
+fn init_creates_separate_principal_and_device_identities() {
+    // PRD requirement HRC-CH-006. One key signs for the machine, the other
+    // vouches for which machines belong to the person; a single key could
+    // not distinguish the two claims.
+    let home = tempfile::tempdir().expect("temporary home");
+
+    let output = hrc_in(home.path())
+        .args(["init", "--json"])
+        .output()
+        .expect("command should run");
+    let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+
+    let principal = value["principalKey"].as_str().expect("a principal key");
+    let device = value["signingKey"].as_str().expect("a device key");
+
+    assert!(!principal.is_empty());
+    assert_ne!(principal, device);
 }
 
 #[test]
