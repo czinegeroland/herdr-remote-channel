@@ -24,6 +24,7 @@ struct TestBroker {
     drafts: Vec<String>,
     decisions: Vec<crate::gate::DecisionRecord>,
     applied: Vec<&'static str>,
+    published_publicly: Option<String>,
 }
 
 impl TestBroker {
@@ -35,6 +36,7 @@ impl TestBroker {
             drafts: Vec::new(),
             decisions: Vec::new(),
             applied: Vec::new(),
+            published_publicly: None,
         }
     }
 
@@ -148,6 +150,18 @@ impl Broker for TestBroker {
         Ok(())
     }
 
+    fn publication_channel_name(&self) -> Result<String> {
+        Ok("Team channel".to_owned())
+    }
+
+    fn make_repository_public(
+        &mut self,
+        confirmed: &crate::visibility::ConfirmedPublication,
+    ) -> Result<()> {
+        self.published_publicly = Some(confirmed.channel_local_name().to_owned());
+        Ok(())
+    }
+
     fn apply_trusted(&mut self, request: &TrustedRequest) -> Result<()> {
         self.applied.push(request.method());
         Ok(())
@@ -227,7 +241,10 @@ fn every_trusted_request() -> Vec<TrustedRequest> {
             principal_id: "alice".into(),
             capability: "delegate".into(),
         },
-        TrustedRequest::MakeRepositoryPublic,
+        TrustedRequest::MakeRepositoryPublic {
+            shown: crate::visibility::PublicDisclosure::ALL.to_vec(),
+            typed: "make Team channel public".into(),
+        },
         TrustedRequest::Rollover,
     ]
 }
@@ -713,7 +730,10 @@ fn requests_round_trip_through_the_wire_shape() {
             r#"{"method":"remove_member","params":{"principal_id":"alice"}}"#,
             true,
         ),
-        (r#"{"method":"make_repository_public"}"#, true),
+        (
+            r#"{"method":"make_repository_public","params":{"shown":[],"typed":"no"}}"#,
+            true,
+        ),
         (r#"{"method":"rollover"}"#, true),
     ];
 
@@ -896,4 +916,110 @@ fn a_decision_that_reaches_no_agent_names_no_agent() {
 
     assert!(broker.decisions[0].agent.is_none());
     assert!(broker.decisions[0].edited_content.is_none());
+}
+
+#[test]
+fn making_a_repository_public_needs_the_disclosure_and_the_phrase() {
+    // PRD requirement HRC-CH-004. The gate lives in `dispatch_trusted`
+    // rather than in an interface, so a second interface cannot ship a
+    // weaker version of it.
+    let mut broker = TestBroker::new();
+    let mut ledger = AuthorizationLedger::new();
+    let mut context_ledger = ContextAuthorizationLedger::new();
+
+    let response = dispatch_trusted(
+        &mut broker,
+        &mut ledger,
+        &mut context_ledger,
+        TrustedRequest::MakeRepositoryPublic {
+            shown: crate::visibility::PublicDisclosure::ALL.to_vec(),
+            typed: "make Team channel public".into(),
+        },
+        NOW,
+    )
+    .expect("a complete confirmation should be accepted");
+
+    assert!(matches!(response, TrustedResponse::Done));
+    assert_eq!(broker.published_publicly.as_deref(), Some("Team channel"));
+}
+
+#[test]
+fn a_yes_does_not_publish_a_repository() {
+    let mut broker = TestBroker::new();
+    let mut ledger = AuthorizationLedger::new();
+    let mut context_ledger = ContextAuthorizationLedger::new();
+
+    let error = dispatch_trusted(
+        &mut broker,
+        &mut ledger,
+        &mut context_ledger,
+        TrustedRequest::MakeRepositoryPublic {
+            shown: crate::visibility::PublicDisclosure::ALL.to_vec(),
+            typed: "yes".into(),
+        },
+        NOW,
+    )
+    .expect_err("`yes` must not publish a repository");
+
+    assert!(
+        matches!(error, CoreError::PublicationRefused { .. }),
+        "{error:?}"
+    );
+    assert_eq!(
+        broker.published_publicly, None,
+        "nothing should be published"
+    );
+}
+
+#[test]
+fn an_incomplete_disclosure_does_not_publish_a_repository() {
+    // The realistic failure: an interface that showed most of the
+    // consequences. Typing the phrase perfectly must not rescue it.
+    let mut broker = TestBroker::new();
+    let mut ledger = AuthorizationLedger::new();
+    let mut context_ledger = ContextAuthorizationLedger::new();
+
+    let mut shown = crate::visibility::PublicDisclosure::ALL.to_vec();
+    shown.pop();
+
+    let error = dispatch_trusted(
+        &mut broker,
+        &mut ledger,
+        &mut context_ledger,
+        TrustedRequest::MakeRepositoryPublic {
+            shown,
+            typed: "make Team channel public".into(),
+        },
+        NOW,
+    )
+    .expect_err("an incomplete disclosure must not publish");
+
+    assert!(
+        matches!(error, CoreError::PublicationRefused { .. }),
+        "{error:?}"
+    );
+    assert_eq!(broker.published_publicly, None);
+}
+
+#[test]
+fn the_agent_safe_surface_cannot_publish_a_repository_at_all() {
+    // Already true because it is a `TrustedRequest`, and worth asserting
+    // where someone would look: publishing a channel is the largest
+    // disclosure decision in the product.
+    let mut broker = TestBroker::new();
+
+    let error = dispatch_agent(
+        &mut broker,
+        Request::Trusted(TrustedRequest::MakeRepositoryPublic {
+            shown: crate::visibility::PublicDisclosure::ALL.to_vec(),
+            typed: "make Team channel public".into(),
+        }),
+    )
+    .expect_err("the agent-safe surface must refuse");
+
+    assert!(
+        matches!(error, CoreError::AuthorizationRequired { .. }),
+        "{error:?}"
+    );
+    assert_eq!(broker.published_publicly, None);
 }

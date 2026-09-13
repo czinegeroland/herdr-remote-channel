@@ -187,6 +187,13 @@ pub enum CoreError {
     },
 
     /// No approved or locally authored content exists for this message.
+    /// A repository publication was requested without clearing both gates.
+    #[error("refusing to make the repository public: {reason}")]
+    PublicationRefused {
+        /// Which gate was not cleared.
+        reason: String,
+    },
+
     #[error("no approved content for message {message_id}")]
     NoApprovedContent {
         /// The message asked about.

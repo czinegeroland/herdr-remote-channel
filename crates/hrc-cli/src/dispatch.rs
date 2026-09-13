@@ -388,7 +388,10 @@ mod boundary_tests {
                 principal_id: String::new(),
                 capability: String::new(),
             },
-            TrustedRequest::MakeRepositoryPublic,
+            TrustedRequest::MakeRepositoryPublic {
+                shown: Vec::new(),
+                typed: String::new(),
+            },
             TrustedRequest::Rollover,
         ];
 

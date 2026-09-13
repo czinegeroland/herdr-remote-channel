@@ -157,7 +157,21 @@ pub enum TrustedRequest {
         capability: String,
     },
     /// Make the backing repository publicly readable.
-    MakeRepositoryPublic,
+    ///
+    /// Carries the disclosure the trusted interface displayed and the phrase
+    /// the human typed, because PRD section 16.4 requires both and a request
+    /// that could arrive without them would make the requirement optional.
+    ///
+    /// `shown` is self-attested: the daemon cannot see a screen. What it buys
+    /// is that an interface which did not display the consequences has to
+    /// claim it did, in code, rather than simply omit them — an act a
+    /// reviewer can see.
+    MakeRepositoryPublic {
+        /// The consequences the trusted interface displayed.
+        shown: Vec<crate::visibility::PublicDisclosure>,
+        /// What the human typed.
+        typed: String,
+    },
     /// Move the channel to a fresh repository.
     Rollover,
 }
@@ -269,7 +283,7 @@ impl TrustedRequest {
             TrustedRequest::RemoveMember { .. } => "remove_member",
             TrustedRequest::RevokeDevice { .. } => "revoke_device",
             TrustedRequest::GrantCapability { .. } => "grant_capability",
-            TrustedRequest::MakeRepositoryPublic => "make_repository_public",
+            TrustedRequest::MakeRepositoryPublic { .. } => "make_repository_public",
             TrustedRequest::Rollover => "rollover",
         }
     }
@@ -440,6 +454,19 @@ pub trait Broker {
     /// Taking the record rather than its parts means a caller cannot write a
     /// decision that differs from the one the gate actually made.
     fn record_decision_record(&mut self, record: &crate::gate::DecisionRecord) -> Result<()>;
+    /// The locally chosen name of the channel a publication would affect.
+    fn publication_channel_name(&self) -> Result<String>;
+
+    /// Publishes the repository, after both gates of section 16.4 cleared.
+    ///
+    /// Takes the confirmation rather than its parts, so an implementation
+    /// cannot be handed something that did not pass the checks: the type has
+    /// one constructor and it performs them.
+    fn make_repository_public(
+        &mut self,
+        confirmed: &crate::visibility::ConfirmedPublication,
+    ) -> Result<()>;
+
     /// Applies a trusted membership or repository operation.
     fn apply_trusted(&mut self, request: &TrustedRequest) -> Result<()>;
 }
@@ -621,6 +648,37 @@ pub fn dispatch_trusted(
     now: &str,
 ) -> Result<TrustedResponse> {
     Ok(match request {
+        // PRD requirement HRC-CH-004 and section 16.4. Checked here rather
+        // than in the interface, so a second interface — the Herdr plugin,
+        // a future one — cannot ship its own weaker version of the gate.
+        TrustedRequest::MakeRepositoryPublic { shown, typed } => {
+            let channel_local_name = broker.publication_channel_name()?;
+            let confirmed = crate::visibility::ConfirmedPublication::new(
+                &channel_local_name,
+                &shown,
+                &typed,
+                &broker.local_user(),
+            )
+            .map_err(|refusal| match refusal {
+                crate::visibility::RefusedPublication::DisclosureIncomplete { missing } => {
+                    CoreError::PublicationRefused {
+                        reason: format!(
+                            "{} of the section 16.4 consequences were not shown",
+                            missing.len()
+                        ),
+                    }
+                }
+                crate::visibility::RefusedPublication::PhraseNotTyped { expected } => {
+                    CoreError::PublicationRefused {
+                        reason: format!("the confirmation phrase `{expected}` was not typed"),
+                    }
+                }
+            })?;
+
+            broker.make_repository_public(&confirmed)?;
+            TrustedResponse::Done
+        }
+
         TrustedRequest::PreviewContext {
             recipient,
             package_id,

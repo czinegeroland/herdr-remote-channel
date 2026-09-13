@@ -18,6 +18,7 @@ pub mod receipt;
 pub mod roster;
 pub mod rpc;
 pub mod sync;
+pub mod visibility;
 
 pub use context::{ContextItem, ContextPackage, ContextPreview, ExcludedPath};
 pub use delegation::{Delegation, Party};
