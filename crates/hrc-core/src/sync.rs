@@ -67,6 +67,68 @@ pub fn poll_interval(activity: PollActivity, adapter_minimum: Duration) -> Durat
     target.max(adapter_minimum)
 }
 
+/// How the daemon should wait for the next change (PRD requirement
+/// HRC-TR-003).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NextCheck {
+    /// Block on the adapter for up to this long; it will say when the head
+    /// moves.
+    Wait(Duration),
+    /// Sleep for this long and then fetch.
+    Poll(Duration),
+}
+
+impl NextCheck {
+    /// How long the daemon waits either way, for callers that only need the
+    /// duration.
+    pub fn duration(self) -> Duration {
+        match self {
+            NextCheck::Wait(duration) | NextCheck::Poll(duration) => duration,
+        }
+    }
+}
+
+/// Chooses between waiting on a push-capable adapter and polling one.
+///
+/// A provider that can say when something changed should be asked to,
+/// rather than being asked repeatedly whether anything has. The choice comes
+/// from the adapter's declaration rather than from a provider name, which is
+/// the whole point of the capability block in PRD section 21.2.
+///
+/// The declared minimum poll interval still bounds a wait. An adapter that
+/// asks not to be contacted more than once a minute means exactly that: a
+/// long-poll that returns immediately and is reissued in a tight loop is
+/// polling with extra steps, and would get an installation rate-limited just
+/// the same.
+pub fn next_check(
+    activity: PollActivity,
+    adapter_minimum: Duration,
+    supports_wait: bool,
+) -> NextCheck {
+    if supports_wait {
+        // A wait blocks for as long as it is allowed to, because it costs
+        // the provider nothing while nothing is happening and it returns the
+        // instant something does. Activity level does not enter into it:
+        // that exists to trade latency against request volume, and a wait
+        // makes no requests while it blocks.
+        //
+        // [`MAXIMUM_WAIT`] bounds it so a silently dropped connection is
+        // noticed and reissued rather than leaving the daemon blocked on a
+        // socket nobody will answer. A provider demanding more spacing than
+        // that still wins, because reissuing a wait is contact.
+        NextCheck::Wait(MAXIMUM_WAIT.max(adapter_minimum))
+    } else {
+        NextCheck::Poll(poll_interval(activity, adapter_minimum))
+    }
+}
+
+/// The longest a single wait may block.
+///
+/// Long enough that a quiet channel costs almost nothing, short enough that
+/// a silently dropped connection is noticed and retried rather than leaving
+/// the daemon blocked forever on a socket nobody will ever answer.
+pub const MAXIMUM_WAIT: Duration = Duration::from_secs(60);
+
 /// Exponential backoff with jitter for failed transport operations.
 ///
 /// PRD requirement HRC-SYNC-009. The jitter matters more than the growth:

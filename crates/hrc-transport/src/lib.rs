@@ -319,6 +319,46 @@ pub trait Transport {
 
     /// Reports whether the adapter can reach its provider.
     fn health(&self) -> Result<()>;
+
+    /// Blocks until the channel head differs from `current`, or the timeout
+    /// elapses (PRD section 21.1, `wait`).
+    ///
+    /// This is the push half of requirement HRC-TR-003. A provider that can
+    /// tell the core when something changed should not be polled: polling is
+    /// what the core falls back to, not what it prefers.
+    ///
+    /// The default is [`WaitOutcome::Unsupported`], so an adapter with no
+    /// push mechanism gets correct behavior by writing nothing. Git is such
+    /// an adapter — a Git remote has no way to notify a client — and saying
+    /// so is more honest than a `wait` that quietly sleeps for the timeout
+    /// and returns nothing.
+    ///
+    /// An adapter that overrides this **must** declare
+    /// `supports_wait: true`, and one that declares it must override this.
+    /// The conformance suite checks both directions, because a capability
+    /// that disagrees with behavior is worse than an absent one: the core
+    /// would either poll a provider that asked it not to, or block forever
+    /// on one that never answers.
+    fn wait(&self, current: Option<&str>, timeout: std::time::Duration) -> Result<WaitOutcome> {
+        let _ = (current, timeout);
+        Ok(WaitOutcome::Unsupported)
+    }
+}
+
+/// What waiting on a channel produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WaitOutcome {
+    /// The head moved, and this is where it is now.
+    Changed(Revision),
+    /// The timeout elapsed with the head unchanged.
+    TimedOut,
+    /// This adapter has no push mechanism; poll it instead.
+    ///
+    /// Distinct from [`WaitOutcome::TimedOut`] on purpose. A caller that
+    /// could not tell them apart would treat an adapter that cannot wait as
+    /// one whose channel is merely quiet, and would sit through the whole
+    /// timeout before every poll.
+    Unsupported,
 }
 
 /// Validates the structural rules a publication must satisfy.

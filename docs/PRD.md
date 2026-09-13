@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-14T01:20:00+02:00 |
+| Last updated | 2026-09-14T01:35:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -573,7 +573,7 @@ The Herdr plugin must expose:
 |---|---|---:|---|---|
 | HRC-TR-001 | Define a versioned transport adapter protocol. | Must | Implemented | `crates/hrc-transport/src/lib.rs` carries the in-process trait and `crates/hrc-transport/src/jsonrpc.rs` the section 21 out-of-process binding: JSON-RPC 2.0 over standard input and output, length-prefixed frames, the section 21.1 method set, a versioned handshake that refuses an adapter announcing another protocol or a non-linear history, and a round-trippable error model so a conflict keeps the revision the caller rebuilds on. `crates/hrc-transport/src/bin/hrc-reference-adapter.rs` serves the in-memory adapter as a real executable and `crates/hrc-transport/tests/out_of_process_adapter.rs` runs the whole conformance suite against it across a process boundary |
 | HRC-TR-002 | Keep plaintext and private keys outside adapters. | Must | Implemented | `crates/hrc-transport/src/lib.rs`: the trait only ever accepts and returns opaque bytes |
-| HRC-TR-003 | Support polling and push-capable adapters. | Must | Approved | Pending |
+| HRC-TR-003 | Support polling and push-capable adapters. | Must | Implemented | `crates/hrc-transport/src/lib.rs` adds `Transport::wait` returning `Changed`, `TimedOut`, or `Unsupported`, defaulting to `Unsupported` so an adapter with no push mechanism is correct by writing nothing; `crates/hrc-transport/src/conformance.rs` fails any adapter whose `supports_wait` declaration disagrees with what its `wait` does, in either direction; `crates/hrc-core/src/sync.rs` `next_check` chooses waiting over polling from that declaration rather than from a provider name, blocks for `MAXIMUM_WAIT` so a dropped connection is reissued, and still honors an adapter minimum longer than that because reissuing a wait is contact; `crates/hrc-transport/src/jsonrpc.rs` carries `wait` across the process boundary and answers `Unsupported` from the handshake without a round trip. Both shipped adapters declare `supports_wait: false`, correctly: a Git remote cannot notify a client |
 | HRC-TR-004 | Require adapters to declare size, ordering, durability, and metadata properties. | Must | Implemented | `crates/hrc-transport/src/lib.rs` `AdapterCapabilities`, enforced by the conformance suite |
 | HRC-TR-005 | Supply a built-in Git transport. | Must | Implemented | `crates/hrc-transport-git/src/lib.rs`; passes the same conformance suite as the reference adapter |
 | HRC-TR-006 | Supply GitHub setup optimization without making the core GitHub-only. | Should | Approved | Pending |
@@ -2550,7 +2550,7 @@ Every implementation PR must update this table.
 
 | Milestone | Completion | Current state | Last PR | Evidence / next step |
 |---|---:|---|---|---|
-| M0 Product and protocol | 75% | The section 21 adapter protocol now has its out-of-process JSON-RPC binding, and the conformance suite runs against a separate adapter executable rather than only in process | Out-of-process adapter binding | Obtain product-owner specification review, which is not an agent's to record |
+| M0 Product and protocol | 85% | The section 21 adapter protocol now has its out-of-process JSON-RPC binding and its push half: `wait` crosses the boundary, and the conformance suite refuses an adapter whose push declaration disagrees with its behavior | Push-capable adapters | Obtain product-owner specification review, which is not an agent's to record |
 | M1 Secure foundation | 100% | Unchanged in substance; its continuous-integration evidence now reads Linux per change with Windows and macOS on demand, per decision DEC-049 | Continuous-integration cost | Run `cross-platform.yml` before a release and after any change touching paths, filesystem behavior, process handling, time, or line endings |
 | M2 Git messaging | 99% | Messages now carry an optional expiry, and every synchronization pass sweeps lapsed quarantined rows to the `expired` disposition, dropping the plaintext while keeping the row | Message expiry and sweeping | Add receipts over a published channel and end-to-end restart coverage |
 | M3 Herdr integration | 95% | The Herdr plugin now backs all four entry points: a generated manifest, the sidebar indicator, an inbox view carrying every field section 23.2 requires, the closed notification set, and local agent selection that cannot serialize a pane ID | Herdr plugin entry points | Wire a recorded last-fetch time into the sidebar, then close the remaining transport-adapter rows |
