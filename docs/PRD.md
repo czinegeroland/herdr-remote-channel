@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-14T16:45:00+02:00 |
+| Last updated | 2026-09-14T17:10:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -2543,6 +2543,16 @@ Every implementation PR must update this table.
 | Delivery governance | 0 | 5 | 0% |
 | Implementation platform | 0 | 12 | 0% |
 | Security | 0 | 16 | 0% |
+
+---
+
+## 31.1 Working agreement
+
+`docs/HANDOFF.md` records how this PRD is being delivered: the pull-request
+cycle, the living-PRD rule and its CI check, what the codebase expects of a
+change, and where the work currently stands. It is written for whoever picks
+the work up next and is updated when the way of working changes, not when the
+code does.
 
 ---
 
