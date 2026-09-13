@@ -143,7 +143,7 @@ request as the work it describes, or it will lie.*
 M2 99%, M3 85%, M4 85%, M5 0%.**
 
 Thirty-three pull requests are merged. Context-package PR #34 is open from
-`claude/happy-johnson-4kqomk` at `db76d6a`; `main` remains at
+`claude/happy-johnson-4kqomk` at `56ffc78`; `main` remains at
 `docs: hand off the post-reencryption state (#33)` until that PR merges.
 
 What works today, end to end and proven by tests against a real Git
@@ -194,6 +194,16 @@ Finish #34 first: wait for every required check, fix any failure on the same
 branch, squash-merge it, then reset `claude/happy-johnson-4kqomk` to
 `origin/main` and force-with-lease push. After that, continue with the list
 below.
+
+The latest CI rerun was triggered by `56ffc78`. PRD traceability and
+format/clippy had already passed on the preceding revision. Linux and macOS
+compiled the full workspace and ran the command suite successfully; the only
+remaining failure was a skill-contract assertion requiring the literal
+contiguous phrase `do not run hrc context send`, which `56ffc78` fixes.
+Windows was still running when this handoff was updated. If the new run is
+green, merge immediately; otherwise read only the newly failed job logs and
+continue on this branch. The local `.vs/` directory is unrelated and must
+remain untracked.
 
 ### The remaining work, in the order that unblocks the most
 
