@@ -114,6 +114,67 @@ pub enum CoreError {
         found: String,
     },
 
+    /// An admission named an invite the control log never opened.
+    #[error("invite {invite_id} was never created in this channel")]
+    UnknownInvite {
+        /// The unknown invite.
+        invite_id: String,
+    },
+
+    /// An invite identifier was created twice.
+    #[error("invite {invite_id} was already created")]
+    DuplicateInvite {
+        /// The repeated identifier.
+        invite_id: String,
+    },
+
+    /// An invite was redeemed more than once.
+    ///
+    /// Invites are single use (PRD section 15.1), so a second admission
+    /// under one is a replayed join request rather than a second guest.
+    #[error("invite {invite_id} has already been used")]
+    InviteAlreadyUsed {
+        /// The spent invite.
+        invite_id: String,
+    },
+
+    /// An invite was withdrawn before it was redeemed.
+    #[error("invite {invite_id} was revoked")]
+    InviteRevoked {
+        /// The withdrawn invite.
+        invite_id: String,
+    },
+
+    /// An invite passed its expiry before it was redeemed.
+    #[error("invite {invite_id} expired at {expires_at}")]
+    InviteExpired {
+        /// The expired invite.
+        invite_id: String,
+        /// When it expired.
+        expires_at: String,
+    },
+
+    /// A join request was not well formed.
+    #[error("malformed join request: {reason}")]
+    MalformedJoinRequest {
+        /// What was wrong.
+        reason: String,
+    },
+
+    /// A join request named a principal that is already a member.
+    #[error("principal {principal_id} is already a member of this channel")]
+    AlreadyEnrolled {
+        /// The principal that asked again.
+        principal_id: String,
+    },
+
+    /// This installation holds no administrator device for the channel.
+    ///
+    /// Reviewing a join means decrypting a request addressed to the
+    /// administrator, so a non-administrator cannot do it even locally.
+    #[error("this installation is not an administrator of this channel")]
+    NotAnAdministrator,
+
     /// A message addressed no active device.
     #[error("no active recipient device matches this message's addressing")]
     NoRecipients,

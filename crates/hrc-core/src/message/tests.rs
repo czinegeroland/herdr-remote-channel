@@ -135,10 +135,21 @@ fn channel() -> (TestPeer, TestPeer, Roster) {
     let bob = TestPeer::new("bob", 2);
     let mut roster = Roster::from_genesis(&genesis_for(&alice)).unwrap();
 
+    let invite = control_entry(
+        &roster,
+        &alice,
+        ControlOperation::CreateInvite {
+            invite_id: "invite-1".into(),
+            expires_at: "2026-09-14T00:00:00Z".into(),
+        },
+    );
+    roster.apply(&invite).unwrap();
+
     let add = control_entry(
         &roster,
         &alice,
         ControlOperation::AddMember {
+            invite_id: "invite-1".into(),
             member: bob.material(),
         },
     );
