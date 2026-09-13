@@ -775,6 +775,236 @@ fn an_unresealable_predecessor_blocks_later_messages_from_the_same_device() {
 }
 
 #[test]
+fn a_signed_malformed_context_is_rejected_without_halting_the_channel() {
+    let (directory, context) = home();
+    init(&context).unwrap();
+    let remote = directory.path().join("remote.git");
+    bare_remote(&remote);
+    let created = create(&context, remote.to_str().unwrap(), Some("Test channel")).unwrap();
+    let channel_id = created["channelId"].as_str().unwrap().to_owned();
+
+    let store = context.key_store().unwrap();
+    let principal: PrincipalSecrets = store.load(PRINCIPAL_KEY_NAME).unwrap();
+    let recipient = principal.signing_key().verifying_key().to_base64url();
+    let package = hrc_core::ContextPackage::new(
+        "ctx-tampered",
+        vec![hrc_core::ContextItem::Note {
+            text: "the signed context was replaced".into(),
+        }],
+    );
+    let sent = compose_body(
+        &context,
+        hrc_protocol::MessageKind::Note,
+        &recipient,
+        json!({
+            "context": package,
+            "contextDigest": "0".repeat(64),
+        }),
+        None,
+    )
+    .unwrap();
+    assert_eq!(sent["published"], true);
+
+    assert!(sync_once(&context).is_ok());
+    let database = Database::open(context.paths.database()).unwrap();
+    let channel = database.channel(&channel_id).unwrap().unwrap();
+    assert!(
+        channel.halted_reason.is_none(),
+        "a signed malformed context is sender content, not history tampering"
+    );
+    let entry = database
+        .inbox_entries(&channel_id)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(entry.disposition, "unsupported");
+    assert!(
+        database
+            .audit_entries(None)
+            .unwrap()
+            .iter()
+            .any(|entry| entry.action == "malformed_context"),
+        "the local rejection must remain auditable"
+    );
+}
+
+#[test]
+fn context_excerpts_are_source_derived_and_detect_changes_before_trusted_send() {
+    let (directory, context) = home();
+    init(&context).unwrap();
+    let source = directory.path().join("source");
+    std::fs::create_dir_all(source.join("src")).unwrap();
+    std::fs::write(
+        source.join("src/lib.rs"),
+        "first line\nchecked source\nlast line\n",
+    )
+    .unwrap();
+    let status = ProcessCommand::new("git")
+        .args(["init", "--quiet"])
+        .arg(&source)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let manifest = source.join("context.json");
+    std::fs::write(
+        &manifest,
+        r#"{"version":1,"id":"ctx-source","items":[{"kind":"excerpt","path":"src/lib.rs","firstLine":2,"lastLine":2,"text":"caller-controlled text"}]}"#,
+    )
+    .unwrap();
+
+    let drafted = context_draft(
+        &context,
+        manifest.to_str().unwrap(),
+        Some(source.to_str().unwrap()),
+    )
+    .unwrap();
+    assert!(!drafted.to_string().contains("checked source"));
+    let database = Database::open(context.paths.database()).unwrap();
+    let stored = database.context_draft("ctx-source").unwrap().unwrap();
+    assert!(
+        std::path::Path::new(stored.repository_root.as_deref().unwrap()).is_absolute(),
+        "the durable source identity must be an absolute worktree root"
+    );
+    let package: ContextPackage =
+        canonical::from_json_str(std::str::from_utf8(&stored.manifest).unwrap()).unwrap();
+    let ContextItem::Excerpt { text, .. } = &package.items[0] else {
+        panic!("expected an excerpt");
+    };
+    assert_eq!(text, "checked source");
+    assert_ne!(text, "caller-controlled text");
+    drop(database);
+
+    std::fs::write(
+        source.join("src/lib.rs"),
+        "first line\nchanged source\nlast line\n",
+    )
+    .unwrap();
+    assert!(matches!(
+        context_preview(&context, "ctx-source"),
+        Err(CliError::InvalidContextSource { .. })
+    ));
+}
+
+#[test]
+fn context_draft_rejects_an_ignored_source_before_reading_it() {
+    let (directory, context) = home();
+    init(&context).unwrap();
+    let source = directory.path().join("source");
+    std::fs::create_dir_all(source.join("private")).unwrap();
+    std::fs::write(source.join(".gitignore"), "private/secret.txt\n").unwrap();
+    std::fs::write(
+        source.join("private").join("secret.txt"),
+        "must never be read",
+    )
+    .unwrap();
+    let status = ProcessCommand::new("git")
+        .args(["init", "--quiet"])
+        .arg(&source)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let manifest = source.join("context.json");
+    std::fs::write(
+        &manifest,
+        r#"{"version":1,"id":"ctx-ignored","items":[{"kind":"excerpt","path":"private\\secret.txt","firstLine":1,"lastLine":1,"text":"must never be read"}]}"#,
+    )
+    .unwrap();
+
+    let error = context_draft(
+        &context,
+        manifest.to_str().unwrap(),
+        Some(source.to_str().unwrap()),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        CliError::Core(hrc_core::CoreError::ContextContainsExcludedPath { .. })
+    ));
+    assert!(!error.to_string().contains("must never be read"));
+}
+
+#[test]
+fn committed_context_excerpt_accepts_sha1_and_sha256_commit_ids() {
+    let (directory, context) = home();
+    init(&context).unwrap();
+    for (object_format, expected_length) in [("sha1", 40), ("sha256", 64)] {
+        let source = directory.path().join(format!("source-{object_format}"));
+        std::fs::create_dir_all(source.join("src")).unwrap();
+        std::fs::write(source.join("src/lib.rs"), "committed source\n").unwrap();
+        let mut initialize = ProcessCommand::new("git");
+        initialize.args(["init", "--quiet"]);
+        if object_format == "sha256" {
+            initialize.arg("--object-format=sha256");
+        }
+        assert!(initialize.arg(&source).status().unwrap().success());
+        assert!(
+            ProcessCommand::new("git")
+                .args(["-C", source.to_str().unwrap(), "add", "src/lib.rs"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            ProcessCommand::new("git")
+                .args([
+                    "-C",
+                    source.to_str().unwrap(),
+                    "-c",
+                    "user.name=test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "source",
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let commit = String::from_utf8(
+            ProcessCommand::new("git")
+                .args(["-C", source.to_str().unwrap(), "rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        assert_eq!(commit.trim().len(), expected_length);
+        std::fs::write(source.join("src/lib.rs"), "uncommitted replacement\n").unwrap();
+        let context_id = format!("ctx-{object_format}");
+        let manifest = source.join("context.json");
+        std::fs::write(
+            &manifest,
+            format!(
+                r#"{{"version":1,"id":"{context_id}","items":[{{"kind":"excerpt","path":"src/lib.rs","firstLine":1,"lastLine":1,"commitSha":"{}","text":"caller text"}}]}}"#,
+                commit.trim()
+            ),
+        )
+        .unwrap();
+
+        context_draft(
+            &context,
+            manifest.to_str().unwrap(),
+            Some(source.to_str().unwrap()),
+        )
+        .unwrap();
+        let draft = Database::open(context.paths.database())
+            .unwrap()
+            .context_draft(&context_id)
+            .unwrap()
+            .unwrap();
+        assert!(
+            String::from_utf8(draft.manifest)
+                .unwrap()
+                .contains("committed source")
+        );
+        context_preview(&context, &context_id).unwrap();
+    }
+}
+
+#[test]
 fn daemon_tick_reports_the_next_poll_interval() {
     let (_directory, context) = home();
     init(&context).unwrap();

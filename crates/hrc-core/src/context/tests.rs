@@ -188,6 +188,29 @@ fn credential_assignments_with_real_values_are_flagged() {
 }
 
 #[test]
+fn secret_scanning_covers_package_and_item_metadata() {
+    for package in [
+        ContextPackage::new("ghp_16CharactersOfTokenHere0000000000", vec![note("safe")]),
+        ContextPackage::new(
+            "ctx-1",
+            vec![ContextItem::Reference {
+                reference: "abc123".into(),
+                description: Some("ghp_16CharactersOfTokenHere0000000000".into()),
+            }],
+        ),
+        ContextPackage::new(
+            "ctx-1",
+            vec![ContextItem::Link {
+                url: "https://example.invalid".into(),
+                description: Some("ghp_16CharactersOfTokenHere0000000000".into()),
+            }],
+        ),
+    ] {
+        assert!(!package.preview().unwrap().is_sendable());
+    }
+}
+
+#[test]
 fn placeholders_and_short_values_do_not_trip_the_scanner() {
     // A blocking check that cries wolf gets disabled, and then it protects
     // nothing. These are the shapes that appear in documentation and
@@ -240,7 +263,9 @@ fn excluded_paths_block_a_send() {
         "id_ed25519",
         ".netrc",
         "deploy/secrets.yaml",
+        ".git",
         ".git/config",
+        "linked-worktree/.git",
         "repo/.git/HEAD",
     ];
 
@@ -278,6 +303,56 @@ fn ordinary_source_paths_are_not_excluded() {
             excluded_path_reason(path).is_none(),
             "{path} should be allowed"
         );
+    }
+}
+
+#[test]
+fn environmental_dumps_and_scrollback_are_explicitly_rejected() {
+    // These are excluded by their declared source, not only when a token
+    // scanner happens to recognize a value inside them.
+    for command in [
+        "env",
+        "/usr/bin/env",
+        "printenv",
+        "sh -c env",
+        "bash -lc printenv",
+        "cmd /c set",
+        "Get-ChildItem Env:",
+        "pwsh -Command Get-ChildItem Env:",
+        "terminal scrollback",
+        "export prompt transcript",
+        "history",
+    ] {
+        let package = ContextPackage::new(
+            "ctx-1",
+            vec![ContextItem::Output {
+                command: command.into(),
+                text: "ordinary-looking text without a scanner match".into(),
+            }],
+        );
+        let preview = package.preview().unwrap();
+        assert!(!preview.is_sendable(), "{command:?} was accepted");
+        assert!(preview.secrets.is_empty());
+        assert!(preview.excluded[0].reason.contains("excluded"));
+    }
+}
+
+#[test]
+fn caller_authored_patch_and_output_provenance_is_not_sendable() {
+    for item in [
+        ContextItem::Patch {
+            diff: "--- a/.env\n+++ b/.env\n+DATABASE_URL=postgres://example\n".into(),
+        },
+        ContextItem::Output {
+            command: "cargo test".into(),
+            text: "DATABASE_URL=postgres://example".into(),
+        },
+    ] {
+        let preview = ContextPackage::new("ctx-untrusted-source", vec![item])
+            .preview()
+            .unwrap();
+        assert!(!preview.is_sendable());
+        assert!(preview.excluded[0].reason.contains("HRC-controlled"));
     }
 }
 
@@ -321,4 +396,39 @@ fn an_empty_package_is_sendable_and_carries_no_content() {
 
     assert!(preview.items.is_empty());
     assert!(preview.is_sendable());
+}
+
+#[test]
+fn received_context_requires_its_announced_digest() {
+    let package = ContextPackage::new("ctx-1", vec![note("remote investigation notes")]);
+    let digest = package.digest().unwrap();
+    let body = serde_json::json!({
+        "context": package,
+        "contextDigest": digest,
+    });
+
+    let (received, announced) = ContextPackage::from_message_body(&body)
+        .unwrap()
+        .expect("context should be found");
+    assert_eq!(received.id, "ctx-1");
+    assert_eq!(announced, received.digest().unwrap());
+
+    let mut altered = body;
+    altered["context"]["items"][0]["text"] = serde_json::json!("altered after signing");
+    assert!(matches!(
+        ContextPackage::from_message_body(&altered),
+        Err(CoreError::ContextDigestMismatch)
+    ));
+}
+
+#[test]
+fn a_context_without_a_digest_is_refused_before_storage() {
+    let body = serde_json::json!({
+        "context": ContextPackage::new("ctx-1", vec![note("remote notes")]),
+    });
+
+    assert!(matches!(
+        ContextPackage::from_message_body(&body),
+        Err(CoreError::MalformedMessage { .. })
+    ));
 }

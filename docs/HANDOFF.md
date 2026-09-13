@@ -139,12 +139,13 @@ request as the work it describes, or it will lie.*
 
 ### State
 
-**76 of 122 requirement rows Implemented.** Milestones: **M0 55%, M1 100%,
-M2 99%, M3 80%, M4 65%, M5 0%.**
+**78 of 94 requirement rows Implemented.** Milestones: **M0 55%, M1 100%,
+M2 99%, M3 85%, M4 85%, M5 0%.**
 
-Thirty-two pull requests merged; nothing is in flight. `main` is at
-`feat(sync): re-encrypt queued messages after roster changes (#32)` and the
-development branch is level with it.
+Thirty-three pull requests merged; no pull request is open. `main` is at
+`docs: hand off the post-reencryption state (#33)`. The current development
+branch is `claude/happy-johnson-4kqomk`, based on `origin/main`, with the
+context-package change present locally but **not committed and no PR created**.
 
 What works today, end to end and proven by tests against a real Git
 repository: two installations create a channel, invite, join, derive and
@@ -158,26 +159,35 @@ public state but withholds the stale ciphertext.
 
 ### Most recent implementation
 
-#32 completed `HRC-SYNC-008`.
+The current context-package implementation completes `HRC-CTX-005`,
+`HRC-SKILL-006`, and `HRC-SKILL-008`, and advances `HRC-CTX-004` and
+`HRC-CTX-007`; it needs Rust validation on a machine with the Windows MSVC
+linker.
 
-- Migration 006 adds optional `reseal_material` to the outbox. New messages
-  store their canonical logical envelope encrypted only to the sending device;
-  legacy rows migrate with `NULL`.
-- Every publication attempt reloads the current roster. Stale ciphertext is
-  replaced only after the protected envelope is decrypted and checked against
-  the durable message ID, device sequence, predecessor, creation time, chain
-  ID, and payload hash.
-- Conflict retries revalidate the durable trusted cursor and rerun
-  preparation. Git pushes name the exact commit, failed-attempt ref rollback
-  uses compare-and-swap, and local transport state is reconciled to the remote
-  tip before lost-ack detection.
-- Locked stores defer stale rows. An unlocked legacy row without reseal
-  material records an explicit error and blocks later messages on the same
-  device chain rather than publishing an unfillable gap.
-- The five required checks passed on #32. Local Rust builds on this machine
-  remain unavailable because MSVC `link.exe` and the Windows SDK are absent;
-  `cargo fmt` and Cargo metadata do work through
-  `%USERPROFILE%\.cargo\bin\cargo.exe`.
+- `hrc context draft <manifest> [--repository <path>]` is agent-accessible,
+  but preview and send now require the trusted interface. A copied draft
+  digest is never a confirmation. Trusted preview shows the exact canonical
+  package and issues an opaque five-minute authorization bound to digest,
+  recipient, channel, and action; trusted send consumes it once.
+- Drafting resolves and persists the canonical absolute Git worktree root and
+  replaces caller-supplied excerpt text with the exact selected source bytes.
+  Later review/send rechecks both the bytes and `.gitignore`; SHA-1 and
+  SHA-256 commit IDs are supported. Common direct and shell-wrapped
+  environment dumps, scrollback, and prompt transcripts are explicit
+  exclusions. Caller-authored patch and output items are rejected before
+  persistence until HRC controls their capture, so `HRC-CTX-004` and
+  `HRC-CTX-007` remain In progress rather than relying on falsifiable path or
+  command labels.
+- Migration 007 makes inbound context an attachment of its inbox row, without
+  an independent disposition. Valid signed context is canonical pending
+  content; malformed signed context rejects and audits that message without
+  halting channel synchronization. Out-of-order held messages remain absent
+  from trusted pending lists until their predecessor releases them.
+- Added adversarial tests cover digest-copy refusal, agent-safe refusal,
+  source derivation/change detection, ignored-source non-disclosure,
+  context/inbox lifecycle linkage, malformed-context non-halt, and secret
+  non-echoing. `cargo fmt --all` passed; `cargo check` is blocked by missing
+  `link.exe`.
 
 ### Start here
 
@@ -186,26 +196,21 @@ loose ends.
 
 ### The remaining work, in the order that unblocks the most
 
-1. **`HRC-CTX-005`, `HRC-CTX-007`, `HRC-SKILL-006`, `HRC-SKILL-008`** —
-   context packages reachable from the CLI, received context quarantined like
-   a message body, and git-ignored paths excluded. `excluded_path_reason`
-   already handles the path-decidable rules; the git-ignored check needs the
-   repository. This is the largest remaining cluster and closes four rows.
-2. **`HRC-MSG-005`** — expiry display and sweeping. Opening already refuses an
+1. **`HRC-MSG-005`** — expiry display and sweeping. Opening already refuses an
    expired message; what is missing is surfacing and reaping.
-3. **`HRC-TR-001`, `HRC-TR-003`, `HRC-TR-006`** — the out-of-process JSON-RPC
+2. **`HRC-TR-001`, `HRC-TR-003`, `HRC-TR-006`** — the out-of-process JSON-RPC
    adapter binding, push-capable adapters, and the GitHub optimization. The
    conformance suite exists and a deliberately broken adapter is already
    proven to fail it, so a new adapter has a target to hit.
-4. **`HRC-TECH-002`** — the Herdr plugin entry points, still reporting the
+3. **`HRC-TECH-002`** — the Herdr plugin entry points, still reporting the
    documented not-implemented code.
-5. **`HRC-TECH-011`, `HRC-TECH-012`** — `cargo-dist` release artifacts and a
+4. **`HRC-TECH-011`, `HRC-TECH-012`** — `cargo-dist` release artifacts and a
    clean-host install fixture. `OQ-012` asks whether to pin an exact toolchain
    first; answer it in that pull request.
-6. **`HRC-CH-004`** — public repositories after typed confirmation. `OQ-008`
+5. **`HRC-CH-004`** — public repositories after typed confirmation. `OQ-008`
    asks for the warning wording and is unanswered. It needs a human: implement
    the mechanism and leave the wording marked, or ask.
-7. **`HRC-GOV-004`** — the evidence pass. Every row claiming `Verified` must
+6. **`HRC-GOV-004`** — the evidence pass. Every row claiming `Verified` must
    cite something stable. Do this last, once the rows have stopped moving.
 
 `HRC-TECH-001`, `HRC-TECH-003`, `HRC-TECH-005`, and `HRC-TECH-010` are
@@ -270,6 +275,11 @@ second.
 `cargo check -p <crate> --all-targets --target x86_64-pc-windows-msvc` catches
 the first class locally. It does not work for crates that depend on
 `hrc-storage`, because bundled SQLite needs a Windows C compiler.
+
+On the current machine, even the smallest `cargo check -p hrc-cli --tests
+--locked` cannot start because MSVC `link.exe` and the Windows SDK are absent.
+Do not install build tools as part of this work; report the blocker and rely
+on CI or a provisioned Windows host for Rust test execution.
 
 **CI takes 5 to 16 minutes.** Wait for all five checks — `PRD traceability`,
 `Format and lint`, and `Build and test` on ubuntu, macOS, and Windows. The

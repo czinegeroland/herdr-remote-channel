@@ -77,6 +77,13 @@ pub enum StorageError {
         /// The unknown invite.
         invite_id: String,
     },
+
+    /// A decision does not name a lifecycle state the inbox understands.
+    #[error("decision action `{action}` cannot update an inbox lifecycle")]
+    InvalidDecisionAction {
+        /// The action that was refused.
+        action: String,
+    },
 }
 
 /// Convenience alias for storage results.

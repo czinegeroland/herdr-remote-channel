@@ -92,6 +92,40 @@ impl Broker for TestBroker {
         Some("delivered".into())
     }
 
+    fn preview_context(&self, package_id: &str) -> Result<ContextPreviewSummary> {
+        Ok(ContextPreviewSummary {
+            package_id: package_id.to_owned(),
+            digest: hrc_protocol::canonical::sha256_hex(b"source-derived-context"),
+            content: r#"{"id":"context-1","items":[]}"#.into(),
+            items: vec![("excerpt".into(), 23)],
+            total_bytes: 64,
+        })
+    }
+
+    fn context_authorization_scope(
+        &self,
+        package_id: &str,
+        recipient: &str,
+    ) -> Result<ContextAuthorizationScope> {
+        Ok(ContextAuthorizationScope {
+            channel_id: self.message.envelope.channel_id.clone(),
+            package_id: package_id.to_owned(),
+            digest: hrc_protocol::canonical::sha256_hex(b"source-derived-context"),
+            recipient: recipient.to_owned(),
+            action: "send_context".into(),
+        })
+    }
+
+    fn context_authorization_expiry(&self, _now: &str) -> Result<String> {
+        Ok(LATER.into())
+    }
+
+    fn send_context(&mut self, scope: &ContextAuthorizationScope) -> Result<()> {
+        self.drafts
+            .push(format!("context:{}:{}", scope.package_id, scope.recipient));
+        Ok(())
+    }
+
     fn pending(&self, message_id: &str) -> Option<&QuarantinedMessage> {
         (message_id == self.message.envelope.message_id).then_some(&self.message)
     }
@@ -157,6 +191,15 @@ fn quarantined() -> QuarantinedMessage {
 /// Every operation PRD section 22.7 reserves for the human.
 fn every_trusted_request() -> Vec<TrustedRequest> {
     vec![
+        TrustedRequest::PreviewContext {
+            recipient: "bob".into(),
+            package_id: "ctx-1".into(),
+        },
+        TrustedRequest::SendContext {
+            recipient: "bob".into(),
+            package_id: "ctx-1".into(),
+            authorization: "ctxauth-test".into(),
+        },
         TrustedRequest::PreviewPending {
             message_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
         },
@@ -186,6 +229,168 @@ fn every_trusted_request() -> Vec<TrustedRequest> {
         TrustedRequest::MakeRepositoryPublic,
         TrustedRequest::Rollover,
     ]
+}
+
+#[test]
+fn outbound_context_authorization_is_one_use_and_binds_every_scope_field() {
+    let scope = ContextAuthorizationScope {
+        channel_id: "channel-a".into(),
+        package_id: "ctx-a".into(),
+        digest: hrc_protocol::canonical::sha256_hex(b"checked bytes"),
+        recipient: "alice/reviewer".into(),
+        action: "send_context".into(),
+    };
+    let mut ledger = ContextAuthorizationLedger::new();
+    for altered in [
+        ContextAuthorizationScope {
+            channel_id: "channel-b".into(),
+            ..scope.clone()
+        },
+        ContextAuthorizationScope {
+            package_id: "ctx-b".into(),
+            ..scope.clone()
+        },
+        ContextAuthorizationScope {
+            digest: hrc_protocol::canonical::sha256_hex(b"changed bytes"),
+            ..scope.clone()
+        },
+        ContextAuthorizationScope {
+            recipient: "mallory".into(),
+            ..scope.clone()
+        },
+        ContextAuthorizationScope {
+            action: "preview_context".into(),
+            ..scope.clone()
+        },
+    ] {
+        let authorization = ledger.issue(scope.clone(), LATER.into()).unwrap();
+        assert!(matches!(
+            ledger.consume(&authorization, &altered, NOW),
+            Err(CoreError::AuthorizationMismatch)
+        ));
+        ledger.consume(&authorization, &scope, NOW).unwrap();
+    }
+    let authorization = ledger.issue(scope.clone(), LATER.into()).unwrap();
+    ledger.consume(&authorization, &scope, NOW).unwrap();
+    assert!(matches!(
+        ledger.consume(&authorization, &scope, NOW),
+        Err(CoreError::AuthorizationMismatch)
+    ));
+
+    let expired = ledger.issue(scope.clone(), NOW.into()).unwrap();
+    assert!(matches!(
+        ledger.consume(&expired, &scope, NOW),
+        Err(CoreError::AuthorizationExpired { .. })
+    ));
+}
+
+#[test]
+fn context_send_requires_and_consumes_a_prior_trusted_preview() {
+    let mut broker = TestBroker::new();
+    let mut delivery_ledger = AuthorizationLedger::new();
+    let mut context_ledger = ContextAuthorizationLedger::new();
+
+    let direct = dispatch_trusted(
+        &mut broker,
+        &mut delivery_ledger,
+        &mut context_ledger,
+        TrustedRequest::SendContext {
+            recipient: "alice/reviewer".into(),
+            package_id: "ctx-a".into(),
+            authorization: "not-issued".into(),
+        },
+        NOW,
+    )
+    .unwrap_err();
+    assert!(matches!(direct, CoreError::AuthorizationMismatch));
+
+    let preview = dispatch_trusted(
+        &mut broker,
+        &mut delivery_ledger,
+        &mut context_ledger,
+        TrustedRequest::PreviewContext {
+            recipient: "alice/reviewer".into(),
+            package_id: "ctx-a".into(),
+        },
+        NOW,
+    )
+    .unwrap();
+    let TrustedResponse::ContextPreview {
+        authorization,
+        content,
+        ..
+    } = preview
+    else {
+        panic!("expected a context preview");
+    };
+    assert_eq!(content, r#"{"id":"context-1","items":[]}"#);
+
+    let wrong_recipient = dispatch_trusted(
+        &mut broker,
+        &mut delivery_ledger,
+        &mut context_ledger,
+        TrustedRequest::SendContext {
+            recipient: "mallory".into(),
+            package_id: "ctx-a".into(),
+            authorization: authorization.clone(),
+        },
+        NOW,
+    )
+    .unwrap_err();
+    assert!(matches!(wrong_recipient, CoreError::AuthorizationMismatch));
+
+    dispatch_trusted(
+        &mut broker,
+        &mut delivery_ledger,
+        &mut context_ledger,
+        TrustedRequest::SendContext {
+            recipient: "alice/reviewer".into(),
+            package_id: "ctx-a".into(),
+            authorization,
+        },
+        NOW,
+    )
+    .unwrap();
+
+    let preview = dispatch_trusted(
+        &mut broker,
+        &mut delivery_ledger,
+        &mut context_ledger,
+        TrustedRequest::PreviewContext {
+            recipient: "alice/reviewer".into(),
+            package_id: "ctx-a".into(),
+        },
+        NOW,
+    )
+    .unwrap();
+    let TrustedResponse::ContextPreview { authorization, .. } = preview else {
+        panic!("expected a context preview");
+    };
+    dispatch_trusted(
+        &mut broker,
+        &mut delivery_ledger,
+        &mut context_ledger,
+        TrustedRequest::SendContext {
+            recipient: "alice/reviewer".into(),
+            package_id: "ctx-a".into(),
+            authorization: authorization.clone(),
+        },
+        NOW,
+    )
+    .unwrap();
+    let replay = dispatch_trusted(
+        &mut broker,
+        &mut delivery_ledger,
+        &mut context_ledger,
+        TrustedRequest::SendContext {
+            recipient: "alice/reviewer".into(),
+            package_id: "ctx-a".into(),
+            authorization,
+        },
+        NOW,
+    )
+    .unwrap_err();
+    assert!(matches!(replay, CoreError::AuthorizationMismatch));
 }
 
 #[test]
@@ -228,11 +433,13 @@ fn the_section_22_7_list_is_exactly_the_trusted_request_set() {
             "approve_join",
             "grant_capability",
             "make_repository_public",
+            "preview_context",
             "preview_pending",
             "reject_join",
             "remove_member",
             "revoke_device",
             "rollover",
+            "send_context",
         ]
     );
 
@@ -317,10 +524,12 @@ fn approved_content_becomes_readable_once_the_human_approves() {
     let mut broker = TestBroker::new();
     let message_id = broker.message_id();
     let mut ledger = AuthorizationLedger::new();
+    let mut context_ledger = ContextAuthorizationLedger::new();
 
     let response = dispatch_trusted(
         &mut broker,
         &mut ledger,
+        &mut context_ledger,
         TrustedRequest::Approve {
             message_id: message_id.clone(),
             decision: WireDecision::DeliverToAgent {
@@ -358,11 +567,15 @@ fn an_approval_is_spent_by_the_call_that_issues_it() {
     let mut broker = TestBroker::new();
     let message_id = broker.message_id();
     let mut ledger = AuthorizationLedger::new();
+    let mut context_ledger = ContextAuthorizationLedger::new();
 
-    let approve = |broker: &mut TestBroker, ledger: &mut AuthorizationLedger| {
+    let approve = |broker: &mut TestBroker,
+                   ledger: &mut AuthorizationLedger,
+                   context_ledger: &mut ContextAuthorizationLedger| {
         dispatch_trusted(
             broker,
             ledger,
+            context_ledger,
             TrustedRequest::Approve {
                 message_id: message_id.clone(),
                 decision: WireDecision::DeliverToAgent {
@@ -374,9 +587,9 @@ fn an_approval_is_spent_by_the_call_that_issues_it() {
         )
     };
 
-    approve(&mut broker, &mut ledger).unwrap();
+    approve(&mut broker, &mut ledger, &mut context_ledger).unwrap();
 
-    let error = approve(&mut broker, &mut ledger).unwrap_err();
+    let error = approve(&mut broker, &mut ledger, &mut context_ledger).unwrap_err();
     assert!(matches!(error, CoreError::AuthorizationAlreadyUsed));
 }
 
@@ -385,11 +598,13 @@ fn an_edited_delivery_carries_the_text_the_human_wrote() {
     let mut broker = TestBroker::new();
     let message_id = broker.message_id();
     let mut ledger = AuthorizationLedger::new();
+    let mut context_ledger = ContextAuthorizationLedger::new();
 
     let edited = "the staging credentials rotated on [REDACTED]";
     let response = dispatch_trusted(
         &mut broker,
         &mut ledger,
+        &mut context_ledger,
         TrustedRequest::Approve {
             message_id,
             decision: WireDecision::DeliverEdited {
@@ -417,6 +632,7 @@ fn a_decision_that_reaches_no_agent_delivers_nothing() {
     let mut broker = TestBroker::new();
     let message_id = broker.message_id();
     let mut ledger = AuthorizationLedger::new();
+    let mut context_ledger = ContextAuthorizationLedger::new();
 
     for decision in [
         WireDecision::KeepInInbox,
@@ -427,6 +643,7 @@ fn a_decision_that_reaches_no_agent_delivers_nothing() {
         let response = dispatch_trusted(
             &mut broker,
             &mut ledger,
+            &mut context_ledger,
             TrustedRequest::Approve {
                 message_id: message_id.clone(),
                 decision,
@@ -448,10 +665,12 @@ fn the_trusted_surface_reads_a_pending_body_and_the_agent_surface_cannot() {
     let mut broker = TestBroker::new();
     let message_id = broker.message_id();
     let mut ledger = AuthorizationLedger::new();
+    let mut context_ledger = ContextAuthorizationLedger::new();
 
     let response = dispatch_trusted(
         &mut broker,
         &mut ledger,
+        &mut context_ledger,
         TrustedRequest::PreviewPending {
             message_id: message_id.clone(),
         },
@@ -543,6 +762,7 @@ fn every_decision_leaves_an_audit_record() {
     let mut broker = TestBroker::new();
     let message_id = broker.message_id();
     let mut ledger = AuthorizationLedger::new();
+    let mut context_ledger = ContextAuthorizationLedger::new();
 
     let decisions = [
         WireDecision::KeepInInbox,
@@ -558,6 +778,7 @@ fn every_decision_leaves_an_audit_record() {
         dispatch_trusted(
             &mut broker,
             &mut ledger,
+            &mut context_ledger,
             TrustedRequest::Approve {
                 message_id: message_id.clone(),
                 decision,
@@ -593,11 +814,13 @@ fn an_edited_delivery_records_both_versions() {
     let mut broker = TestBroker::new();
     let message_id = broker.message_id();
     let mut ledger = AuthorizationLedger::new();
+    let mut context_ledger = ContextAuthorizationLedger::new();
 
     let edited = "the staging credentials rotated on [REDACTED]";
     dispatch_trusted(
         &mut broker,
         &mut ledger,
+        &mut context_ledger,
         TrustedRequest::Approve {
             message_id,
             decision: WireDecision::DeliverEdited {
@@ -631,10 +854,12 @@ fn a_refused_approval_records_nothing() {
     // than no record at all.
     let mut broker = TestBroker::new();
     let mut ledger = AuthorizationLedger::new();
+    let mut context_ledger = ContextAuthorizationLedger::new();
 
     let error = dispatch_trusted(
         &mut broker,
         &mut ledger,
+        &mut context_ledger,
         TrustedRequest::Approve {
             message_id: "01BX5ZZKBKACTAV9WEVGEMMVRZ".into(),
             decision: WireDecision::KeepInInbox,
@@ -653,10 +878,12 @@ fn a_decision_that_reaches_no_agent_names_no_agent() {
     let mut broker = TestBroker::new();
     let message_id = broker.message_id();
     let mut ledger = AuthorizationLedger::new();
+    let mut context_ledger = ContextAuthorizationLedger::new();
 
     dispatch_trusted(
         &mut broker,
         &mut ledger,
+        &mut context_ledger,
         TrustedRequest::Approve {
             message_id,
             decision: WireDecision::KeepInInbox,

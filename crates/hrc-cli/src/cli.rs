@@ -64,6 +64,8 @@ pub enum Command {
     Reply(ReplyArgs),
     /// Send a structured delegation request. HRC never executes it.
     Delegate(DelegateArgs),
+    /// Build, preview, and send explicit context packages.
+    Context(ContextCommand),
     /// List inbox entries.
     Inbox(InboxArgs),
     /// Show one message. Pending bodies stay quarantined.
@@ -252,6 +254,39 @@ pub struct DelegateArgs {
     /// Context package to attach.
     #[arg(long, value_name = "ID")]
     pub context: Option<String>,
+}
+
+/// `hrc context ...`
+#[derive(Debug, Args)]
+pub struct ContextCommand {
+    #[command(subcommand)]
+    pub action: ContextAction,
+}
+
+/// Context-package commands.
+#[derive(Debug, Subcommand)]
+pub enum ContextAction {
+    /// Store an explicit context package described by a JSON manifest.
+    Draft {
+        /// JSON file containing a ContextPackage and its selected items.
+        manifest: String,
+        /// Git repository that owns excerpt paths in the package.
+        #[arg(long, value_name = "PATH")]
+        repository: Option<String>,
+    },
+    /// Open the trusted human preview for a locally stored context package.
+    Preview {
+        /// Locally stored context package identifier.
+        id: String,
+    },
+    /// Send a stored context package through the trusted human interface.
+    Send {
+        /// Recipient principal, optionally `principal/endpoint`.
+        #[arg(allow_hyphen_values = true)]
+        recipient: String,
+        /// Locally stored context package identifier.
+        id: String,
+    },
 }
 
 /// Arguments of `hrc inbox`.

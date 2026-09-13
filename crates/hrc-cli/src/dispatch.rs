@@ -7,7 +7,8 @@
 //! section 22.7 is enforced by a single table that tests can read.
 
 use crate::cli::{
-    Command, DeviceAction, HerdrAction, InviteAction, JoinAction, MemberAction, Visibility,
+    Command, ContextAction, ContextCommand, DeviceAction, HerdrAction, InviteAction, JoinAction,
+    MemberAction, Visibility,
 };
 
 /// What the process should do with a parsed command.
@@ -30,6 +31,7 @@ pub enum Outcome {
 pub fn requires_trusted_human(command: &Command) -> bool {
     match command {
         Command::Review(_) | Command::Approve(_) | Command::Rollover => true,
+        Command::Context(context) => !matches!(context.action, ContextAction::Draft { .. }),
         Command::Create(args) => args.visibility == Visibility::Public,
         Command::Join(join) => matches!(
             join.action,
@@ -54,7 +56,14 @@ pub fn supports_json(command: &Command) -> bool {
         return !matches!(invite.action, InviteAction::Create { .. });
     }
 
-    !matches!(command, Command::Review(_) | Command::Approve(_))
+    !matches!(
+        command,
+        Command::Review(_)
+            | Command::Approve(_)
+            | Command::Context(ContextCommand {
+                action: ContextAction::Preview { .. } | ContextAction::Send { .. },
+            })
+    )
 }
 
 /// Resolves a command to its outcome.
@@ -97,6 +106,7 @@ fn milestone(command: &Command) -> &'static str {
         Command::Review(_) | Command::Approve(_) | Command::Herdr(_) => "M3",
 
         Command::Delegate(_) | Command::Rollover => "M4",
+        Command::Context(_) => "M4",
     }
 }
 
@@ -134,6 +144,11 @@ pub fn command_path(command: &Command) -> String {
         Command::Ask(_) => "ask".into(),
         Command::Reply(_) => "reply".into(),
         Command::Delegate(_) => "delegate".into(),
+        Command::Context(context) => match context.action {
+            ContextAction::Draft { .. } => "context draft".into(),
+            ContextAction::Preview { .. } => "context preview".into(),
+            ContextAction::Send { .. } => "context send".into(),
+        },
         Command::Inbox(_) => "inbox".into(),
         Command::Show(_) => "show".into(),
         Command::Thread(_) => "thread".into(),
@@ -225,6 +240,12 @@ mod tests {
     fn only_the_trusted_interface_commands_refuse_json() {
         assert!(!supports_json(&parse(&["hrc", "review", "01ABC"]).command));
         assert!(!supports_json(&parse(&["hrc", "approve", "01ABC"]).command));
+        assert!(!supports_json(
+            &parse(&["hrc", "context", "preview", "ctx-1"]).command
+        ));
+        assert!(!supports_json(
+            &parse(&["hrc", "context", "send", "alice", "ctx-1"]).command
+        ));
         assert!(supports_json(&parse(&["hrc", "inbox"]).command));
         assert!(supports_json(
             &parse(&["hrc", "join", "approve", "r"]).command
@@ -298,6 +319,11 @@ mod boundary_tests {
         // rather than derived, and a new trusted method fails to compile
         // here until someone decides which command reaches it.
         let mapping: &[(&str, &[&str])] = &[
+            ("preview_context", &["hrc", "context", "preview", "ctx-1"]),
+            (
+                "send_context",
+                &["hrc", "context", "send", "alice", "ctx-1"],
+            ),
             ("preview_pending", &["hrc", "review", "01ARZ3"]),
             ("approve", &["hrc", "approve", "01ARZ3"]),
             ("approve_join", &["hrc", "join", "approve", "join-1"]),
@@ -329,6 +355,15 @@ mod boundary_tests {
         // here as having no CLI surface yet.
         let daemon_only = ["grant_capability"];
         let every_method = [
+            TrustedRequest::PreviewContext {
+                recipient: String::new(),
+                package_id: String::new(),
+            },
+            TrustedRequest::SendContext {
+                recipient: String::new(),
+                package_id: String::new(),
+                authorization: String::new(),
+            },
             TrustedRequest::PreviewPending {
                 message_id: String::new(),
             },

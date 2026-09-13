@@ -18,6 +18,9 @@
 //! Decoding one on the agent-safe surface with [`dispatch_agent`] refuses
 //! every trusted operation with the stable `authorization_required` error.
 
+use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, Result};
@@ -95,6 +98,23 @@ pub enum AgentRequest {
     deny_unknown_fields
 )]
 pub enum TrustedRequest {
+    /// Show an outbound context package to a human before they approve its
+    /// disclosure. This request is unavailable on the agent-safe interface.
+    PreviewContext {
+        /// Recipient principal and optional endpoint selected by the human.
+        recipient: String,
+        /// Locally stored package.
+        package_id: String,
+    },
+    /// Consume a preview-issued authorization and send its exact snapshot.
+    SendContext {
+        /// Recipient principal and optional endpoint.
+        recipient: String,
+        /// Locally stored package.
+        package_id: String,
+        /// Opaque one-use authorization returned only by trusted preview.
+        authorization: String,
+    },
     /// Decrypt and display a pending body to the human.
     PreviewPending {
         /// Which message.
@@ -240,6 +260,8 @@ impl TrustedRequest {
     /// The method name.
     pub fn method(&self) -> &'static str {
         match self {
+            TrustedRequest::PreviewContext { .. } => "preview_context",
+            TrustedRequest::SendContext { .. } => "send_context",
             TrustedRequest::PreviewPending { .. } => "preview_pending",
             TrustedRequest::Approve { .. } => "approve",
             TrustedRequest::ApproveJoin { .. } => "approve_join",
@@ -330,6 +352,21 @@ pub struct ChannelStatus {
 /// from [`dispatch_agent`].
 #[derive(Debug, Clone, Serialize)]
 pub enum TrustedResponse {
+    /// Metadata for a context snapshot shown only on the trusted surface.
+    ContextPreview {
+        /// Locally stored package.
+        package_id: String,
+        /// Digest of the complete, source-derived snapshot.
+        digest: String,
+        /// Exact canonical package content for trusted human review.
+        content: String,
+        /// Opaque one-use authorization bound to this preview and recipient.
+        authorization: String,
+        /// One entry for every item, with its serialized contribution.
+        items: Vec<(String, usize)>,
+        /// Exact serialized package size.
+        total_bytes: usize,
+    },
     /// The decrypted body, for display to the human only.
     Pending {
         /// The message it belongs to.
@@ -377,6 +414,19 @@ pub trait Broker {
     fn record_draft(&mut self, recipient: &str, text: &str, endpoint: Option<&str>) -> String;
     /// Observes the current state of a message.
     fn observe(&self, message_id: &str, until: &str) -> Option<String>;
+    /// Returns the exact source-derived package snapshot for trusted preview.
+    fn preview_context(&self, package_id: &str) -> Result<ContextPreviewSummary>;
+    /// Returns the scope a one-use outbound context authorization must bind.
+    fn context_authorization_scope(
+        &self,
+        package_id: &str,
+        recipient: &str,
+    ) -> Result<ContextAuthorizationScope>;
+    /// Chooses the short server-controlled expiry for a context preview.
+    fn context_authorization_expiry(&self, now: &str) -> Result<String>;
+    /// Sends the package after [`dispatch_trusted`] has consumed the
+    /// authorization for exactly this package and recipient.
+    fn send_context(&mut self, scope: &ContextAuthorizationScope) -> Result<()>;
     /// The quarantined message with this ID, if the daemon holds one.
     fn pending(&self, message_id: &str) -> Option<&QuarantinedMessage>;
     /// The decrypted body of a pending message, for the human's eyes.
@@ -392,6 +442,101 @@ pub trait Broker {
     fn record_decision_record(&mut self, record: &crate::gate::DecisionRecord) -> Result<()>;
     /// Applies a trusted membership or repository operation.
     fn apply_trusted(&mut self, request: &TrustedRequest) -> Result<()>;
+}
+
+/// Trusted-only data needed to render an outbound context preview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextPreviewSummary {
+    /// Package identifier.
+    pub package_id: String,
+    /// Digest of the package including source-derived excerpt bytes.
+    pub digest: String,
+    /// Exact canonical package content for trusted human review.
+    pub content: String,
+    /// Item kind and byte count.
+    pub items: Vec<(String, usize)>,
+    /// Exact canonical package size.
+    pub total_bytes: usize,
+}
+
+/// Values a context authorization is bound to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextAuthorizationScope {
+    /// Channel carrying the encrypted message.
+    pub channel_id: String,
+    /// Package identifier.
+    pub package_id: String,
+    /// Canonical package digest.
+    pub digest: String,
+    /// Recipient requested by the human.
+    pub recipient: String,
+    /// The trusted operation this authorization can perform.
+    pub action: String,
+}
+
+struct ContextAuthorization {
+    scope: ContextAuthorizationScope,
+    expires_at: String,
+}
+
+impl ContextAuthorization {
+    fn issue(scope: ContextAuthorizationScope, expires_at: String) -> Self {
+        Self { scope, expires_at }
+    }
+
+    fn validate(&self, scope: &ContextAuthorizationScope, now: &str) -> Result<()> {
+        if self.scope != *scope || self.scope.action != "send_context" {
+            return Err(CoreError::AuthorizationMismatch);
+        }
+        if self.expires_at.as_str() <= now {
+            return Err(CoreError::AuthorizationExpired {
+                expires_at: self.expires_at.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Short-lived, one-use outbound context approvals issued by trusted previews.
+#[derive(Default)]
+pub struct ContextAuthorizationLedger {
+    pending: HashMap<String, ContextAuthorization>,
+}
+
+impl ContextAuthorizationLedger {
+    /// Creates an empty authorization ledger.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn issue(&mut self, scope: ContextAuthorizationScope, expires_at: String) -> Result<String> {
+        let milliseconds = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u64::MAX as u128) as u64;
+        let token = loop {
+            let token = format!("ctxauth_{}", hrc_protocol::ulid::ulid_at(milliseconds)?);
+            if !self.pending.contains_key(&token) {
+                break token;
+            }
+        };
+        self.pending.insert(
+            token.clone(),
+            ContextAuthorization::issue(scope, expires_at),
+        );
+        Ok(token)
+    }
+
+    fn consume(&mut self, token: &str, scope: &ContextAuthorizationScope, now: &str) -> Result<()> {
+        let authorization = self
+            .pending
+            .get(token)
+            .ok_or(CoreError::AuthorizationMismatch)?;
+        authorization.validate(scope, now)?;
+        self.pending.remove(token);
+        Ok(())
+    }
 }
 
 /// Answers a request that arrived on the agent-safe surface.
@@ -471,10 +616,40 @@ pub fn dispatch_agent(broker: &mut dyn Broker, request: Request) -> Result<Agent
 pub fn dispatch_trusted(
     broker: &mut dyn Broker,
     ledger: &mut AuthorizationLedger,
+    context_ledger: &mut ContextAuthorizationLedger,
     request: TrustedRequest,
     now: &str,
 ) -> Result<TrustedResponse> {
     Ok(match request {
+        TrustedRequest::PreviewContext {
+            recipient,
+            package_id,
+        } => {
+            let preview = broker.preview_context(&package_id)?;
+            let scope = broker.context_authorization_scope(&package_id, &recipient)?;
+            let expires_at = broker.context_authorization_expiry(now)?;
+            let authorization = context_ledger.issue(scope, expires_at)?;
+            TrustedResponse::ContextPreview {
+                package_id: preview.package_id,
+                digest: preview.digest,
+                content: preview.content,
+                authorization,
+                items: preview.items,
+                total_bytes: preview.total_bytes,
+            }
+        }
+
+        TrustedRequest::SendContext {
+            recipient,
+            package_id,
+            authorization,
+        } => {
+            let scope = broker.context_authorization_scope(&package_id, &recipient)?;
+            context_ledger.consume(&authorization, &scope, now)?;
+            broker.send_context(&scope)?;
+            TrustedResponse::Done
+        }
+
         TrustedRequest::PreviewPending { message_id } => {
             let body =
                 broker
