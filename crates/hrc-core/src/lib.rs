@@ -9,10 +9,12 @@
 //! See PRD sections 13.1 and 19.
 
 pub mod error;
+pub mod gate;
 pub mod message;
 pub mod roster;
 pub mod sync;
 
 pub use error::{CoreError, Result};
+pub use gate::{AgentView, Authorization, AuthorizationLedger, Decision};
 pub use message::{QuarantinedMessage, open, seal};
 pub use roster::{DeviceStatus, Roster, RosterDevice, RosterMember};

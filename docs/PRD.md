@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-13T09:20:00+02:00 |
+| Last updated | 2026-09-13T10:02:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -530,14 +530,14 @@ The Herdr plugin must expose:
 
 | ID | Requirement | Priority | Status | Evidence |
 |---|---|---:|---|---|
-| HRC-GATE-001 | Quarantine every inbound body before it can be exposed through an agent-accessible interface. Metadata-only notification is allowed. | Must | Approved | Pending |
-| HRC-GATE-002 | Prevent receiving agents and agent-accessible JSON commands from reading pending content before approval. | Must | Approved | Pending |
-| HRC-GATE-003 | Allow accept, edit, inbox-only, decline, and expiry decisions. | Must | Approved | Pending |
+| HRC-GATE-001 | Quarantine every inbound body before it can be exposed through an agent-accessible interface. Metadata-only notification is allowed. | Must | Implemented | `crates/hrc-core/src/gate.rs` `AgentView` carries the closed metadata set and has no field that can hold a body |
+| HRC-GATE-002 | Prevent receiving agents and agent-accessible JSON commands from reading pending content before approval. | Must | In progress | `crates/hrc-core/src/gate.rs` separates the surfaces; the daemon RPC that exposes them is pending |
+| HRC-GATE-003 | Allow accept, edit, inbox-only, decline, and expiry decisions. | Must | Implemented | `crates/hrc-core/src/gate.rs` `Decision` |
 | HRC-GATE-004 | Preserve original and edited content in the local audit log. | Must | Approved | Pending |
-| HRC-GATE-005 | Add provenance and untrusted-content framing to approved prompts. | Must | Approved | Pending |
-| HRC-GATE-006 | Ensure remote senders cannot select local pane IDs. | Must | Approved | Pending |
+| HRC-GATE-005 | Add provenance and untrusted-content framing to approved prompts. | Must | Implemented | `crates/hrc-core/src/gate.rs` `provenance_banner`, applied by `deliver` |
+| HRC-GATE-006 | Ensure remote senders cannot select local pane IDs. | Must | Implemented | `crates/hrc-core/src/gate.rs`: the target agent comes from the human's decision, never from the envelope |
 | HRC-GATE-007 | Require manual approval by default. | Must | Approved | Pending |
-| HRC-GATE-008 | Require a one-use local approval authorization, bound to message digest and action, before content disclosure or agent delivery. | Must | Approved | Pending |
+| HRC-GATE-008 | Require a one-use local approval authorization, bound to message digest and action, before content disclosure or agent delivery. | Must | Implemented | `crates/hrc-core/src/gate.rs` `Authorization` and `AuthorizationLedger` |
 
 ### 12.4 Context
 
@@ -1528,6 +1528,17 @@ The approval authorization must be:
 - Unavailable through `--json` and agent-facing RPC methods.
 - Verified by the daemon before content disclosure or prompt delivery.
 
+A consumption attempt that fails validation MUST NOT spend the
+authorization. Otherwise a mismatched or hostile attempt would burn a
+legitimate approval and force the human to approve again, which trains people
+to approve repeatedly.
+
+Re-approving the same message for a different action is a distinct
+authorization, not a replay of the first: keeping a message in the inbox and
+later delivering it are two decisions, and the second must not be refused.
+
+See decision DEC-036.
+
 The preferred implementation uses a separate local broker/UI and platform user
 presence where available. The threat model protects against remote senders,
 accidental model exposure, and ordinary agent-tool use. It does not claim to
@@ -1977,7 +1988,7 @@ npx skills add <owner>/herdr-remote-channel `
 | HRC-SEC-006 | Received attachments are size checked before decryption. | Approved | Pending |
 | HRC-SEC-007 | Decompressed data has strict size limits. | Approved | Pending |
 | HRC-SEC-008 | Outgoing context is previewed and secret scanned. | Approved | Pending |
-| HRC-SEC-009 | Incoming content is quarantined and treated as untrusted. | Approved | Pending |
+| HRC-SEC-009 | Incoming content is quarantined and treated as untrusted. | Implemented | `crates/hrc-core/src/message.rs` returns `QuarantinedMessage`; `crates/hrc-core/src/gate.rs` frames approved content as untrusted before delivery |
 | HRC-SEC-010 | Security-sensitive commands require trusted human authorization and reject agent-safe/non-interactive invocation. | Approved | Pending |
 | HRC-SEC-011 | Audit logs record approvals and local actions. | Approved | Pending |
 | HRC-SEC-012 | Observed conflicting histories, rewrites, deletions, or substitutions stop synchronization. | Implemented | `crates/hrc-core/src/sync.rs` halts the channel with a sticky reason and audits it; a halted channel refuses to fetch again |
@@ -2308,7 +2319,7 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 | HRC-CH-010 | M1 | `AC-CONTROL-INTEGRITY`: observed same-parent successors, broken previous hashes, rewrites, deletions, and substitutions stop synchronization with a sticky alert. | Partial: `crates/hrc-core/src/roster/tests.rs` rejects same-sequence successors, broken predecessor hashes, skipped sequences, wrong epochs, and foreign-channel entries, and proves a rejected entry leaves state unchanged. Remaining: synchronization halt and the sticky alert. |
 | HRC-MSG-001 through HRC-MSG-007, HRC-MSG-010 | M2 | `AC-MESSAGING`: two devices exchange offline notes and threaded questions/answers with receipts, expiry, deduplication, ordering, and local audit evidence. | Partial: `crates/hrc-core/src/message/tests.rs` covers seal and open between two devices, broadcast addressing, and expiry. Remaining: receipts, threading over a published channel, deduplication, and ordering. |
 | HRC-MSG-008 and HRC-MSG-009 | M4 | `AC-DELEGATION-MESSAGES`: task, accept/decline, progress, and result states are exchanged without local execution. | Pending |
-| HRC-GATE-001 through HRC-GATE-008 | M3 | `AC-PROMPT-GATE`: pending bodies are unavailable through agent-safe interfaces; trusted UI issues a one-use digest-bound authorization; reuse, modification, and wrong-target delivery fail. | Pending |
+| HRC-GATE-001 through HRC-GATE-008 | M3 | `AC-PROMPT-GATE`: pending bodies are unavailable through agent-safe interfaces; trusted UI issues a one-use digest-bound authorization; reuse, modification, and wrong-target delivery fail. | Partial: `crates/hrc-core/src/gate/tests.rs` proves reuse, wrong-message use, ciphertext substitution under an approval, expiry, and edited-content mismatch all fail, and that hostile endpoint and kind strings never reach the agent view. Remaining: the trusted UI and the daemon RPC boundary. |
 | HRC-CTX-001 through HRC-CTX-007 | M4 | `AC-CONTEXT`: supported context items round-trip with previews and verified hashes; excluded paths, detected secrets, oversized objects, and malformed archives are blocked. | Pending |
 | HRC-SYNC-001 through HRC-SYNC-010 | M2 | `AC-GIT-SYNC`: offline queues recover; concurrent peers publish without manual merges; lost responses deduplicate; non-descendant history and changed objects halt processing. | Partial: `crates/hrc-core/src/sync/tests.rs` covers cursor resumption, conflict retry, security-conflict halting, history-rewrite halting, sticky halts, and adapter-reported anomalies; `crates/hrc-transport-git/tests/git_adapter.rs` covers concurrent peers publishing without manual merges. Remaining: the resident daemon and deduplication on replay. |
 | HRC-SYNC-011 | M2 | `AC-LOCAL-SEQUENCE`: concurrent local callers and process crashes cannot allocate duplicate device sequences or ambiguous predecessor chain IDs. | `crates/hrc-storage/src/tests.rs`: four threads on separate connections allocate 100 sequences with no duplicate, gap, or repeated predecessor link; a reservation survives reopening; an abandoned reservation is burned rather than reused. Verified on Linux, macOS, and Windows CI. |
@@ -2319,7 +2330,7 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 | HRC-SKILL-008 | M4 | `AC-SKILL-CONTEXT`: an agent can draft supported context packages while preview and send remain human-controlled. | Pending |
 | HRC-SEC-001 through HRC-SEC-005, HRC-SEC-013, HRC-SEC-015, HRC-SEC-016 | M1 | `AC-KEYS-AND-ROSTER`: key isolation, signed recipient intent, signature validation, control-chain validation, control-only publication ordering, revocation, and stale-epoch rejection pass adversarial tests. | Partial: `crates/hrc-core/src/message/tests.rs` and `crates/hrc-core/src/roster/tests.rs` cover forged signatures, unknown signing devices, foreign channels, stale epochs, a revoked device's message reintroduced after revocation, and a recipient set that disagrees with the roster; `crates/hrc-crypto/src/store.rs` proves the stored key file contains no plaintext secret and that a wrong passphrase, a tampered file, and a corrupt document all fail closed. Remaining: the OS keychain backend. |
 | HRC-SEC-006 through HRC-SEC-008 | M4 | `AC-CONTENT-SECURITY`: ciphertext/decompression limits, secret scanning, and preview reject malicious fixtures. | Pending |
-| HRC-SEC-009 | M3 | `AC-QUARANTINE`: every inbound body is quarantined and framed as untrusted before any approved disclosure. | Pending |
+| HRC-SEC-009 | M3 | `AC-QUARANTINE`: every inbound body is quarantined and framed as untrusted before any approved disclosure. | `crates/hrc-core/src/message.rs` and `crates/hrc-core/src/gate/tests.rs`: opening yields quarantined content, and delivery is impossible without a consumed authorization that applies the provenance banner. |
 | HRC-SEC-010, HRC-SEC-014 | M3 | `AC-HUMAN-AUTH`: agent-safe and non-interactive callers cannot read pending bodies, authorize actions, or reuse an authorization. | Pending |
 | HRC-SEC-011 and HRC-SEC-012 | M2 | `AC-AUDIT-AND-HISTORY`: local actions are audited and observed rewrite and substitution scenarios fail closed. | Partial: `crates/hrc-core/src/sync/tests.rs` proves rewrite and substitution halt the channel and are audited. Remaining: auditing approval decisions, which arrive with the prompt gate. |
 | HRC-GOV-001 through HRC-GOV-003, HRC-GOV-005 | M0 | `AC-PRD-CI`: representative pull-request fixtures fail when the PRD, ledger, update timestamp, exact requirement-row changes, or a valid no-progress rationale are missing; validation executes base-branch code. | `.github/scripts/check-prd-traceability.ps1`, `.github/workflows/prd-traceability.yml` |
@@ -2347,7 +2358,7 @@ Every implementation PR must update this table.
 | M0 Product and protocol | 55% | Adds an executable adapter contract, capability declaration, and error model to the written specification | Transport contract and reference adapter | Obtain product-owner approval and complete the JSON-RPC adapter binding |
 | M1 Secure foundation | 95% | Adds enrollment cryptography: invites, non-transferable invite proofs, and safety-phrase derivation against the pinned EFF wordlist | Enrollment cryptography | Wire the join request and approval flow, then integrate an OS keychain backend |
 | M2 Git messaging | 70% | Adds the synchronization engine: cursor-resuming fetch, conflict-retrying publish, backoff policy, and fail-closed halting on observed tampering | Synchronization engine | Wire the resident daemon and the CLI, then receipts, threading, and deduplication |
-| M3 Herdr integration | 0% | Not started | N/A | Verify Herdr long-lived plugin process capabilities |
+| M3 Herdr integration | 25% | Prompt gate core: agent-safe view, one-use digest-bound authorizations, and provenance framing | Prompt gate | Build the trusted approval interface and the daemon RPC split, then the Herdr inbox UI |
 | M4 Context/delegation | 0% | Not started | N/A | Finalize context package schema |
 | M5 Provider ecosystem | 0% | Not started | N/A | Deferred until core protocol stabilizes |
 
@@ -2434,6 +2445,7 @@ recorded either directly in this PRD or in a stable linked artifact.
 | DEC-016 | RFC 8785 canonical JSON uses a pinned Rust implementation, initially `serde_jcs`, guarded by protocol vectors. | Accepted | Avoids custom canonicalization while making signed bytes interoperable. |
 | DEC-017 | Build and test run in a separate `pull_request` workflow rather than being added to the `pull_request_target` traceability workflow. | Accepted | Compiling and running pull-request code under `pull_request_target` would hand a write-capable, secret-bearing context to untrusted code; the two triggers stay separated. |
 | DEC-018 | The CLI publishes a fixed numeric exit-code contract: 0 success, 1 runtime failure, 2 usage, 3 unimplemented, 4 authorization required. | Accepted | PRD section 11.1 requires documented exit codes, and the Herdr plugin and skill must branch on stable numbers rather than parsing prose. |
+| DEC-036 | The agent-safe view is a distinct type with no field capable of carrying a body, and it has no method that yields content. | Accepted | Enforcing the section 19.1 boundary by convention means one future caller can breach it. Enforcing it in the type system means there is nothing to reach through, and a reviewer can confirm the property by reading one struct. |
 | DEC-035 | The safety-phrase wordlist is the EFF Long Wordlist of 2016, vendored in-tree under CC BY 3.0 US with attribution, and identified as `eff-large-2016`. | Accepted | Deriving the phrase must not require a network fetch, and two peers must be able to prove they used the same vocabulary. Redistribution carries an attribution obligation, which the vendored file header satisfies. |
 | DEC-033 | `hrc doctor` reports every check rather than stopping at the first failure. | Accepted | Someone diagnosing a broken installation needs the whole picture. Stopping at the first symptom turns one diagnosis into several runs. |
 | DEC-034 | Human and machine output are rendered from the same value. | Accepted | A separate human code path can report something different from `--json`, and the difference is invisible until someone is debugging from the wrong one. |

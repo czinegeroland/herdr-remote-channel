@@ -170,6 +170,36 @@ pub enum CoreError {
     #[error(transparent)]
     Storage(#[from] hrc_storage::StorageError),
 
+    /// An authorization does not match the message it was presented with.
+    ///
+    /// Either it names a different message, or the ciphertext digest has
+    /// changed since the human approved it. The second case is the
+    /// time-of-check to time-of-use gap the digest binding closes.
+    #[error("this authorization does not match the message presented with it")]
+    AuthorizationMismatch,
+
+    /// An authorization has already been consumed.
+    #[error("this authorization has already been used")]
+    AuthorizationAlreadyUsed,
+
+    /// An authorization expired before it was used.
+    #[error("this authorization expired at {expires_at}")]
+    AuthorizationExpired {
+        /// When it expired.
+        expires_at: String,
+    },
+
+    /// The authorized decision does not deliver content to an agent.
+    #[error("the `{decision}` decision does not deliver content to an agent")]
+    DecisionDoesNotDeliver {
+        /// The decision that was authorized.
+        decision: &'static str,
+    },
+
+    /// Delivered content does not match the edit the human approved.
+    #[error("the content to deliver does not match the edit that was approved")]
+    EditedContentMismatch,
+
     /// A protocol object was malformed.
     #[error(transparent)]
     Protocol(#[from] hrc_protocol::ProtocolError),
