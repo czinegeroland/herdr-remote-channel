@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { workspace = true }
+hrc-core = { workspace = true }
 hrc-crypto = { workspace = true }
 hrc-protocol = { workspace = true }
 hrc-storage = { workspace = true }

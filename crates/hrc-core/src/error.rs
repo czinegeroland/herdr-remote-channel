@@ -175,6 +175,31 @@ pub enum CoreError {
     #[error("this installation is not an administrator of this channel")]
     NotAnAdministrator,
 
+    /// The operation crosses the section 22.7 human authorization boundary.
+    ///
+    /// Carries the method name so the CLI can render the stable
+    /// `authorization_required` shape of section 22.8 without the daemon and
+    /// the CLI keeping separate lists of which operations those are.
+    #[error("`{operation}` must be completed in the trusted local interface")]
+    AuthorizationRequired {
+        /// The refused operation.
+        operation: &'static str,
+    },
+
+    /// No approved or locally authored content exists for this message.
+    #[error("no approved content for message {message_id}")]
+    NoApprovedContent {
+        /// The message asked about.
+        message_id: String,
+    },
+
+    /// No pending message with this identifier is held locally.
+    #[error("no pending message {message_id}")]
+    NoPendingMessage {
+        /// The message asked about.
+        message_id: String,
+    },
+
     /// A message addressed no active device.
     #[error("no active recipient device matches this message's addressing")]
     NoRecipients,

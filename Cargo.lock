@@ -935,6 +935,7 @@ version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "clap",
+ "hrc-core",
  "hrc-crypto",
  "hrc-protocol",
  "hrc-storage",
