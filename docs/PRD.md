@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-13T04:36:00+02:00 |
+| Last updated | 2026-09-13T05:12:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -571,13 +571,13 @@ The Herdr plugin must expose:
 
 | ID | Requirement | Priority | Status | Evidence |
 |---|---|---:|---|---|
-| HRC-TR-001 | Define a versioned transport adapter protocol. | Must | Approved | Pending |
-| HRC-TR-002 | Keep plaintext and private keys outside adapters. | Must | Approved | Pending |
+| HRC-TR-001 | Define a versioned transport adapter protocol. | Must | In progress | `crates/hrc-transport/src/lib.rs`; the out-of-process JSON-RPC binding is pending |
+| HRC-TR-002 | Keep plaintext and private keys outside adapters. | Must | Implemented | `crates/hrc-transport/src/lib.rs`: the trait only ever accepts and returns opaque bytes |
 | HRC-TR-003 | Support polling and push-capable adapters. | Must | Approved | Pending |
-| HRC-TR-004 | Require adapters to declare size, ordering, durability, and metadata properties. | Must | Approved | Pending |
+| HRC-TR-004 | Require adapters to declare size, ordering, durability, and metadata properties. | Must | Implemented | `crates/hrc-transport/src/lib.rs` `AdapterCapabilities`, enforced by the conformance suite |
 | HRC-TR-005 | Supply a built-in Git transport. | Must | Approved | Pending |
 | HRC-TR-006 | Supply GitHub setup optimization without making the core GitHub-only. | Should | Approved | Pending |
-| HRC-TR-007 | Publish adapter conformance tests and validate them with an in-memory non-Git adapter. | Must | Approved | Pending |
+| HRC-TR-007 | Publish adapter conformance tests and validate them with an in-memory non-Git adapter. | Must | Implemented | `crates/hrc-transport/src/conformance.rs`, `crates/hrc-transport/src/memory.rs`, `crates/hrc-transport/tests/reference_adapter.rs` |
 
 ### 12.7 Skill and agent workflows
 
@@ -1712,6 +1712,15 @@ The project must include an in-memory reference adapter used by core tests
 before the Git adapter is considered complete. This verifies that transport
 independence is real rather than a Git-specific abstraction.
 
+The conformance suite MUST itself be tested against a deliberately
+non-conforming adapter. A suite that has only ever been run against correct
+implementations demonstrates that they pass, not that it would catch a
+violation. See decision DEC-025.
+
+Every conformance check MUST report which property failed and what the
+protocol relies on that property for, so an adapter author learns the
+consequence rather than only the assertion.
+
 ---
 
 ## 22. CLI specification
@@ -2249,9 +2258,9 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 | HRC-CTX-001 through HRC-CTX-007 | M4 | `AC-CONTEXT`: supported context items round-trip with previews and verified hashes; excluded paths, detected secrets, oversized objects, and malformed archives are blocked. | Pending |
 | HRC-SYNC-001 through HRC-SYNC-010 | M2 | `AC-GIT-SYNC`: offline queues recover; concurrent peers publish without manual merges; lost responses deduplicate; non-descendant history and changed objects halt processing. | Pending |
 | HRC-SYNC-011 | M2 | `AC-LOCAL-SEQUENCE`: concurrent local callers and process crashes cannot allocate duplicate device sequences or ambiguous predecessor chain IDs. | `crates/hrc-storage/src/tests.rs`: four threads on separate connections allocate 100 sequences with no duplicate, gap, or repeated predecessor link; a reservation survives reopening; an abandoned reservation is burned rather than reused. Verified on Linux, macOS, and Windows CI. |
-| HRC-TR-001 through HRC-TR-004 | M0 | `AC-ADAPTER-SPEC`: protocol schema, capability declaration, error model, and opaque-object boundary pass specification review. | Pending |
+| HRC-TR-001 through HRC-TR-004 | M0 | `AC-ADAPTER-SPEC`: protocol schema, capability declaration, error model, and opaque-object boundary pass specification review. | Partial: `crates/hrc-transport/src/lib.rs` implements the capability declaration, error model, and opaque-object boundary as executable types. Remaining: specification review, and the JSON-RPC binding for out-of-process adapters. |
 | HRC-TR-005 and HRC-TR-006 | M2 | `AC-GIT-ADAPTER`: generic Git operation succeeds without GitHub API dependency; GitHub optimization preserves identical protocol behavior. | Pending |
-| HRC-TR-007 | M2 | `AC-ADAPTER-CONFORMANCE`: the in-memory reference adapter and Git adapter both pass the publication-revision, ordering, conflict, durability, and opaque-object conformance suite. | Pending |
+| HRC-TR-007 | M2 | `AC-ADAPTER-CONFORMANCE`: the in-memory reference adapter and Git adapter both pass the publication-revision, ordering, conflict, durability, and opaque-object conformance suite. | Partial: the reference adapter passes all fifteen checks, and a deliberately broken adapter is proven to fail the suite (`crates/hrc-transport/tests/reference_adapter.rs`). Remaining: the Git adapter. |
 | HRC-SKILL-001 through HRC-SKILL-007 | M3 | `AC-SKILL`: an agent guides setup and drafts communication while tests prove it cannot retrieve private keys/invite secrets, approve joins, or bypass the prompt gate. | Pending |
 | HRC-SKILL-008 | M4 | `AC-SKILL-CONTEXT`: an agent can draft supported context packages while preview and send remain human-controlled. | Pending |
 | HRC-SEC-001 through HRC-SEC-005, HRC-SEC-013, HRC-SEC-015, HRC-SEC-016 | M1 | `AC-KEYS-AND-ROSTER`: key isolation, signed recipient intent, signature validation, control-chain validation, control-only publication ordering, revocation, and stale-epoch rejection pass adversarial tests. | Pending |
@@ -2281,9 +2290,9 @@ Every implementation PR must update this table.
 
 | Milestone | Completion | Current state | Last PR | Evidence / next step |
 |---|---:|---|---|---|
-| M0 Product and protocol | 40% | Detailed PRD, Rust stack, and traceability enforcement validated | Initial branch | Obtain product-owner approval and complete dependency spikes |
+| M0 Product and protocol | 55% | Adds an executable adapter contract, capability declaration, and error model to the written specification | Transport contract and reference adapter | Obtain product-owner approval and complete the JSON-RPC adapter binding |
 | M1 Secure foundation | 65% | Adds the durable local state store: WAL-backed SQLite, the atomic sequence allocation, the outbox lifecycle, the quarantined inbox schema, and the append-only audit log | Local state store | Persist principal and device keys through the OS keychain, then wire channel creation and enrollment into the CLI |
-| M2 Git messaging | 5% | Outbox durability, retry accounting, and crash recovery are in place ahead of the transport | Local state store | Define adapter fixtures and concurrent-push tests |
+| M2 Git messaging | 20% | Transport adapter contract, in-memory reference adapter, and a fifteen-check conformance suite proven to reject a non-conforming adapter | Transport contract and reference adapter | Implement the Git adapter against the same suite, then the daemon fetch and publish loop |
 | M3 Herdr integration | 0% | Not started | N/A | Verify Herdr long-lived plugin process capabilities |
 | M4 Context/delegation | 0% | Not started | N/A | Finalize context package schema |
 | M5 Provider ecosystem | 0% | Not started | N/A | Deferred until core protocol stabilizes |
@@ -2371,6 +2380,8 @@ recorded either directly in this PRD or in a stable linked artifact.
 | DEC-016 | RFC 8785 canonical JSON uses a pinned Rust implementation, initially `serde_jcs`, guarded by protocol vectors. | Accepted | Avoids custom canonicalization while making signed bytes interoperable. |
 | DEC-017 | Build and test run in a separate `pull_request` workflow rather than being added to the `pull_request_target` traceability workflow. | Accepted | Compiling and running pull-request code under `pull_request_target` would hand a write-capable, secret-bearing context to untrusted code; the two triggers stay separated. |
 | DEC-018 | The CLI publishes a fixed numeric exit-code contract: 0 success, 1 runtime failure, 2 usage, 3 unimplemented, 4 authorization required. | Accepted | PRD section 11.1 requires documented exit codes, and the Herdr plugin and skill must branch on stable numbers rather than parsing prose. |
+| DEC-025 | The adapter conformance suite ships with a negative test: a deliberately broken adapter that must fail it. | Accepted | Otherwise the suite's own correctness is unverified. `crates/hrc-transport/tests/reference_adapter.rs` runs an adapter that ignores `expectedRevision` and asserts the suite rejects it by name. |
+| DEC-026 | The in-process transport trait is synchronous; asynchrony belongs to the daemon that drives it. | Accepted | Section 21 specifies adapters as separate JSON-RPC executables, so the process boundary is where waiting happens. Keeping the trait synchronous makes the conformance suite runnable without a runtime and keeps adapter authorship simple. |
 | DEC-023 | The local sequence-allocation transaction begins in SQLite IMMEDIATE mode. | Accepted | A deferred transaction upgrades from a read lock to a write lock, and SQLite fails that upgrade with `SQLITE_BUSY` without waiting on the busy timeout. Found by the concurrency test in `crates/hrc-storage/src/tests.rs`, which failed under four concurrent allocators before the change. |
 | DEC-024 | A sequence reserved before a crash is burned as an explicit gap, never reused. | Accepted | PRD section 17.2 permits either publishing the reservation or recording a gap. Reuse is not among the options: a peer may already have observed a message claiming that sequence, and reissuing it would create two messages with one chain position. |
 | DEC-022 | Genesis is signed by an administrator device, and the first control entry names the channel ID as its predecessor hash. | Accepted | Keeps one signer shape and one verification path for every signed object, and makes the control chain unbroken from genesis onward without a special case. |
