@@ -1259,6 +1259,7 @@ fn compose(
     recipient: &str,
     text: &str,
     in_reply_to: Option<&str>,
+    expires: Option<&str>,
 ) -> Result<Value> {
     compose_body(
         context,
@@ -1266,6 +1267,7 @@ fn compose(
         recipient,
         serde_json::json!({ "text": text }),
         in_reply_to,
+        expires,
     )
 }
 
@@ -1277,6 +1279,7 @@ fn compose_body(
     recipient: &str,
     body: Value,
     in_reply_to: Option<&str>,
+    expires: Option<&str>,
 ) -> Result<Value> {
     let store = context.key_store()?;
     let device: DeviceSecrets = store.load::<DeviceSecrets>(DEVICE_KEY_NAME)?;
@@ -1291,6 +1294,15 @@ fn compose_body(
     let (principal_id, endpoint) = match recipient.split_once('/') {
         Some((principal_id, endpoint)) => (principal_id, Some(endpoint.to_owned())),
         None => (recipient, None),
+    };
+
+    // A lifetime is resolved to an absolute timestamp here, for the same
+    // reason an invite's is: the protocol compares timestamps, and a signed
+    // envelope carrying "24h" would lapse at a moment that depends on when
+    // someone read it rather than when it was sent.
+    let expires_at = match expires {
+        Some(lifetime) => Some(expiry_from(&now, lifetime)?),
+        None => None,
     };
 
     let mut transport = GitTransport::open(
@@ -1343,7 +1355,7 @@ fn compose_body(
         device_sequence: reservation.device_sequence,
         previous_chain_id: reservation.previous_chain_id.clone(),
         created_at: now.clone(),
-        expires_at: None,
+        expires_at: expires_at.clone(),
         to: hrc_protocol::Addressing {
             principals: vec![principal_id.to_owned()],
             endpoint,
@@ -1405,24 +1417,31 @@ fn compose_body(
 }
 
 /// `hrc send`: an informational note.
-pub fn send(context: &Context, recipient: &str, text: &str) -> Result<Value> {
+pub fn send(
+    context: &Context,
+    recipient: &str,
+    text: &str,
+    expires: Option<&str>,
+) -> Result<Value> {
     compose(
         context,
         hrc_protocol::MessageKind::Note,
         recipient,
         text,
         None,
+        expires,
     )
 }
 
 /// `hrc ask`: a question, optionally addressed to a logical endpoint.
-pub fn ask(context: &Context, recipient: &str, text: &str) -> Result<Value> {
+pub fn ask(context: &Context, recipient: &str, text: &str, expires: Option<&str>) -> Result<Value> {
     compose(
         context,
         hrc_protocol::MessageKind::Question,
         recipient,
         text,
         None,
+        expires,
     )
 }
 
@@ -1445,6 +1464,9 @@ pub fn reply(context: &Context, message_id: &str, text: &str) -> Result<Value> {
         &entry.sender_principal,
         text,
         Some(message_id),
+        // A reply inherits no expiry from the question it answers: expiry is
+        // the sender's statement about their own message.
+        None,
     )
 }
 
@@ -1542,6 +1564,7 @@ pub fn context_send(context: &Context, recipient: &str, package_id: &str) -> Res
             "context": package,
             "contextDigest": digest,
         }),
+        None,
         None,
     )?;
     sent["contextId"] = Value::String(package_id.to_owned());
@@ -1881,6 +1904,7 @@ pub fn inbox(context: &Context, pending_only: bool) -> Result<Value> {
                 "threadId": entry.thread_id,
                 "inReplyTo": entry.in_reply_to,
                 "arrival": entry.arrival_sequence,
+                "expiresAt": entry.expires_at,
                 "disposition": entry.disposition,
             })
         })
@@ -2230,6 +2254,12 @@ pub fn audit(context: &Context, since: Option<&str>) -> Result<Value> {
 pub fn sync_once(context: &Context) -> Result<Value> {
     let database = Database::open(context.paths.database())?;
     let now = database.utc_now()?;
+
+    // Reap before fetching. A message that lapsed while this installation
+    // was offline should not appear as actionable for the length of one
+    // synchronization pass (PRD requirement HRC-MSG-005).
+    let expired = sweep_expired(&database, &now)?;
+
     let mut channels = Vec::new();
     for channel in database.channels()? {
         channels.push(sync_git_channel(context, &database, &channel, &now)?);
@@ -2238,14 +2268,39 @@ pub fn sync_once(context: &Context) -> Result<Value> {
     Ok(json!({
         "status": "ok",
         "syncedAt": now,
+        "expired": expired,
         "channels": channels,
     }))
+}
+
+/// Marks lapsed messages and records one audit entry for each.
+///
+/// Expiry is the one inbox transition nobody decides: it is what happens
+/// when no one says anything (PRD section 18.4). It is still recorded,
+/// because "why did this never reach me" is a question the audit log should
+/// be able to answer.
+fn sweep_expired(database: &Database, now: &str) -> Result<Vec<String>> {
+    let expired = database.sweep_expired(now)?;
+
+    for message_id in &expired {
+        database.append_audit(
+            None,
+            Some(message_id),
+            "message_expired",
+            None,
+            Some("the message lapsed before a local decision was made"),
+            now,
+        )?;
+    }
+
+    Ok(expired)
 }
 
 /// `hrc daemon`: stay resident and keep synchronizing in the background.
 pub fn daemon_tick(context: &Context) -> Result<Value> {
     let database = Database::open(context.paths.database())?;
     let now = database.utc_now()?;
+    let expired = sweep_expired(&database, &now)?;
     let mut channels = Vec::new();
     let mut healthy = true;
 
@@ -2271,6 +2326,7 @@ pub fn daemon_tick(context: &Context) -> Result<Value> {
         "status": if healthy { "ok" } else { "degraded" },
         "syncedAt": now,
         "nextPollSeconds": next_poll.as_secs(),
+        "expired": expired,
         "channels": channels,
     }))
 }

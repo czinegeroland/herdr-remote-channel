@@ -444,6 +444,16 @@ fn render_inbox(value: &Value) {
             entry["sender"].as_str().unwrap_or("?"),
             entry["disposition"].as_str().unwrap_or("?")
         );
+
+        // An expiry a person can still act on is worth seeing before it
+        // lapses; one that already has explains why no decision is offered.
+        if let Some(expires_at) = entry["expiresAt"].as_str() {
+            if entry["disposition"] == "expired" {
+                println!("      expired {expires_at}; no action is available");
+            } else {
+                println!("      expires {expires_at}");
+            }
+        }
     }
 }
 

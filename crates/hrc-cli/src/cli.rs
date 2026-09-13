@@ -218,6 +218,9 @@ pub struct SendArgs {
     pub recipient: String,
     /// Message text.
     pub message: String,
+    /// Lifetime after which the message expires, for example `24h`.
+    #[arg(long, value_name = "LIFETIME")]
+    pub expires: Option<String>,
 }
 
 /// Arguments of `hrc ask`.
@@ -231,6 +234,9 @@ pub struct AskArgs {
     pub recipient: String,
     /// Question text.
     pub question: String,
+    /// Lifetime after which the question expires, for example `24h`.
+    #[arg(long, value_name = "LIFETIME")]
+    pub expires: Option<String>,
 }
 
 /// Arguments of `hrc reply`.
