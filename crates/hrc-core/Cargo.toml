@@ -12,6 +12,7 @@ hrc-crypto = { workspace = true }
 hrc-protocol = { workspace = true }
 hrc-storage = { workspace = true }
 hrc-transport = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

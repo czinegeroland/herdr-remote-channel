@@ -8,12 +8,14 @@
 //!
 //! See PRD sections 13.1 and 19.
 
+pub mod context;
 pub mod error;
 pub mod gate;
 pub mod message;
 pub mod roster;
 pub mod sync;
 
+pub use context::{ContextItem, ContextPackage, ContextPreview};
 pub use error::{CoreError, Result};
 pub use gate::{AgentView, Authorization, AuthorizationLedger, Decision};
 pub use message::{QuarantinedMessage, open, seal};
