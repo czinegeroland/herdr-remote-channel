@@ -233,6 +233,37 @@ pub enum CoreError {
         reason: &'static str,
     },
 
+    /// A principal reported on a delegation it is not part of.
+    #[error("principal {principal_id} is not part of delegation {task_id}")]
+    NotADelegationParty {
+        /// The principal that reported.
+        principal_id: String,
+        /// The delegation reported on.
+        task_id: String,
+    },
+
+    /// A reported state cannot follow the current one.
+    #[error("delegation {task_id} cannot move from `{from}` to `{to}`")]
+    IllegalDelegationTransition {
+        /// The delegation.
+        task_id: String,
+        /// Where it stands.
+        from: &'static str,
+        /// What was reported.
+        to: &'static str,
+    },
+
+    /// The reporter is not the party entitled to report that state.
+    #[error("principal {principal_id} may not report `{state}` for delegation {task_id}")]
+    WrongDelegationParty {
+        /// The delegation.
+        task_id: String,
+        /// The principal that reported.
+        principal_id: String,
+        /// The state they claimed.
+        state: &'static str,
+    },
+
     /// A message addressed no active device.
     #[error("no active recipient device matches this message's addressing")]
     NoRecipients,
