@@ -144,6 +144,32 @@ pub enum CoreError {
         expires_at: String,
     },
 
+    /// A channel is not registered in local state.
+    #[error("channel {channel_id} has no local state")]
+    UnknownChannelState {
+        /// The channel with no local record.
+        channel_id: String,
+    },
+
+    /// Synchronization is halted for this channel.
+    ///
+    /// Sticky by design (PRD sections 17.5.2 and 26). The safe response to
+    /// "the record changed underneath me" is never to keep reading, so this
+    /// clears only by explicit human action.
+    #[error("synchronization is halted: {reason}")]
+    SynchronizationHalted {
+        /// Why synchronization stopped.
+        reason: String,
+    },
+
+    /// The transport failed or reported an anomaly.
+    #[error("transport: {0}")]
+    Transport(String),
+
+    /// Local state could not be read or written.
+    #[error(transparent)]
+    Storage(#[from] hrc_storage::StorageError),
+
     /// A protocol object was malformed.
     #[error(transparent)]
     Protocol(#[from] hrc_protocol::ProtocolError),

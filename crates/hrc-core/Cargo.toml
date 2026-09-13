@@ -10,6 +10,8 @@ repository.workspace = true
 [dependencies]
 hrc-crypto = { workspace = true }
 hrc-protocol = { workspace = true }
+hrc-storage = { workspace = true }
+hrc-transport = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
