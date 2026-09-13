@@ -10,6 +10,7 @@ pub mod canonical;
 pub mod control;
 pub mod error;
 pub mod identity;
+pub mod join;
 pub mod message;
 pub mod recipients;
 pub mod signed;

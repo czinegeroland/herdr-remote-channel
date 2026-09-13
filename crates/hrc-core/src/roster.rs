@@ -102,6 +102,39 @@ pub struct RosterMember {
     pub is_active: bool,
 }
 
+/// What the control log says about one invite.
+///
+/// Invite state is part of replayed channel state rather than local
+/// bookkeeping, because single use is a rule every participant must be able
+/// to check for themselves. An administrator who admitted the same invite
+/// twice would be visibly wrong to every reader of the log, not merely
+/// mistaken in private (PRD section 15.1, decision DEC-039).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InviteState {
+    /// Created and not yet spent.
+    Open {
+        /// RFC 3339 UTC expiry declared when it was created.
+        expires_at: String,
+    },
+    /// Redeemed by the named principal.
+    Consumed {
+        /// Who was admitted with it.
+        principal_id: String,
+    },
+    /// Withdrawn before use.
+    Revoked,
+}
+
+impl InviteState {
+    /// Whether this invite can still admit someone at `now`.
+    pub fn is_open_at(&self, now: &str) -> bool {
+        match self {
+            InviteState::Open { expires_at } => now < expires_at.as_str(),
+            InviteState::Consumed { .. } | InviteState::Revoked => false,
+        }
+    }
+}
+
 /// Membership state produced by replaying a control chain.
 #[derive(Debug, Clone)]
 pub struct Roster {
@@ -111,6 +144,7 @@ pub struct Roster {
     head_hash: String,
     members: BTreeMap<String, RosterMember>,
     devices: BTreeMap<String, RosterDevice>,
+    invites: BTreeMap<String, InviteState>,
 }
 
 impl Roster {
@@ -148,6 +182,7 @@ impl Roster {
             head_hash: channel_id,
             members: BTreeMap::new(),
             devices: BTreeMap::new(),
+            invites: BTreeMap::new(),
         };
 
         // Admitting the principal verifies every device certificate against
@@ -264,13 +299,44 @@ impl Roster {
     /// Mutates state for an already-authorized operation.
     fn apply_operation(&mut self, operation: &ControlOperation, epoch: u64) -> Result<()> {
         match operation {
-            ControlOperation::AddMember { member } => {
+            ControlOperation::AddMember { invite_id, member } => {
+                // The invite is checked before the principal because it is
+                // the authorization: a replayed admission is a spent invite
+                // whether or not it names someone already admitted, and
+                // reporting it as a duplicate member would describe the
+                // symptom rather than the cause.
+                match self.invites.get(invite_id) {
+                    Some(InviteState::Open { .. }) => {}
+                    Some(InviteState::Consumed { .. }) => {
+                        return Err(CoreError::InviteAlreadyUsed {
+                            invite_id: invite_id.clone(),
+                        });
+                    }
+                    Some(InviteState::Revoked) => {
+                        return Err(CoreError::InviteRevoked {
+                            invite_id: invite_id.clone(),
+                        });
+                    }
+                    None => {
+                        return Err(CoreError::UnknownInvite {
+                            invite_id: invite_id.clone(),
+                        });
+                    }
+                }
+
                 if self.members.contains_key(&member.principal_id) {
                     return Err(CoreError::DuplicateMember {
                         principal_id: member.principal_id.clone(),
                     });
                 }
+
                 self.admit_principal(member, false, epoch)?;
+                self.invites.insert(
+                    invite_id.clone(),
+                    InviteState::Consumed {
+                        principal_id: member.principal_id.clone(),
+                    },
+                );
             }
 
             ControlOperation::RemoveMember { principal_id } => {
@@ -324,12 +390,53 @@ impl Roster {
                 member.principal_signing_key = principal_signing_key.clone();
             }
 
-            // Invites and policy do not change the device set. Invite state
-            // and policy interpretation live outside the roster.
-            ControlOperation::CreateInvite { .. }
-            | ControlOperation::RevokeInvite { .. }
-            | ControlOperation::UpdatePolicy { .. }
-            | ControlOperation::RolloverRepository { .. } => {}
+            ControlOperation::CreateInvite {
+                invite_id,
+                expires_at,
+            } => {
+                if self.invites.contains_key(invite_id) {
+                    // Reusing an identifier would make the log ambiguous
+                    // about which authorization a later admission spent.
+                    return Err(CoreError::DuplicateInvite {
+                        invite_id: invite_id.clone(),
+                    });
+                }
+                self.invites.insert(
+                    invite_id.clone(),
+                    InviteState::Open {
+                        expires_at: expires_at.clone(),
+                    },
+                );
+            }
+
+            ControlOperation::RevokeInvite { invite_id } => {
+                match self.invites.get(invite_id) {
+                    Some(InviteState::Open { .. }) => {}
+                    Some(InviteState::Consumed { .. }) => {
+                        // Withdrawing a spent invite would suggest the
+                        // admission could be undone, and it cannot be.
+                        return Err(CoreError::InviteAlreadyUsed {
+                            invite_id: invite_id.clone(),
+                        });
+                    }
+                    Some(InviteState::Revoked) => {
+                        return Err(CoreError::InviteRevoked {
+                            invite_id: invite_id.clone(),
+                        });
+                    }
+                    None => {
+                        return Err(CoreError::UnknownInvite {
+                            invite_id: invite_id.clone(),
+                        });
+                    }
+                }
+                self.invites.insert(invite_id.clone(), InviteState::Revoked);
+            }
+
+            // Policy does not change the device set, and its interpretation
+            // lives outside the roster.
+            ControlOperation::UpdatePolicy { .. } | ControlOperation::RolloverRepository { .. } => {
+            }
         }
 
         Ok(())
@@ -457,6 +564,19 @@ impl Roster {
     /// The channel this roster belongs to.
     pub fn channel_id(&self) -> &str {
         &self.channel_id
+    }
+
+    /// What the control log says about one invite, if it mentions it at all.
+    pub fn invite(&self, invite_id: &str) -> Option<&InviteState> {
+        self.invites.get(invite_id)
+    }
+
+    /// The invites that can still admit someone at `now`.
+    pub fn open_invites(&self, now: &str) -> impl Iterator<Item = (&str, &InviteState)> {
+        self.invites
+            .iter()
+            .filter(move |(_, state)| state.is_open_at(now))
+            .map(|(invite_id, state)| (invite_id.as_str(), state))
     }
 
     /// The current roster epoch.

@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-13T12:35:00+02:00 |
+| Last updated | 2026-09-13T14:05:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -504,9 +504,9 @@ The Herdr plugin must expose:
 | HRC-CH-002 | Use a signed genesis object as the channel identity authority. | Must | In progress | `crates/hrc-protocol/src/control.rs`; publication pending |
 | HRC-CH-003 | Support private repositories by default. | Must | Approved | Pending |
 | HRC-CH-004 | Support public repositories after explicit risk confirmation. | Should | Approved | Pending |
-| HRC-CH-005 | Create expiring, single-use invites. | Must | In progress | `crates/hrc-crypto/src/enrollment.rs` generates, encodes, and validates expiring invites; single-use enforcement needs the control log |
-| HRC-CH-006 | Generate separate principal and device identities. | Must | In progress | `crates/hrc-cli/src/commands.rs` `hrc init` generates and persists device keys; principal key handling and the enrollment flow are pending |
-| HRC-CH-007 | Require explicit administrator approval for joins. | Must | Approved | Pending |
+| HRC-CH-005 | Create expiring, single-use invites. | Must | Implemented | `crates/hrc-crypto/src/enrollment.rs` generates, encodes, and validates expiring invites; `crates/hrc-core/src/roster.rs` tracks invite state from the control log so a second admission under one invite is rejected by every participant |
+| HRC-CH-006 | Generate separate principal and device identities. | Must | In progress | `crates/hrc-cli/src/commands.rs` `hrc init` generates and persists device keys, and `crates/hrc-core/src/enrollment.rs` signs join requests with the principal key while certifying a separate device key; persisting the principal key is pending |
+| HRC-CH-007 | Require explicit administrator approval for joins. | Must | Implemented | `crates/hrc-core/src/enrollment.rs`: `review_join` validates but admits nobody, and `admit` — the approval itself — refuses a signer who is not an active administrator |
 | HRC-CH-008 | Support member and device revocation. | Should | In progress | `crates/hrc-core/src/roster.rs`; publication and CLI surface pending |
 | HRC-CH-009 | Maintain a signed, append-only membership/control log. | Must | Implemented | `crates/hrc-protocol/src/control.rs`, `crates/hrc-core/src/roster.rs` |
 | HRC-CH-010 | Detect observed conflicting control histories, rewrites, deletions, and substitutions, then stop synchronization. | Must | Approved | Pending |
@@ -870,6 +870,11 @@ An invite MUST:
 - Bind to a channel ID and genesis hash.
 - Include the administrator fingerprint.
 - Authorize a membership request only.
+
+Single use is enforced by the published record, not by administrator memory:
+the `add_member` control entry names the invite it consumes, so a second
+admission under one invite is rejected during control-log replay by every
+participant. See decision DEC-039.
 
 An invite MUST NOT:
 
@@ -1299,11 +1304,17 @@ active administrator devices. Its payload contains:
   "inviteId": "...",
   "principalPublicKey": "...",
   "deviceCertificate": {},
-  "deviceCertificateSignature": "...",
   "inviteProof": "...",
   "createdAt": "..."
 }
 ```
+
+`deviceCertificate` is a complete signed object — the certificate payload,
+its signer, and the principal signature over it — rather than a payload and a
+detached signature, so verifying that a principal vouched for a device is the
+same code path here as in genesis and in control entries (decision DEC-020).
+`deviceCertificateHash` below is the SHA-256 of the JCS encoding of that whole
+object.
 
 `inviteProof` is HMAC-SHA-256 using the one-time invite secret over the JCS
 encoding of:
@@ -2329,7 +2340,7 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 
 | Requirements | Milestone | Acceptance criteria | Evidence |
 |---|---|---|---|
-| HRC-CH-001 through HRC-CH-007, HRC-CH-009 | M1 | `AC-ENROLL`: two clean devices create, invite, join, verify, and approve a channel using no shared private material. Invalid genesis, invite, proof, or signature is rejected. | Partial: `crates/hrc-protocol/src/control.rs` covers genesis identity and chaining; `crates/hrc-crypto/src/enrollment.rs` covers invite generation and validation, invite proofs that do not transfer between joiners or invites, and safety-phrase derivation pinned against an independent implementation. Remaining: the join request flow and administrator approval. |
+| HRC-CH-001 through HRC-CH-007, HRC-CH-009 | M1 | `AC-ENROLL`: two clean devices create, invite, join, verify, and approve a channel using no shared private material. Invalid genesis, invite, proof, or signature is rejected. | Partial: `crates/hrc-core/src/enrollment/tests.rs` drives request, review, and admission end to end with real keys and real age encryption, and rejects a replayed request, a forged or transferred invite proof, a certificate swapped after the proof, a certificate signed by a stranger, a tampered request, a foreign channel, an expired or revoked invite, an admission naming an invite the log never opened, a second enrollment by an existing member, an ordinary member trying to read a pending join, and a non-administrator trying to admit. Both sides derive the same safety phrase, and a substituted key changes it. Remaining: publication over a transport and the CLI surface. |
 | HRC-CH-008 | M1 | `AC-REVOCATION`: a device is revoked, the epoch advances, and messages introduced afterward cannot be accepted from or decrypted by the revoked device. | Partial: `crates/hrc-core/src/roster/tests.rs` proves the epoch advances, the revoked device loses authority from that epoch, and it cannot sign later entries; `crates/hrc-crypto/src/encryption.rs` proves it cannot decrypt later ciphertext. Remaining: end-to-end over a published channel. |
 | HRC-CH-010 | M1 | `AC-CONTROL-INTEGRITY`: observed same-parent successors, broken previous hashes, rewrites, deletions, and substitutions stop synchronization with a sticky alert. | Partial: `crates/hrc-core/src/roster/tests.rs` rejects same-sequence successors, broken predecessor hashes, skipped sequences, wrong epochs, and foreign-channel entries, and proves a rejected entry leaves state unchanged. Remaining: synchronization halt and the sticky alert. |
 | HRC-MSG-001 through HRC-MSG-007, HRC-MSG-010 | M2 | `AC-MESSAGING`: two devices exchange offline notes and threaded questions/answers with receipts, expiry, deduplication, ordering, and local audit evidence. | Partial: `crates/hrc-core/src/message/tests.rs` covers seal and open between two devices, broadcast addressing, and expiry. Remaining: receipts, threading over a published channel, deduplication, and ordering. |
@@ -2371,7 +2382,7 @@ Every implementation PR must update this table.
 | Milestone | Completion | Current state | Last PR | Evidence / next step |
 |---|---:|---|---|---|
 | M0 Product and protocol | 55% | Adds an executable adapter contract, capability declaration, and error model to the written specification | Transport contract and reference adapter | Obtain product-owner approval and complete the JSON-RPC adapter binding |
-| M1 Secure foundation | 95% | Adds enrollment cryptography: invites, non-transferable invite proofs, and safety-phrase derivation against the pinned EFF wordlist | Enrollment cryptography | Wire the join request and approval flow, then integrate an OS keychain backend |
+| M1 Secure foundation | 98% | Adds the join request, administrator review, and admission flow, with invite single use enforced by control-log replay | Join and approval flow | Persist the principal key, then integrate an OS keychain backend |
 | M2 Git messaging | 70% | Adds the synchronization engine: cursor-resuming fetch, conflict-retrying publish, backoff policy, and fail-closed halting on observed tampering | Synchronization engine | Wire the resident daemon and the CLI, then receipts, threading, and deduplication |
 | M3 Herdr integration | 35% | Adds the agent skill at the section 24 path, held to the CLI exit codes, command surface, and section 24.2 prohibitions by tests in the build | Agent skill | Build the trusted approval interface and the daemon RPC split, then the Herdr inbox UI |
 | M4 Context/delegation | 30% | Context packages with previews, digest verification, default path exclusions, and blocking secret scanning | Context packages | Add git-ignored path checking and attachment limits, then structured delegation messages |
@@ -2460,6 +2471,7 @@ recorded either directly in this PRD or in a stable linked artifact.
 | DEC-016 | RFC 8785 canonical JSON uses a pinned Rust implementation, initially `serde_jcs`, guarded by protocol vectors. | Accepted | Avoids custom canonicalization while making signed bytes interoperable. |
 | DEC-017 | Build and test run in a separate `pull_request` workflow rather than being added to the `pull_request_target` traceability workflow. | Accepted | Compiling and running pull-request code under `pull_request_target` would hand a write-capable, secret-bearing context to untrusted code; the two triggers stay separated. |
 | DEC-018 | The CLI publishes a fixed numeric exit-code contract: 0 success, 1 runtime failure, 2 usage, 3 unimplemented, 4 authorization required. | Accepted | PRD section 11.1 requires documented exit codes, and the Herdr plugin and skill must branch on stable numbers rather than parsing prose. |
+| DEC-039 | The `add_member` control entry names the invite it consumes, and invite state is part of replayed roster state. | Accepted | Single use (section 15.1) was otherwise unenforceable by anyone but the administrator who happened to remember: nothing in the published record said which authorization a member was admitted under, so a replayed join request could be admitted twice and no reader of the control log could tell. Making it part of replay means a second admission fails for every participant. |
 | DEC-038 | The agent skill is held to the CLI and to PRD section 24 by tests in the build rather than by review. | Accepted | A skill file ships instructions to an agent, and nothing else in the build notices when it drifts from the exit codes, the command surface, or the prohibitions. The tests assert the substance of each rule rather than its wording, so the prose can improve without becoming a transcription exercise. |
 | DEC-037 | Context secret scanning blocks the send, uses conservative prefix-anchored rules, and never quotes a match. | Accepted | Stripping would send something the user did not approve; entropy-based rules produce enough false positives to get the check disabled; and quoting the match copies the secret into logs. Narrows OQ-006 without closing it. |
 | DEC-036 | The agent-safe view is a distinct type with no field capable of carrying a body, and it has no method that yields content. | Accepted | Enforcing the section 19.1 boundary by convention means one future caller can breach it. Enforcing it in the type system means there is nothing to reach through, and a reviewer can confirm the property by reading one struct. |

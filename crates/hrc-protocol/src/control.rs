@@ -102,6 +102,15 @@ pub enum ControlOperation {
     },
     /// Admit a principal and its initial devices.
     AddMember {
+        /// The invite this admission consumes.
+        ///
+        /// Naming it here is what makes single use (PRD section 15.1)
+        /// auditable: without it, nothing in the published record says which
+        /// authorization a member was admitted under, so a replayed join
+        /// request could be admitted twice and no reader of the control log
+        /// could tell. See decision DEC-039.
+        #[serde(rename = "inviteId")]
+        invite_id: String,
         /// The joining principal.
         member: PrincipalMaterial,
     },
@@ -375,6 +384,7 @@ mod tests {
                 invite_id: "invite-1".into(),
             },
             ControlOperation::AddMember {
+                invite_id: "invite-1".into(),
                 member: PrincipalMaterial {
                     principal_id: "principal-2".into(),
                     principal_signing_key: "a2V5".into(),
@@ -446,6 +456,7 @@ mod tests {
         );
         assert!(
             ControlOperation::AddMember {
+                invite_id: "invite-1".into(),
                 member: PrincipalMaterial {
                     principal_id: "p".into(),
                     principal_signing_key: "k".into(),

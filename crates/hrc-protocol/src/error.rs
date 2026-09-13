@@ -88,6 +88,16 @@ pub enum ProtocolError {
     ///
     /// A device ID is a hash of its own descriptor, so a mismatch means the
     /// descriptor was altered after the ID was assigned.
+    /// A required field was present but empty.
+    ///
+    /// Distinct from a derived-value mismatch: nothing was computed and
+    /// found wrong, the value was simply never supplied.
+    #[error("required field `{field}` is empty")]
+    MissingField {
+        /// The empty field.
+        field: &'static str,
+    },
+
     #[error("`{field}` does not match the value derived from the object contents")]
     DerivedMismatch {
         /// The identifier that failed to reproduce.

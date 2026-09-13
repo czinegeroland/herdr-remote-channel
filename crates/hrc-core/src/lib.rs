@@ -9,6 +9,7 @@
 //! See PRD sections 13.1 and 19.
 
 pub mod context;
+pub mod enrollment;
 pub mod error;
 pub mod gate;
 pub mod message;
@@ -16,7 +17,8 @@ pub mod roster;
 pub mod sync;
 
 pub use context::{ContextItem, ContextPackage, ContextPreview};
+pub use enrollment::{PendingJoin, admit, request_join, review_join};
 pub use error::{CoreError, Result};
 pub use gate::{AgentView, Authorization, AuthorizationLedger, Decision};
 pub use message::{QuarantinedMessage, open, seal};
-pub use roster::{DeviceStatus, Roster, RosterDevice, RosterMember};
+pub use roster::{DeviceStatus, InviteState, Roster, RosterDevice, RosterMember};

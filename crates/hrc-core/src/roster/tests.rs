@@ -152,17 +152,33 @@ fn entry(
         .unwrap()
 }
 
+/// Opens an invite so an admission has an authorization to spend.
+fn open_invite(roster: &mut Roster, admin: &TestPrincipal, invite_id: &str) {
+    let signed = entry(
+        roster,
+        &admin.device_key,
+        admin.signer(),
+        ControlOperation::CreateInvite {
+            invite_id: invite_id.into(),
+            expires_at: "2026-09-14T00:00:00Z".into(),
+        },
+    );
+    roster.apply(&signed).unwrap();
+}
+
 /// The common case: an admin roster with one member added.
 fn admin_and_member() -> (TestPrincipal, TestPrincipal, Roster) {
     let admin = TestPrincipal::new("admin", 1);
     let member = TestPrincipal::new("member", 2);
     let mut roster = Roster::from_genesis(&genesis_for(&admin)).unwrap();
+    open_invite(&mut roster, &admin, "invite-1");
 
     let add = entry(
         &roster,
         &admin.device_key,
         admin.signer(),
         ControlOperation::AddMember {
+            invite_id: "invite-1".into(),
             member: member.material(),
         },
     );
@@ -261,8 +277,8 @@ fn genesis_with_a_certificate_signed_by_another_principal_is_rejected() {
 fn adding_a_member_advances_the_epoch() {
     let (_admin, member, roster) = admin_and_member();
 
-    assert_eq!(roster.epoch(), 1);
-    assert_eq!(roster.sequence(), 1);
+    assert_eq!(roster.epoch(), 1, "only the admission changes membership");
+    assert_eq!(roster.sequence(), 2, "the invite is an entry of its own");
     assert_eq!(roster.active_devices().count(), 2);
     assert!(roster.was_authorized_in(&member.device_id(), 1));
 }
@@ -604,12 +620,14 @@ fn an_entry_declaring_the_wrong_epoch_is_rejected() {
     let admin = TestPrincipal::new("admin", 1);
     let member = TestPrincipal::new("member", 2);
     let mut roster = Roster::from_genesis(&genesis_for(&admin)).unwrap();
+    open_invite(&mut roster, &admin, "invite-1");
 
     let mut signed = entry(
         &roster,
         &admin.device_key,
         admin.signer(),
         ControlOperation::AddMember {
+            invite_id: "invite-1".into(),
             member: member.material(),
         },
     );
@@ -749,11 +767,16 @@ fn a_tampered_device_descriptor_is_rejected() {
 fn the_same_member_cannot_be_added_twice() {
     let (admin, member, mut roster) = admin_and_member();
 
+    // A fresh invite, so what fails is the duplicate principal rather than
+    // a spent authorization.
+    open_invite(&mut roster, &admin, "invite-2");
+
     let again = entry(
         &roster,
         &admin.device_key,
         admin.signer(),
         ControlOperation::AddMember {
+            invite_id: "invite-2".into(),
             member: member.material(),
         },
     );
@@ -841,6 +864,7 @@ fn a_full_chain_replays_to_the_expected_state() {
             expires_at: "2026-09-14T00:00:00Z".into(),
         },
         ControlOperation::AddMember {
+            invite_id: "invite-1".into(),
             member: member.material(),
         },
         ControlOperation::AddDevice {
