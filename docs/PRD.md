@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-14T17:35:00+02:00 |
+| Last updated | 2026-09-14T18:30:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -2523,7 +2523,7 @@ Every implementation PR must update this table.
 | Milestone | Completion | Current state | Last PR | Evidence / next step |
 |---|---:|---|---|---|
 | M0 Product and protocol | 55% | Adds an executable adapter contract, capability declaration, and error model to the written specification | Transport contract and reference adapter | Obtain product-owner approval and complete the JSON-RPC adapter binding |
-| M1 Secure foundation | 100% | Makes observed Git history rewrites, deletions, substitutions, conflicting control successors, and branch disappearance halt synchronization with a sticky reason | Observed-history halt | Integrate an OS keychain backend |
+| M1 Secure foundation | 100% | Makes observed Git history rewrites, deletions, substitutions, conflicting control successors, and branch disappearance halt synchronization with a sticky reason | Observed-history halt | Hand the work over: `docs/HANDOFF.md` section 4 now records the post-M1 state and the remaining order of work |
 | M2 Git messaging | 99% | Adds the synchronization engine plus real `hrc sync --once`, `hrc daemon`, `hrc audit`, and live daemon IPC hosting over the local store and Git transport | Daemon IPC hosting | Add receipts, threading, deduplication, end-to-end restart coverage, and audit decision recording |
 | M3 Herdr integration | 80% | Adds the daemon's two local interfaces as two request and response types, and now hosts them from the resident daemon so agent-safe callers still cannot name a pending body | Live daemon boundary | Build the trusted approval TUI, then the Herdr inbox UI |
 | M4 Context/delegation | 65% | Adds attachment limits checked before any fetch and again on arrival, and sender-chosen file names treated as hostile text | Attachment limits | Add git-ignored path checking, then wire context and delegation to the CLI |
@@ -2550,9 +2550,13 @@ Every implementation PR must update this table.
 
 `docs/HANDOFF.md` records how this PRD is being delivered: the pull-request
 cycle, the living-PRD rule and its CI check, what the codebase expects of a
-change, and where the work currently stands. It is written for whoever picks
-the work up next and is updated when the way of working changes, not when the
-code does.
+change, and where the work currently stands.
+
+Its section 4 is the exception to "updated when the way of working changes":
+it names the current milestone percentages, what is in flight, and the next
+pieces in priority order, so it goes stale as soon as a pull request merges.
+Refresh it in the same pull request as the work it describes. Everything else
+in the file changes only when the way of working does.
 
 ---
 

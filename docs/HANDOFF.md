@@ -134,61 +134,69 @@ Decisions currently run to DEC-047 and open questions to OQ-013.
 
 ## 4. Where we left off
 
+*This section is the one with a short shelf life. Update it in the same pull
+request as the work it describes, or it will lie.*
+
 ### State
 
-74 of 122 requirement rows Implemented. Milestones: **M0 55%, M1 100%,
+**75 of 122 requirement rows Implemented.** Milestones: **M0 55%, M1 100%,
 M2 99%, M3 80%, M4 65%, M5 0%.**
 
-Thirty pull requests merged. The working system today: two installations can
-create a channel, invite, join, compare safety phrases, admit a member through
-the trusted interface, exchange encrypted notes and threaded questions and
-answers over a Git remote, and have everything arrive quarantined behind the
-prompt gate.
+Thirty-one pull requests merged; nothing is in flight. `main` is at
+`fix(sync): halt on observed Git history tampering (#31)` and the development
+branch is level with it.
 
-### In flight
+What works today, end to end and proven by tests against a real Git
+repository: two installations create a channel, invite, join, derive and
+compare matching safety phrases, admit a member through the trusted interface,
+exchange encrypted notes and threaded questions and answers, and have
+everything arrive quarantined behind the prompt gate. Observed history
+rewrites, deletions, and substitutions halt synchronization stickily.
 
-**PR #30 is open and not merged.** It carries messaging wired end to end plus
-membership operations through the trusted interface. CI was re-run after the
-Actions quota was topped up; check it, and if green, squash merge it. Its
-content is verified locally — full suite, clippy, and fmt clean.
+### Start here
 
-If it is red for a reason in the diff, fix it. Do not close it and start over;
-it is a large and coherent change.
+Nothing is half-done, so pick from the list below rather than hunting for
+loose ends.
 
-### The immediate next pieces
+### The remaining work, in the order that unblocks the most
 
-In roughly the order that unblocks the most:
-
-1. **`HRC-CH-010`, `HRC-SYNC-008`** — tamper halt proven over a real
-   repository, and re-encryption of queued messages after a roster epoch
-   change. The sync core already halts; what is missing is the end-to-end
-   proof and the re-encrypt path.
-2. **`HRC-CTX-005`, `HRC-CTX-007`, `HRC-SKILL-006`, `HRC-SKILL-008`** —
+1. **`HRC-CTX-005`, `HRC-CTX-007`, `HRC-SKILL-006`, `HRC-SKILL-008`** —
    context packages reachable from the CLI, received context quarantined like
    a message body, and git-ignored paths excluded. `excluded_path_reason`
-   handles the path-decidable rules; the git-ignored check needs the
-   repository.
+   already handles the path-decidable rules; the git-ignored check needs the
+   repository. This is the largest remaining cluster and closes four rows.
+2. **`HRC-SYNC-008`** — re-encrypt queued messages after a roster epoch
+   change. The outbox stores `roster_epoch` and a payload hash that is stable
+   across re-encryption, so the data needed is already there.
 3. **`HRC-MSG-005`** — expiry display and sweeping. Opening already refuses an
-   expired message.
+   expired message; what is missing is surfacing and reaping.
 4. **`HRC-TR-001`, `HRC-TR-003`, `HRC-TR-006`** — the out-of-process JSON-RPC
    adapter binding, push-capable adapters, and the GitHub optimization. The
    conformance suite exists and a deliberately broken adapter is already
-   proven to fail it, so new adapters have a target to hit.
-5. **`HRC-TECH-002`** — the Herdr plugin entry points, still the documented
-   not-implemented code.
+   proven to fail it, so a new adapter has a target to hit.
+5. **`HRC-TECH-002`** — the Herdr plugin entry points, still reporting the
+   documented not-implemented code.
 6. **`HRC-TECH-011`, `HRC-TECH-012`** — `cargo-dist` release artifacts and a
    clean-host install fixture. `OQ-012` asks whether to pin an exact toolchain
-   first; answer it in that PR.
+   first; answer it in that pull request.
 7. **`HRC-CH-004`** — public repositories after typed confirmation. `OQ-008`
-   asks for the warning text and is unanswered; it needs a human, so either
-   ask or implement the mechanism and leave the wording marked.
-8. **`HRC-GOV-004`** — the evidence pass: every row claiming `Verified` must
-   cite something stable. Do this last, when the rows have stopped moving.
+   asks for the warning wording and is unanswered. It needs a human: implement
+   the mechanism and leave the wording marked, or ask.
+8. **`HRC-GOV-004`** — the evidence pass. Every row claiming `Verified` must
+   cite something stable. Do this last, once the rows have stopped moving.
 
-`HRC-TECH-001/003/005/010` are umbrella rows that close when the work under
-them does. Do not mark them early.
+`HRC-TECH-001`, `HRC-TECH-003`, `HRC-TECH-005`, and `HRC-TECH-010` are
+umbrella rows that close when the work beneath them does. Do not mark them
+early.
 
----
+### Two things a human has to decide
+
+- `AC-ADAPTER-SPEC` carries a product-owner approval gate, which is most of
+  why M0 sits at 55% despite the code being there.
+- The PRD's product and technical owners are `TBD`.
+
+Neither should be marked done by an agent. Raise them rather than routing
+around them.
 
 ## 5. What this codebase expects of a change
 
