@@ -10,7 +10,11 @@ permissions:
 jobs:
   validate-prd:
     name: PRD traceability
-    runs-on: ubuntu-latest
+    # Self-hosted, like the rest of CI. The validator is PowerShell, which is
+    # native here, and it only ever reads: it checks out the trusted base
+    # revision and fetches the pull request's objects without building or
+    # running any of them (decision DEC-014).
+    runs-on: [self-hosted, windows]
 
     steps:
       - name: Check out trusted base revision
