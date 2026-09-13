@@ -7,5 +7,14 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[dependencies]
+hrc-protocol = { workspace = true }
+hrc-transport = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+hrc-transport = { workspace = true, features = [] }
+tempfile = { workspace = true }
+
 [lints]
 workspace = true

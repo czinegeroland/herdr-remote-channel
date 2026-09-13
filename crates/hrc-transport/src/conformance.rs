@@ -64,8 +64,7 @@ fn require(
 /// Builds a control object with distinct bytes.
 fn control_object(name: &str) -> PublishObject {
     PublishObject {
-        name: name.to_owned(),
-        path: format!("control/log/{name}.json"),
+        name: format!("control/log/{name}.json"),
         class: ObjectClass::Control,
         bytes: format!("control-{name}").into_bytes(),
     }
@@ -74,8 +73,7 @@ fn control_object(name: &str) -> PublishObject {
 /// Builds a message object with distinct bytes.
 fn message_object(name: &str) -> PublishObject {
     PublishObject {
-        name: name.to_owned(),
-        path: format!("messages/2026/09/{name}.age"),
+        name: format!("messages/2026/09/{name}.age"),
         class: ObjectClass::Message,
         bytes: format!("ciphertext-{name}").into_bytes(),
     }
@@ -536,8 +534,7 @@ fn objects_round_trip_byte_exactly<T: Transport>(transport: &mut T) -> Result<()
     // sequences that are not valid UTF-8.
     let awkward = vec![0u8, 0xff, 0xfe, b'\n', b'\r', 0x80, 0x00, b'{', 0xc3];
     let object = PublishObject {
-        name: "blob-1".into(),
-        path: "blobs/blob-1.age".into(),
+        name: "blobs/blob-1.age".into(),
         class: ObjectClass::Blob,
         bytes: awkward.clone(),
     };
@@ -616,7 +613,7 @@ fn object_hashes_are_verified<T: Transport>(transport: &mut T) -> Result<()> {
         })?;
 
     let wrong = hrc_protocol::canonical::sha256_hex(b"not the object");
-    match transport.get_object("msg-1", &wrong) {
+    match transport.get_object("messages/2026/09/msg-1.age", &wrong) {
         Err(TransportError::ObjectHashMismatch { .. }) => {}
         other => {
             return fail(

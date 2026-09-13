@@ -99,7 +99,6 @@ impl MemoryTransport {
             .map(|object| {
                 let record = ObjectRecord {
                     name: object.name.clone(),
-                    path: object.path,
                     class: object.class,
                     size: object.bytes.len() as u64,
                     sha256: hrc_protocol::canonical::sha256_hex(&object.bytes),
