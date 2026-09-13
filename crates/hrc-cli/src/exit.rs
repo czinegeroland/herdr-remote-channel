@@ -4,9 +4,12 @@
 //! non-interactive command. Callers, including the Herdr plugin and the
 //! agent skill, branch on these numbers, so an assigned value never changes
 //! meaning. New conditions take a new number.
-//!
-//! `0` is success and `1` is a generic runtime failure. Neither has a
-//! constant yet because no command path produces them; they are reserved.
+
+/// The command completed successfully.
+pub const SUCCESS: i32 = 0;
+
+/// The command failed at runtime.
+pub const FAILURE: i32 = 1;
 
 /// The command line was invalid, or an option is not supported for this
 /// command. Clap also uses this code for its own parse errors.

@@ -910,9 +910,14 @@ version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "clap",
+ "hrc-crypto",
  "hrc-protocol",
+ "hrc-storage",
  "predicates",
+ "secrecy",
  "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
