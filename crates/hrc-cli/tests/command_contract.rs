@@ -443,6 +443,152 @@ fn init_creates_separate_principal_and_device_identities() {
     assert_ne!(principal, device);
 }
 
+/// A home with an initialized installation and one created channel.
+fn channel_fixture() -> (tempfile::TempDir, tempfile::TempDir) {
+    let home = tempfile::tempdir().expect("temporary home");
+    let remote = tempfile::tempdir().expect("temporary remote");
+
+    std::process::Command::new("git")
+        .args(["init", "--bare", "--initial-branch=main"])
+        .arg(remote.path())
+        .output()
+        .expect("git should create a bare repository");
+
+    hrc_in(home.path()).arg("init").assert().success();
+    hrc_in(home.path())
+        .args(["create", "--repo"])
+        .arg(remote.path())
+        .assert()
+        .success();
+
+    (home, remote)
+}
+
+#[test]
+fn an_invite_is_published_and_its_code_is_returned_once() {
+    let (home, _remote) = channel_fixture();
+
+    let output = hrc_in(home.path())
+        .args(["invite", "create", "--github-user", "bob"])
+        .output()
+        .expect("command should run");
+
+    assert!(
+        output.status.success(),
+        "invite create failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let printed = String::from_utf8_lossy(&output.stdout);
+    assert!(printed.contains("hrc1-"), "no invite code was returned");
+
+    // Listing it afterwards shows the invite but never the secret.
+    let listed = hrc_in(home.path())
+        .args(["invite", "list", "--json"])
+        .output()
+        .expect("command should run");
+    let value: Value = serde_json::from_slice(&listed.stdout).expect("stdout should be JSON");
+
+    let invites = value["invites"].as_array().expect("an invites array");
+    assert_eq!(invites.len(), 1);
+    assert_eq!(invites[0]["intendedFor"], "bob");
+    assert_eq!(invites[0]["state"], "open");
+
+    let listing = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        !listing.contains("hrc1-"),
+        "the invite secret appeared in machine-readable output: {listing}"
+    );
+}
+
+#[test]
+fn invite_create_has_no_machine_readable_mode_at_all() {
+    // PRD requirement HRC-SKILL-005. The whole output of this command is a
+    // secret, and `--json` is the form most likely to end up in a
+    // transcript, a log, or an agent's context.
+    let (home, _remote) = channel_fixture();
+
+    let output = hrc_in(home.path())
+        .args(["invite", "create", "--github-user", "bob", "--json"])
+        .output()
+        .expect("command should run");
+
+    assert_eq!(output.status.code(), Some(USAGE));
+    assert!(
+        output.stdout.is_empty(),
+        "a refused command wrote to standard output"
+    );
+}
+
+#[test]
+fn a_revoked_invite_is_recorded_as_revoked() {
+    let (home, _remote) = channel_fixture();
+
+    hrc_in(home.path())
+        .args(["invite", "create", "--github-user", "bob"])
+        .assert()
+        .success();
+
+    let listed = hrc_in(home.path())
+        .args(["invite", "list", "--json"])
+        .output()
+        .expect("command should run");
+    let value: Value = serde_json::from_slice(&listed.stdout).expect("stdout should be JSON");
+    let invite_id = value["invites"][0]["inviteId"]
+        .as_str()
+        .expect("an invite id")
+        .to_owned();
+
+    hrc_in(home.path())
+        .args(["invite", "revoke", &invite_id, "--json"])
+        .assert()
+        .success();
+
+    let listed = hrc_in(home.path())
+        .args(["invite", "list", "--json"])
+        .output()
+        .expect("command should run");
+    let value: Value = serde_json::from_slice(&listed.stdout).expect("stdout should be JSON");
+    assert_eq!(value["invites"][0]["state"], "revoked");
+}
+
+#[test]
+fn two_invites_chain_onto_one_control_log() {
+    // Each invite is a control entry, and the second has to follow the
+    // first: a second entry built against a stale head would be rejected on
+    // replay by everyone, including this installation.
+    let (home, _remote) = channel_fixture();
+
+    for user in ["bob", "carol"] {
+        hrc_in(home.path())
+            .args(["invite", "create", "--github-user", user])
+            .assert()
+            .success();
+    }
+
+    let listed = hrc_in(home.path())
+        .args(["invite", "list", "--json"])
+        .output()
+        .expect("command should run");
+    let value: Value = serde_json::from_slice(&listed.stdout).expect("stdout should be JSON");
+
+    assert_eq!(value["invites"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn inviting_without_a_channel_says_so() {
+    let home = tempfile::tempdir().expect("temporary home");
+    hrc_in(home.path()).arg("init").assert().success();
+
+    let output = hrc_in(home.path())
+        .args(["invite", "list", "--json"])
+        .output()
+        .expect("command should run");
+    let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+
+    assert_eq!(value["code"], "no_channel");
+}
+
 #[test]
 fn herdr_entry_points_are_dispatched_by_the_same_binary() {
     for args in [

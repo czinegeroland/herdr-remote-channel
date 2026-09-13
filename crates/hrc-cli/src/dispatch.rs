@@ -46,6 +46,14 @@ pub fn requires_trusted_human(command: &Command) -> bool {
 /// PRD section 22.5: `hrc review` and `hrc approve` drive the trusted human
 /// interface and must not print pending plaintext to standard output.
 pub fn supports_json(command: &Command) -> bool {
+    if let Command::Invite(invite) = command {
+        // The whole output of `invite create` is a secret. Machine-readable
+        // output is the form most likely to end up in a transcript, a log,
+        // or an agent's context, so the command has no JSON mode at all
+        // rather than a filtered one (decision DEC-047).
+        return !matches!(invite.action, InviteAction::Create { .. });
+    }
+
     !matches!(command, Command::Review(_) | Command::Approve(_))
 }
 
