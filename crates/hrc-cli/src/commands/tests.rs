@@ -13,6 +13,7 @@ use super::*;
 use std::path::Path;
 use std::process::Command as ProcessCommand;
 
+use hrc_core::ContextItem;
 use hrc_transport::{ObjectClass, PublicationClass, PublishObject, PublishRequest, Transport};
 use hrc_transport_git::GitTransport;
 

@@ -1204,7 +1204,7 @@ fn context_draft_cannot_authorize_a_noninteractive_preview_or_send() {
             Client::connect_with_retry(&endpoint, 40, std::time::Duration::from_millis(25))
                 .await
                 .expect("trusted endpoint should come up");
-        let preview = client
+        let preview: Value = client
             .call(&TrustedRequest::PreviewContext {
                 recipient: principal.clone(),
                 package_id: "ctx-review".into(),
