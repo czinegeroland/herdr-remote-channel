@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-13T10:02:00+02:00 |
+| Last updated | 2026-09-13T10:44:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -543,13 +543,13 @@ The Herdr plugin must expose:
 
 | ID | Requirement | Priority | Status | Evidence |
 |---|---|---:|---|---|
-| HRC-CTX-001 | Build explicit context packages. | Should | Approved | Pending |
-| HRC-CTX-002 | Preview exact outgoing context and byte count. | Must | Approved | Pending |
-| HRC-CTX-003 | Block common secrets by default. | Must | Approved | Pending |
-| HRC-CTX-004 | Support note, excerpt, patch, ref, output, and link items. | Should | Approved | Pending |
+| HRC-CTX-001 | Build explicit context packages. | Should | Implemented | `crates/hrc-core/src/context.rs` |
+| HRC-CTX-002 | Preview exact outgoing context and byte count. | Must | Implemented | `crates/hrc-core/src/context.rs` `preview` reports the real serialized size, not the sum of item texts |
+| HRC-CTX-003 | Block common secrets by default. | Must | Implemented | `crates/hrc-core/src/context.rs` `scan_for_secrets`; findings block the send and never quote the match |
+| HRC-CTX-004 | Support note, excerpt, patch, ref, output, and link items. | Should | Implemented | `crates/hrc-core/src/context.rs` `ContextItem` |
 | HRC-CTX-005 | Place received context into quarantine. | Must | Approved | Pending |
-| HRC-CTX-006 | Verify hashes before displaying or extracting content. | Must | Approved | Pending |
-| HRC-CTX-007 | Exclude environment variables, full scrollback, `.env` files, and ignored paths by default. | Must | Approved | Pending |
+| HRC-CTX-006 | Verify hashes before displaying or extracting content. | Must | Implemented | `crates/hrc-core/src/context.rs` `verify_digest` |
+| HRC-CTX-007 | Exclude environment variables, full scrollback, `.env` files, and ignored paths by default. | Must | In progress | `crates/hrc-core/src/context.rs` `excluded_path_reason` covers the path-decidable rules; git-ignored status needs the repository and is checked by the caller |
 
 ### 12.5 Synchronization
 
@@ -1570,6 +1570,21 @@ boundary.
 - Large binaries
 - Whole repositories
 
+Detected secrets and excluded paths BLOCK the send. They are never silently
+stripped: a sender who believes they transmitted something they did not is
+worse off than one who is told to fix it, and a package quietly reduced to
+something else is not the package that was approved.
+
+A finding MUST NOT quote the matched value. An error that echoes a secret
+puts it into logs and terminal scrollback, which is where it was not supposed
+to go.
+
+Scanner rules are prefix-anchored and conservative rather than entropy-based.
+An entropy scanner flags hashes and base64 payloads constantly, and a
+blocking check that cries wolf gets disabled, at which point it protects
+nothing. See decision DEC-037; open question OQ-006 remains open on whether
+to adopt a fuller scanner later.
+
 ### 20.3 Limits
 
 The ciphertext and plaintext hard maxima are enforced in
@@ -1987,7 +2002,7 @@ npx skills add <owner>/herdr-remote-channel `
 | HRC-SEC-005 | Removed devices cannot receive future-epoch messages. | Implemented | `crates/hrc-core/src/message.rs` addresses only active devices, proven end to end in `crates/hrc-core/src/message/tests.rs` |
 | HRC-SEC-006 | Received attachments are size checked before decryption. | Approved | Pending |
 | HRC-SEC-007 | Decompressed data has strict size limits. | Approved | Pending |
-| HRC-SEC-008 | Outgoing context is previewed and secret scanned. | Approved | Pending |
+| HRC-SEC-008 | Outgoing context is previewed and secret scanned. | Implemented | `crates/hrc-core/src/context.rs`: `ready_to_send` refuses a package with findings rather than stripping them |
 | HRC-SEC-009 | Incoming content is quarantined and treated as untrusted. | Implemented | `crates/hrc-core/src/message.rs` returns `QuarantinedMessage`; `crates/hrc-core/src/gate.rs` frames approved content as untrusted before delivery |
 | HRC-SEC-010 | Security-sensitive commands require trusted human authorization and reject agent-safe/non-interactive invocation. | Approved | Pending |
 | HRC-SEC-011 | Audit logs record approvals and local actions. | Approved | Pending |
@@ -2320,7 +2335,7 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 | HRC-MSG-001 through HRC-MSG-007, HRC-MSG-010 | M2 | `AC-MESSAGING`: two devices exchange offline notes and threaded questions/answers with receipts, expiry, deduplication, ordering, and local audit evidence. | Partial: `crates/hrc-core/src/message/tests.rs` covers seal and open between two devices, broadcast addressing, and expiry. Remaining: receipts, threading over a published channel, deduplication, and ordering. |
 | HRC-MSG-008 and HRC-MSG-009 | M4 | `AC-DELEGATION-MESSAGES`: task, accept/decline, progress, and result states are exchanged without local execution. | Pending |
 | HRC-GATE-001 through HRC-GATE-008 | M3 | `AC-PROMPT-GATE`: pending bodies are unavailable through agent-safe interfaces; trusted UI issues a one-use digest-bound authorization; reuse, modification, and wrong-target delivery fail. | Partial: `crates/hrc-core/src/gate/tests.rs` proves reuse, wrong-message use, ciphertext substitution under an approval, expiry, and edited-content mismatch all fail, and that hostile endpoint and kind strings never reach the agent view. Remaining: the trusted UI and the daemon RPC boundary. |
-| HRC-CTX-001 through HRC-CTX-007 | M4 | `AC-CONTEXT`: supported context items round-trip with previews and verified hashes; excluded paths, detected secrets, oversized objects, and malformed archives are blocked. | Pending |
+| HRC-CTX-001 through HRC-CTX-007 | M4 | `AC-CONTEXT`: supported context items round-trip with previews and verified hashes; excluded paths, detected secrets, oversized objects, and malformed archives are blocked. | Partial: `crates/hrc-core/src/context/tests.rs` covers all six item kinds, digest verification, seven token shapes, credential assignments, twelve excluded paths, and false-positive resistance on placeholders and ordinary code. Remaining: git-ignored path checking, attachment size limits, and archive handling. |
 | HRC-SYNC-001 through HRC-SYNC-010 | M2 | `AC-GIT-SYNC`: offline queues recover; concurrent peers publish without manual merges; lost responses deduplicate; non-descendant history and changed objects halt processing. | Partial: `crates/hrc-core/src/sync/tests.rs` covers cursor resumption, conflict retry, security-conflict halting, history-rewrite halting, sticky halts, and adapter-reported anomalies; `crates/hrc-transport-git/tests/git_adapter.rs` covers concurrent peers publishing without manual merges. Remaining: the resident daemon and deduplication on replay. |
 | HRC-SYNC-011 | M2 | `AC-LOCAL-SEQUENCE`: concurrent local callers and process crashes cannot allocate duplicate device sequences or ambiguous predecessor chain IDs. | `crates/hrc-storage/src/tests.rs`: four threads on separate connections allocate 100 sequences with no duplicate, gap, or repeated predecessor link; a reservation survives reopening; an abandoned reservation is burned rather than reused. Verified on Linux, macOS, and Windows CI. |
 | HRC-TR-001 through HRC-TR-004 | M0 | `AC-ADAPTER-SPEC`: protocol schema, capability declaration, error model, and opaque-object boundary pass specification review. | Partial: `crates/hrc-transport/src/lib.rs` implements the capability declaration, error model, and opaque-object boundary as executable types. Remaining: specification review, and the JSON-RPC binding for out-of-process adapters. |
@@ -2329,7 +2344,7 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 | HRC-SKILL-001 through HRC-SKILL-007 | M3 | `AC-SKILL`: an agent guides setup and drafts communication while tests prove it cannot retrieve private keys/invite secrets, approve joins, or bypass the prompt gate. | Pending |
 | HRC-SKILL-008 | M4 | `AC-SKILL-CONTEXT`: an agent can draft supported context packages while preview and send remain human-controlled. | Pending |
 | HRC-SEC-001 through HRC-SEC-005, HRC-SEC-013, HRC-SEC-015, HRC-SEC-016 | M1 | `AC-KEYS-AND-ROSTER`: key isolation, signed recipient intent, signature validation, control-chain validation, control-only publication ordering, revocation, and stale-epoch rejection pass adversarial tests. | Partial: `crates/hrc-core/src/message/tests.rs` and `crates/hrc-core/src/roster/tests.rs` cover forged signatures, unknown signing devices, foreign channels, stale epochs, a revoked device's message reintroduced after revocation, and a recipient set that disagrees with the roster; `crates/hrc-crypto/src/store.rs` proves the stored key file contains no plaintext secret and that a wrong passphrase, a tampered file, and a corrupt document all fail closed. Remaining: the OS keychain backend. |
-| HRC-SEC-006 through HRC-SEC-008 | M4 | `AC-CONTENT-SECURITY`: ciphertext/decompression limits, secret scanning, and preview reject malicious fixtures. | Pending |
+| HRC-SEC-006 through HRC-SEC-008 | M4 | `AC-CONTENT-SECURITY`: ciphertext/decompression limits, secret scanning, and preview reject malicious fixtures. | Partial: `crates/hrc-crypto/src/encryption.rs` enforces ciphertext and plaintext limits before decryption, and `crates/hrc-core/src/context/tests.rs` covers secret scanning and preview. Remaining: decompression limits and archive fixtures. |
 | HRC-SEC-009 | M3 | `AC-QUARANTINE`: every inbound body is quarantined and framed as untrusted before any approved disclosure. | `crates/hrc-core/src/message.rs` and `crates/hrc-core/src/gate/tests.rs`: opening yields quarantined content, and delivery is impossible without a consumed authorization that applies the provenance banner. |
 | HRC-SEC-010, HRC-SEC-014 | M3 | `AC-HUMAN-AUTH`: agent-safe and non-interactive callers cannot read pending bodies, authorize actions, or reuse an authorization. | Pending |
 | HRC-SEC-011 and HRC-SEC-012 | M2 | `AC-AUDIT-AND-HISTORY`: local actions are audited and observed rewrite and substitution scenarios fail closed. | Partial: `crates/hrc-core/src/sync/tests.rs` proves rewrite and substitution halt the channel and are audited. Remaining: auditing approval decisions, which arrive with the prompt gate. |
@@ -2359,7 +2374,7 @@ Every implementation PR must update this table.
 | M1 Secure foundation | 95% | Adds enrollment cryptography: invites, non-transferable invite proofs, and safety-phrase derivation against the pinned EFF wordlist | Enrollment cryptography | Wire the join request and approval flow, then integrate an OS keychain backend |
 | M2 Git messaging | 70% | Adds the synchronization engine: cursor-resuming fetch, conflict-retrying publish, backoff policy, and fail-closed halting on observed tampering | Synchronization engine | Wire the resident daemon and the CLI, then receipts, threading, and deduplication |
 | M3 Herdr integration | 25% | Prompt gate core: agent-safe view, one-use digest-bound authorizations, and provenance framing | Prompt gate | Build the trusted approval interface and the daemon RPC split, then the Herdr inbox UI |
-| M4 Context/delegation | 0% | Not started | N/A | Finalize context package schema |
+| M4 Context/delegation | 30% | Context packages with previews, digest verification, default path exclusions, and blocking secret scanning | Context packages | Add git-ignored path checking and attachment limits, then structured delegation messages |
 | M5 Provider ecosystem | 0% | Not started | N/A | Deferred until core protocol stabilizes |
 
 ### Requirement completion summary
@@ -2445,6 +2460,7 @@ recorded either directly in this PRD or in a stable linked artifact.
 | DEC-016 | RFC 8785 canonical JSON uses a pinned Rust implementation, initially `serde_jcs`, guarded by protocol vectors. | Accepted | Avoids custom canonicalization while making signed bytes interoperable. |
 | DEC-017 | Build and test run in a separate `pull_request` workflow rather than being added to the `pull_request_target` traceability workflow. | Accepted | Compiling and running pull-request code under `pull_request_target` would hand a write-capable, secret-bearing context to untrusted code; the two triggers stay separated. |
 | DEC-018 | The CLI publishes a fixed numeric exit-code contract: 0 success, 1 runtime failure, 2 usage, 3 unimplemented, 4 authorization required. | Accepted | PRD section 11.1 requires documented exit codes, and the Herdr plugin and skill must branch on stable numbers rather than parsing prose. |
+| DEC-037 | Context secret scanning blocks the send, uses conservative prefix-anchored rules, and never quotes a match. | Accepted | Stripping would send something the user did not approve; entropy-based rules produce enough false positives to get the check disabled; and quoting the match copies the secret into logs. Narrows OQ-006 without closing it. |
 | DEC-036 | The agent-safe view is a distinct type with no field capable of carrying a body, and it has no method that yields content. | Accepted | Enforcing the section 19.1 boundary by convention means one future caller can breach it. Enforcing it in the type system means there is nothing to reach through, and a reviewer can confirm the property by reading one struct. |
 | DEC-035 | The safety-phrase wordlist is the EFF Long Wordlist of 2016, vendored in-tree under CC BY 3.0 US with attribution, and identified as `eff-large-2016`. | Accepted | Deriving the phrase must not require a network fetch, and two peers must be able to prove they used the same vocabulary. Redistribution carries an attribution obligation, which the vendored file header satisfies. |
 | DEC-033 | `hrc doctor` reports every check rather than stopping at the first failure. | Accepted | Someone diagnosing a broken installation needs the whole picture. Stopping at the first symptom turns one diagnosis into several runs. |

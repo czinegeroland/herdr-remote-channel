@@ -200,6 +200,27 @@ pub enum CoreError {
     #[error("the content to deliver does not match the edit that was approved")]
     EditedContentMismatch,
 
+    /// A context package did not match its announced digest.
+    #[error("the context package does not match its announced digest")]
+    ContextDigestMismatch,
+
+    /// A context package contains material that looks like a secret.
+    ///
+    /// The send is blocked rather than the material stripped: a package
+    /// silently reduced to something else is not what the sender approved.
+    #[error("the context package contains {count} suspected secret(s); remove them and try again")]
+    ContextContainsSecrets {
+        /// How many findings the scan produced.
+        count: usize,
+    },
+
+    /// A context package includes a path excluded by default.
+    #[error("`{path}` is excluded from context packages by default")]
+    ContextContainsExcludedPath {
+        /// The refused path.
+        path: String,
+    },
+
     /// A protocol object was malformed.
     #[error(transparent)]
     Protocol(#[from] hrc_protocol::ProtocolError),
