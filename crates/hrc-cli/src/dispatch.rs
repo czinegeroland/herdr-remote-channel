@@ -266,3 +266,96 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+    use hrc_core::rpc::TrustedRequest;
+
+    /// Parses a command line into a command.
+    fn command(args: &[&str]) -> Command {
+        use clap::Parser as _;
+        crate::cli::Cli::try_parse_from(args).unwrap().command
+    }
+
+    #[test]
+    fn every_daemon_trusted_method_has_a_refusing_cli_command() {
+        // The daemon and the CLI each enforce PRD section 22.7, and two
+        // lists of the same rule drift. This is the join between them: an
+        // operation the daemon reserves for a human must also be one the CLI
+        // refuses to complete non-interactively.
+        //
+        // The mapping is not one to one — `preview_pending` and `approve`
+        // are both reached through `hrc review` — so it is written out
+        // rather than derived, and a new trusted method fails to compile
+        // here until someone decides which command reaches it.
+        let mapping: &[(&str, &[&str])] = &[
+            ("preview_pending", &["hrc", "review", "01ARZ3"]),
+            ("approve", &["hrc", "approve", "01ARZ3"]),
+            ("approve_join", &["hrc", "join", "approve", "join-1"]),
+            ("reject_join", &["hrc", "join", "reject", "join-1"]),
+            ("remove_member", &["hrc", "member", "remove", "alice"]),
+            ("revoke_device", &["hrc", "device", "revoke", "device-1"]),
+            (
+                "make_repository_public",
+                &[
+                    "hrc",
+                    "create",
+                    "--repo",
+                    "owner/name",
+                    "--visibility",
+                    "public",
+                ],
+            ),
+            ("rollover", &["hrc", "rollover"]),
+        ];
+
+        for (method, args) in mapping {
+            assert!(
+                requires_trusted_human(&command(args)),
+                "the daemon reserves `{method}` for a human but the CLI would run {args:?}"
+            );
+        }
+
+        // Everything the daemon reserves is either mapped above or listed
+        // here as having no CLI surface yet.
+        let daemon_only = ["grant_capability"];
+        let every_method = [
+            TrustedRequest::PreviewPending {
+                message_id: String::new(),
+            },
+            TrustedRequest::Approve {
+                message_id: String::new(),
+                decision: hrc_core::rpc::WireDecision::KeepInInbox,
+                expires_at: String::new(),
+            },
+            TrustedRequest::ApproveJoin {
+                request_id: String::new(),
+            },
+            TrustedRequest::RejectJoin {
+                request_id: String::new(),
+            },
+            TrustedRequest::RemoveMember {
+                principal_id: String::new(),
+            },
+            TrustedRequest::RevokeDevice {
+                device_id: String::new(),
+            },
+            TrustedRequest::GrantCapability {
+                principal_id: String::new(),
+                capability: String::new(),
+            },
+            TrustedRequest::MakeRepositoryPublic,
+            TrustedRequest::Rollover,
+        ];
+
+        for request in every_method {
+            let method = request.method();
+            assert!(
+                mapping.iter().any(|(mapped, _)| *mapped == method)
+                    || daemon_only.contains(&method),
+                "`{method}` is reserved by the daemon but reaches no CLI command"
+            );
+        }
+    }
+}
