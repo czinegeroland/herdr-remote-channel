@@ -727,6 +727,7 @@ impl Arrival {
             expires_at: None,
             body: b"quarantined body",
             ciphertext: b"ciphertext",
+            context: None,
         }
     }
 }
@@ -754,6 +755,78 @@ fn messages_are_accepted_in_sequence_and_numbered_by_arrival() {
         .map(|entry| entry.message_id.as_str())
         .collect();
     assert_eq!(ids, vec!["msg-1", "msg-2", "msg-3"]);
+}
+
+#[test]
+fn received_context_is_stored_quarantined_with_its_message() {
+    let mut database = database();
+    let arrival = arrival(1);
+    let manifest = br#"{"id":"ctx-1","items":[],"version":1}"#;
+    let digest = "a".repeat(64);
+    let message = InboundMessage {
+        context: Some(InboundContext {
+            package_id: "ctx-1",
+            digest: &digest,
+            manifest,
+        }),
+        ..arrival.message()
+    };
+
+    database.record_inbound(&message, NOW).unwrap();
+    let stored = database
+        .inbound_context(&arrival.message_id)
+        .unwrap()
+        .expect("received context should be quarantined");
+    assert_eq!(stored.package_id, "ctx-1");
+    assert_eq!(stored.manifest, manifest);
+}
+
+#[test]
+fn received_context_uses_its_inbox_rows_single_lifecycle() {
+    let mut database = database();
+    let arrival = arrival(1);
+    let digest = "b".repeat(64);
+    let message = InboundMessage {
+        context: Some(InboundContext {
+            package_id: "ctx-1",
+            digest: &digest,
+            manifest: br#"{"id":"ctx-1","items":[],"version":1}"#,
+        }),
+        ..arrival.message()
+    };
+    database.record_inbound(&message, NOW).unwrap();
+    assert!(
+        database
+            .inbound_context(&arrival.message_id)
+            .unwrap()
+            .is_some()
+    );
+
+    // There is no context disposition to drift from the prompt gate. The
+    // atomic approval decision moves the inbox row, and the trusted-only
+    // context query follows without a second transition.
+    database
+        .commit_decision(&DecisionRecord {
+            channel_id: CHANNEL.into(),
+            message_id: arrival.message_id.clone(),
+            action: "deliver_to_agent".into(),
+            original_content: "quarantined body".into(),
+            edited_content: None,
+            content_hash: "hash".into(),
+            edited_hash: None,
+            agent: Some("reviewer".into()),
+            decided_by: "human".into(),
+            occurred_at: NOW.into(),
+        })
+        .unwrap();
+    assert!(
+        database
+            .inbound_context(&arrival.message_id)
+            .unwrap()
+            .is_none()
+    );
+    let entry = database.inbox_entries(CHANNEL).unwrap().pop().unwrap();
+    assert_eq!(entry.disposition, "approved");
 }
 
 #[test]
@@ -802,6 +875,21 @@ fn an_out_of_order_message_waits_for_its_predecessor() {
     assert!(
         database.inbox_entries(CHANNEL).unwrap().is_empty(),
         "a held message must not appear in the inbox yet"
+    );
+    assert!(
+        database.pending_inbound().unwrap().is_empty(),
+        "a held message must not be exposed to the trusted review surface"
+    );
+
+    database.record_inbound(&arrival(1).message(), NOW).unwrap();
+    let pending = database.pending_inbound().unwrap();
+    assert_eq!(
+        pending
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["msg-1", "msg-2"],
+        "the held message becomes reviewable only after its predecessor releases it"
     );
 }
 
@@ -995,6 +1083,7 @@ fn two_sender_devices_have_independent_chains() {
         expires_at: None,
         body: b"body",
         ciphertext: b"ciphertext",
+        context: None,
     };
 
     let outcome = database.record_inbound(&other, NOW).unwrap();

@@ -148,12 +148,32 @@ cannot see your terminal, your repository, or your conversation.
 Context is explicit. Nothing is attached implicitly, and there is no way to
 include a whole directory.
 
-Before anything is sent, preview it: the preview reports the exact bytes and
-every item. If the scan finds something that looks like a secret, or an
-excluded path such as `.env` or a key file, **the send is blocked**. Do not
-try to defeat that by pasting the content into a note instead — the scan
-covers notes too, and working around it would be doing the thing the check
-exists to prevent.
+You may draft a manifest containing only the items the user chose, then ask
+the user to use the trusted HRC interface to review and send it:
+
+```bash
+hrc context draft context.json --repository .
+```
+
+You may run `hrc context draft`; **do not run `hrc context preview`.
+Do not run `hrc context send` yourself.** Both commands refuse ordinary and agent-safe
+callers, including callers that copy a draft digest. Preview and send are
+human-controlled: the trusted human interface previews the source-derived
+package and issues a short-lived, one-use authorization bound to its digest,
+recipient, channel, and send action. Do not provide, guess, or replay any confirmation or authorization.
+
+Every file excerpt needs a repository path. HRC checks Git's ignored-path
+rules as well as `.env`, keys, credentials, and other excluded paths. If the
+scan finds something that looks like a secret, or an excluded or ignored
+path, **the send is blocked**. Do not try to defeat that by pasting the
+content into a note instead — the scan covers notes too, and working around
+it would be doing the thing the check exists to prevent.
+
+An excerpt's manifest text is not trusted. HRC records the canonical absolute
+Git worktree root and derives each excerpt from its selected file, commit, and
+line range before hashing it. A changed source or newly ignored path blocks a
+later trusted review/send. Never include environment dumps, full terminal
+scrollback, or agent prompt transcripts as output items.
 
 If the block is a false positive, say so to the user and let them decide.
 

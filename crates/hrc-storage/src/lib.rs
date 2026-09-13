@@ -211,6 +211,32 @@ pub struct InboundMessage<'a> {
     pub body: &'a [u8],
     /// The ciphertext, kept while a message is held so it can be replayed.
     pub ciphertext: &'a [u8],
+    /// A verified context package, if the message carried one.
+    pub context: Option<InboundContext<'a>>,
+}
+
+/// A context package received with an inbound message.
+#[derive(Debug, Clone)]
+pub struct InboundContext<'a> {
+    /// Sender-selected package identifier.
+    pub package_id: &'a str,
+    /// Verified SHA-256 digest of the manifest.
+    pub digest: &'a str,
+    /// Canonical context manifest bytes.
+    pub manifest: &'a [u8],
+}
+
+/// A locally drafted package ready to be checked and sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextDraft {
+    /// Sender-selected package identifier.
+    pub package_id: String,
+    /// Repository used to evaluate ignore rules, when excerpts are present.
+    pub repository_root: Option<String>,
+    /// SHA-256 digest of the canonical manifest.
+    pub digest: String,
+    /// Canonical context manifest bytes.
+    pub manifest: Vec<u8>,
 }
 
 /// One entry as the inbox reports it.
@@ -232,6 +258,32 @@ pub struct InboxEntry {
     pub arrival_sequence: u64,
     /// Current disposition.
     pub disposition: String,
+}
+
+/// The trusted prompt-gate view of a pending inbox row.
+///
+/// This is deliberately not used by agent-safe queries. It contains exactly
+/// the verified metadata and quarantined body needed to reconstruct the
+/// gate's authorization binding after a daemon restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingInbound {
+    /// Channel identity.
+    pub channel_id: String,
+    /// Message identity.
+    pub message_id: String,
+    /// Verified sender principal and device.
+    pub sender_principal: String,
+    pub sender_device: String,
+    /// Signed-envelope metadata used by the prompt gate.
+    pub kind: String,
+    pub roster_epoch: u64,
+    pub endpoint: Option<String>,
+    pub created_at: String,
+    pub expires_at: Option<String>,
+    /// Ciphertext digest to which approval binds.
+    pub ciphertext_sha256: String,
+    /// Canonical pending content.
+    pub body: String,
 }
 
 /// One receipt, as recorded locally.
@@ -652,6 +704,7 @@ impl Database {
             // produce the predecessor it invented.
             (None, Some(_)) => {
                 let outcome = hold(&transaction, message, now)?;
+                store_inbound_context(&transaction, message)?;
                 transaction.commit()?;
                 return Ok(outcome);
             }
@@ -662,6 +715,7 @@ impl Database {
             // A predecessor we have not seen. Same reasoning as above.
             (Some(_), Some(_)) => {
                 let outcome = hold(&transaction, message, now)?;
+                store_inbound_context(&transaction, message)?;
                 transaction.commit()?;
                 return Ok(outcome);
             }
@@ -678,6 +732,7 @@ impl Database {
         }
 
         let arrival_sequence = insert_accepted(&transaction, message, now)?;
+        store_inbound_context(&transaction, message)?;
 
         // 5: anything that was waiting on this link can go in now, and so
         // can anything waiting on *that*, so the release walks the chain.
@@ -711,6 +766,7 @@ impl Database {
                 expires_at: next.expires_at.as_deref(),
                 body: &body,
                 ciphertext: &[],
+                context: None,
             };
 
             insert_accepted(&transaction, &waiting, now)?;
@@ -820,6 +876,56 @@ impl Database {
             ],
         )?;
 
+        Ok(())
+    }
+
+    /// Commits a prompt-gate decision and the inbox/context lifecycle change
+    /// as one transaction. Context has no separate disposition, so the
+    /// foreign key makes this state transition govern it too.
+    pub fn commit_decision(&mut self, decision: &DecisionRecord) -> Result<()> {
+        let disposition = match decision.action.as_str() {
+            "deliver_to_agent" => "approved",
+            "deliver_edited" => "edited",
+            "decline" => "declined",
+            // An inbox-only decision intentionally leaves the message (and
+            // its context) behind the trusted quarantine boundary.
+            "keep_in_inbox" => "quarantined",
+            _ => {
+                return Err(StorageError::InvalidDecisionAction {
+                    action: decision.action.clone(),
+                });
+            }
+        };
+        let transaction = self.connection.transaction()?;
+        let updated = transaction.execute(
+            "UPDATE inbox SET disposition = ?3
+             WHERE channel_id = ?1 AND message_id = ?2 AND disposition = 'quarantined'",
+            params![decision.channel_id, decision.message_id, disposition],
+        )?;
+        if updated != 1 {
+            return Err(StorageError::UnknownMessage {
+                message_id: decision.message_id.clone(),
+            });
+        }
+        transaction.execute(
+            "INSERT INTO audit (
+                 channel_id, message_id, action, content_hash, edited_hash,
+                 original_content, edited_content, agent, decided_by, occurred_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                decision.channel_id,
+                decision.message_id,
+                decision.action,
+                decision.content_hash,
+                decision.edited_hash,
+                decision.original_content.as_bytes(),
+                decision.edited_content.as_deref().map(str::as_bytes),
+                decision.agent,
+                decision.decided_by,
+                decision.occurred_at,
+            ],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -943,6 +1049,124 @@ impl Database {
     /// Accepted inbox entries in local arrival order.
     pub fn inbox_entries(&self, channel_id: &str) -> Result<Vec<InboxEntry>> {
         self.query_inbox(channel_id, None)
+    }
+
+    /// Returns every body still owned by the trusted prompt gate.
+    pub fn pending_inbound(&self) -> Result<Vec<PendingInbound>> {
+        let mut statement = self.connection.prepare(
+            "SELECT channel_id, message_id, sender_principal, sender_device, kind,
+                    roster_epoch, endpoint, created_at, expires_at,
+                    ciphertext_sha256, body
+             FROM inbox
+             WHERE disposition = 'quarantined' AND arrival_sequence IS NOT NULL
+             ORDER BY received_at, message_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(PendingInbound {
+                channel_id: row.get(0)?,
+                message_id: row.get(1)?,
+                sender_principal: row.get(2)?,
+                sender_device: row.get(3)?,
+                kind: row.get(4)?,
+                roster_epoch: row.get::<_, i64>(5)? as u64,
+                endpoint: row.get(6)?,
+                created_at: row.get(7)?,
+                expires_at: row.get(8)?,
+                ciphertext_sha256: row.get(9)?,
+                body: String::from_utf8(row.get::<_, Option<Vec<u8>>>(10)?.unwrap_or_default())
+                    .unwrap_or_default(),
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Stores a locally authored package without publishing it.
+    pub fn save_context_draft(
+        &self,
+        package_id: &str,
+        repository_root: Option<&str>,
+        digest: &str,
+        manifest: &[u8],
+        now: &str,
+    ) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO context_draft (package_id, repository_root, digest, manifest, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![package_id, repository_root, digest, manifest, now],
+        )?;
+        Ok(())
+    }
+
+    /// Returns one locally authored package.
+    pub fn context_draft(&self, package_id: &str) -> Result<Option<ContextDraft>> {
+        self.connection
+            .query_row(
+                "SELECT package_id, repository_root, digest, manifest
+                 FROM context_draft WHERE package_id = ?1",
+                params![package_id],
+                |row| {
+                    Ok(ContextDraft {
+                        package_id: row.get(0)?,
+                        repository_root: row.get(1)?,
+                        digest: row.get(2)?,
+                        manifest: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Reads quarantined context only for trusted code and tests.
+    pub fn inbound_context(&self, message_id: &str) -> Result<Option<ContextDraft>> {
+        self.connection
+            .query_row(
+                "SELECT context.package_id, NULL, context.digest, context.manifest
+                 FROM inbound_context AS context
+                 JOIN inbox ON inbox.message_id = context.message_id
+                 WHERE context.message_id = ?1 AND inbox.disposition = 'quarantined'",
+                params![message_id],
+                |row| {
+                    Ok(ContextDraft {
+                        package_id: row.get(0)?,
+                        repository_root: row.get(1)?,
+                        digest: row.get(2)?,
+                        manifest: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Rejects one signed message whose attached context is malformed.
+    ///
+    /// This is sender-authored content, not a transport/history failure, so
+    /// unrelated traffic must continue to synchronize.
+    pub fn reject_malformed_context(
+        &mut self,
+        channel_id: &str,
+        message_id: &str,
+        reason: &str,
+        now: &str,
+    ) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        let updated = transaction.execute(
+            "UPDATE inbox SET disposition = 'unsupported'
+             WHERE channel_id = ?1 AND message_id = ?2 AND disposition = 'quarantined'",
+            params![channel_id, message_id],
+        )?;
+        if updated == 1 {
+            transaction.execute(
+                "INSERT INTO audit (
+                     channel_id, message_id, action, content_hash, detail, occurred_at
+                 ) VALUES (?1, ?2, 'malformed_context', NULL, ?3, ?4)",
+                params![channel_id, message_id, reason, now],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     /// One thread's entries, in local arrival order.
@@ -1194,7 +1418,10 @@ impl Database {
         )?;
 
         let pending_approval = self.connection.query_row(
-            "SELECT COUNT(*) FROM inbox WHERE channel_id = ?1 AND disposition = 'quarantined'",
+            "SELECT COUNT(*) FROM inbox
+             WHERE channel_id = ?1
+               AND disposition = 'quarantined'
+               AND arrival_sequence IS NOT NULL",
             params![channel_id],
             |row| row.get::<_, i64>(0),
         )?;
@@ -1314,6 +1541,31 @@ struct HeldMessage {
     created_at: String,
     expires_at: Option<String>,
     body: Vec<u8>,
+}
+
+/// Stores a verified context only after its owning inbox row exists.
+///
+/// The foreign key deliberately makes the message disposition its only
+/// lifecycle: context cannot be approved, declined, or exposed separately.
+fn store_inbound_context(
+    transaction: &rusqlite::Transaction<'_>,
+    message: &InboundMessage<'_>,
+) -> Result<()> {
+    let Some(context) = &message.context else {
+        return Ok(());
+    };
+    transaction.execute(
+        "INSERT INTO inbound_context (message_id, package_id, digest, manifest)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (message_id) DO NOTHING",
+        params![
+            message.message_id,
+            context.package_id,
+            context.digest,
+            context.manifest,
+        ],
+    )?;
+    Ok(())
 }
 
 /// Parks a message whose predecessor has not arrived.

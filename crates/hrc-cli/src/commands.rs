@@ -5,11 +5,15 @@
 //! a command reports, and `--json` is a formatting choice rather than a
 //! separate code path.
 
+use std::collections::HashMap;
+use std::path::{Component, Path};
+use std::process::Command as ProcessCommand;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use hrc_core::Roster;
 use hrc_core::rpc::{AgentRequest, Broker, ChannelStatus, Request, TrustedRequest, dispatch_agent};
 use hrc_core::sync::{PollActivity, poll_interval};
+use hrc_core::{ContextPackage, ExcludedPath, Roster};
 use hrc_crypto::enrollment::Invite;
 use hrc_crypto::{DeviceSecrets, InviteSecret, KeyStore, PassphraseStore, PrincipalSecrets};
 use hrc_ipc::endpoint::{Endpoint, Interface, prepare_runtime_dir};
@@ -1123,13 +1127,42 @@ fn receive_messages(
                             continue;
                         };
 
-                        let body = opened
-                            .envelope
-                            .body
-                            .get("text")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_owned();
+                        let received_context =
+                            ContextPackage::from_message_body(&opened.envelope.body);
+                        let malformed_context =
+                            received_context.as_ref().err().map(ToString::to_string);
+                        let received_context = received_context.ok().flatten();
+                        let context_manifest = received_context
+                            .as_ref()
+                            .map(|(package, _)| canonical::to_canonical_bytes(package))
+                            .transpose()?;
+                        let context = received_context
+                            .as_ref()
+                            .zip(context_manifest.as_deref())
+                            .map(
+                                |((package, digest), manifest)| hrc_storage::InboundContext {
+                                    package_id: &package.id,
+                                    digest,
+                                    manifest,
+                                },
+                            );
+                        // For a context-bearing message the canonical body is
+                        // the pending content. It owns the context lifecycle:
+                        // trusted approval reveals/delivers this exact body,
+                        // while agent-safe views never receive it.
+                        let body = if received_context.is_some() || malformed_context.is_some() {
+                            canonical::to_canonical_json(&opened.envelope.body)?
+                        } else {
+                            opened
+                                .envelope
+                                .body
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_owned()
+                        };
+                        let plaintext_bytes =
+                            canonical::to_canonical_bytes(&opened.envelope.body)?.len() as u64;
 
                         let kind = hrc_protocol::MessageKind::parse(&opened.envelope.kind)
                             .map(|kind| kind.as_str())
@@ -1157,12 +1190,13 @@ fn receive_messages(
                                 roster_epoch: opened.envelope.roster_epoch,
                                 endpoint: opened.envelope.to.endpoint.as_deref(),
                                 ciphertext_bytes: bytes.len() as u64,
-                                plaintext_bytes: body.len() as u64,
+                                plaintext_bytes,
                                 ciphertext_sha256: &opened.ciphertext_sha256,
                                 created_at: &opened.envelope.created_at,
                                 expires_at: opened.envelope.expires_at.as_deref(),
                                 body: body.as_bytes(),
                                 ciphertext: &bytes,
+                                context,
                             },
                             now,
                         )?;
@@ -1170,6 +1204,17 @@ fn receive_messages(
                         if let hrc_storage::InboundOutcome::Accepted { released, .. } = outcome {
                             received.push(opened.envelope.message_id.clone());
                             received.extend(released);
+                        }
+                        if let Some(reason) = malformed_context {
+                            // A valid signature authenticates that this
+                            // sender authored malformed context. It does not
+                            // turn a bad package into transport tampering.
+                            database.reject_malformed_context(
+                                &channel.channel_id,
+                                &opened.envelope.message_id,
+                                &reason,
+                                now,
+                            )?;
                         }
                     }
 
@@ -1203,6 +1248,24 @@ fn compose(
     kind: hrc_protocol::MessageKind,
     recipient: &str,
     text: &str,
+    in_reply_to: Option<&str>,
+) -> Result<Value> {
+    compose_body(
+        context,
+        kind,
+        recipient,
+        serde_json::json!({ "text": text }),
+        in_reply_to,
+    )
+}
+
+/// Sends an arbitrary, structured message body through the ordinary durable
+/// outbox and encrypted publication path.
+fn compose_body(
+    context: &Context,
+    kind: hrc_protocol::MessageKind,
+    recipient: &str,
+    body: Value,
     in_reply_to: Option<&str>,
 ) -> Result<Value> {
     let store = context.key_store()?;
@@ -1251,7 +1314,6 @@ fn compose(
         None => (message_id.clone(), None),
     };
 
-    let body = serde_json::json!({ "text": text });
     let payload_hash = canonical::canonical_sha256_hex(&body)?;
 
     let reservation = database.allocate_outgoing(
@@ -1374,6 +1436,422 @@ pub fn reply(context: &Context, message_id: &str, text: &str) -> Result<Value> {
         text,
         Some(message_id),
     )
+}
+
+/// `hrc context draft`: keep an explicitly selected package locally.
+pub fn context_draft(
+    context: &Context,
+    manifest_path: &str,
+    repository: Option<&str>,
+) -> Result<Value> {
+    let manifest = std::fs::read_to_string(manifest_path).map_err(|source| CliError::Io {
+        action: "read the context manifest",
+        source,
+    })?;
+    let package: ContextPackage = canonical::from_json_str(&manifest)?;
+    if package.version != hrc_protocol::PROTOCOL_VERSION {
+        return Err(hrc_core::CoreError::MalformedMessage {
+            reason: "context package has an unsupported version".into(),
+        }
+        .into());
+    }
+    let mut preview = package.preview()?;
+    let repository_root = canonical_repository_root(repository)?;
+    append_repository_exclusions(&package, repository_root.as_deref(), &mut preview)?;
+    if let Some(excluded) = preview.excluded.first() {
+        return Err(hrc_core::CoreError::ContextContainsExcludedPath {
+            path: excluded.path.clone(),
+        }
+        .into());
+    }
+
+    // The manifest's excerpt text is untrusted caller input. Replace it with
+    // the exact selected source bytes before computing the stored digest.
+    let package = materialize_excerpt_sources(package, repository_root.as_deref())?;
+    let canonical_manifest = canonical::to_canonical_bytes(&package)?;
+    let digest = package.digest()?;
+    let mut preview = package.preview()?;
+    append_repository_exclusions(&package, repository_root.as_deref(), &mut preview)?;
+    // Drafting has no side effect outside this installation, so findings are
+    // retained for the required human preview instead of silently removing
+    // content or making the author reconstruct what was rejected.
+    let database = Database::open(context.paths.database())?;
+    let now = database.utc_now()?;
+    database.save_context_draft(
+        &package.id,
+        repository_root.as_deref(),
+        &digest,
+        &canonical_manifest,
+        &now,
+    )?;
+
+    Ok(context_preview_value(
+        &package.id,
+        &digest,
+        &preview,
+        "draft",
+    ))
+}
+
+/// `hrc context preview`: report the selected bytes and blockers without
+/// echoing package text or a suspected secret.
+pub fn context_preview(context: &Context, package_id: &str) -> Result<Value> {
+    let (package, digest, repository_root) = load_context_draft(context, package_id)?;
+    let mut preview = package.preview()?;
+    append_repository_exclusions(&package, repository_root.as_deref(), &mut preview)?;
+    verify_excerpt_sources(&package, repository_root.as_deref())?;
+    Ok(context_preview_value(
+        package_id, &digest, &preview, "preview",
+    ))
+}
+
+/// `hrc context send`: attach the exact reviewed package to an encrypted note.
+pub fn context_send(context: &Context, recipient: &str, package_id: &str) -> Result<Value> {
+    let (package, digest, repository_root) = load_context_draft(context, package_id)?;
+    let mut preview = package.preview()?;
+    append_repository_exclusions(&package, repository_root.as_deref(), &mut preview)?;
+    verify_excerpt_sources(&package, repository_root.as_deref())?;
+    if !preview.secrets.is_empty() {
+        return Err(hrc_core::CoreError::ContextContainsSecrets {
+            count: preview.secrets.len(),
+        }
+        .into());
+    }
+    if let Some(excluded) = preview.excluded.first() {
+        return Err(hrc_core::CoreError::ContextContainsExcludedPath {
+            path: excluded.path.clone(),
+        }
+        .into());
+    }
+
+    let mut sent = compose_body(
+        context,
+        hrc_protocol::MessageKind::Note,
+        recipient,
+        serde_json::json!({
+            "context": package,
+            "contextDigest": digest,
+        }),
+        None,
+    )?;
+    sent["contextId"] = Value::String(package_id.to_owned());
+    sent["contextDigest"] = Value::String(digest);
+    Ok(sent)
+}
+
+fn load_context_draft(
+    context: &Context,
+    package_id: &str,
+) -> Result<(ContextPackage, String, Option<String>)> {
+    let database = Database::open(context.paths.database())?;
+    let draft = database
+        .context_draft(package_id)?
+        .ok_or_else(|| CliError::NoSuchMessage {
+            message_id: package_id.to_owned(),
+        })?;
+    let text = std::str::from_utf8(&draft.manifest).map_err(|_| {
+        CliError::Core(hrc_core::CoreError::MalformedMessage {
+            reason: "stored context manifest is not UTF-8".into(),
+        })
+    })?;
+    let package = canonical::from_json_str::<ContextPackage>(text)?;
+    package.verify_digest(&draft.digest)?;
+    if package.id != draft.package_id {
+        return Err(hrc_core::CoreError::MalformedMessage {
+            reason: "stored context package ID does not match its record".into(),
+        }
+        .into());
+    }
+    Ok((package, draft.digest, draft.repository_root))
+}
+
+fn context_preview_value(
+    package_id: &str,
+    digest: &str,
+    preview: &hrc_core::ContextPreview,
+    state: &str,
+) -> Value {
+    json!({
+        "status": "ok",
+        "state": state,
+        "contextId": package_id,
+        "digest": digest,
+        "totalBytes": preview.total_bytes,
+        "items": preview.items.iter().map(|(kind, bytes)| json!({
+            "kind": kind,
+            "bytes": bytes,
+        })).collect::<Vec<_>>(),
+        "sendable": preview.is_sendable(),
+        "secretFindings": preview.secrets.iter().map(|finding| json!({
+            "item": finding.item_index,
+            "rule": finding.rule,
+            "detail": finding.detail,
+        })).collect::<Vec<_>>(),
+        "excludedPaths": preview.excluded.iter().map(|excluded| json!({
+            "item": excluded.item_index,
+            "path": excluded.path,
+            "reason": excluded.reason,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// Adds exclusions that only the source repository can decide.
+fn append_repository_exclusions(
+    package: &ContextPackage,
+    repository: Option<&str>,
+    preview: &mut hrc_core::ContextPreview,
+) -> Result<()> {
+    let source_paths = package.source_paths().collect::<Vec<_>>();
+    if source_paths.is_empty() {
+        return Ok(());
+    }
+
+    let repository = repository.ok_or_else(|| CliError::ContextRepositoryRequired {
+        package_id: package.id.clone(),
+    })?;
+
+    for (item_index, path) in source_paths {
+        if !is_repository_relative_path(path) {
+            preview.excluded.push(ExcludedPath {
+                item_index,
+                path: path.to_owned(),
+                reason: "excerpt paths must be repository-relative",
+            });
+            continue;
+        }
+        let normalized_path = path.replace('\\', "/");
+
+        let status = ProcessCommand::new("git")
+            .args([
+                "-C",
+                repository,
+                "check-ignore",
+                "--quiet",
+                "--no-index",
+                "--",
+            ])
+            .arg(&normalized_path)
+            .status()
+            .map_err(|source| CliError::Io {
+                action: "check whether a context path is Git-ignored",
+                source,
+            })?;
+        if status.success() {
+            preview.excluded.push(ExcludedPath {
+                item_index,
+                path: path.to_owned(),
+                reason: "path is ignored by its Git repository",
+            });
+        } else if status.code() != Some(1) {
+            return Err(CliError::Io {
+                action: "check whether a context path is Git-ignored",
+                source: std::io::Error::other("Git could not evaluate the source repository"),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// Resolves a supplied repository to its canonical absolute Git worktree
+/// root. A relative display label is not a durable source identity.
+fn canonical_repository_root(repository: Option<&str>) -> Result<Option<String>> {
+    let Some(repository) = repository else {
+        return Ok(None);
+    };
+    let output = ProcessCommand::new("git")
+        .args(["-C", repository, "rev-parse", "--show-toplevel"])
+        .output()
+        .map_err(|source| CliError::Io {
+            action: "resolve the context repository root",
+            source,
+        })?;
+    if !output.status.success() {
+        return Err(CliError::InvalidContextSource {
+            reason: "repository is not a Git worktree",
+        });
+    }
+    let root = String::from_utf8(output.stdout).map_err(|_| CliError::InvalidContextSource {
+        reason: "Git returned a non-UTF-8 repository path",
+    })?;
+    let root = std::fs::canonicalize(root.trim()).map_err(|source| CliError::Io {
+        action: "canonicalize the context repository root",
+        source,
+    })?;
+    Ok(Some(root.display().to_string()))
+}
+
+/// Replaces every caller-supplied excerpt with bytes from its declared,
+/// canonical repository source before the package digest is calculated.
+fn materialize_excerpt_sources(
+    mut package: ContextPackage,
+    repository_root: Option<&str>,
+) -> Result<ContextPackage> {
+    if package.source_paths().next().is_some() && repository_root.is_none() {
+        return Err(CliError::ContextRepositoryRequired {
+            package_id: package.id.clone(),
+        });
+    }
+    for item in &mut package.items {
+        if let hrc_core::ContextItem::Excerpt {
+            path,
+            first_line,
+            last_line,
+            commit_sha,
+            text,
+        } = item
+        {
+            *text = read_excerpt(
+                repository_root.expect("checked above"),
+                path,
+                *first_line,
+                *last_line,
+                commit_sha.as_deref(),
+            )?;
+        }
+    }
+    Ok(package)
+}
+
+/// Confirms that the checked source still equals the snapshot a human will
+/// review and authorize.
+fn verify_excerpt_sources(package: &ContextPackage, repository_root: Option<&str>) -> Result<()> {
+    for item in &package.items {
+        if let hrc_core::ContextItem::Excerpt {
+            path,
+            first_line,
+            last_line,
+            commit_sha,
+            text,
+        } = item
+        {
+            let actual = read_excerpt(
+                repository_root.ok_or_else(|| CliError::ContextRepositoryRequired {
+                    package_id: package.id.clone(),
+                })?,
+                path,
+                *first_line,
+                *last_line,
+                commit_sha.as_deref(),
+            )?;
+            if actual != *text {
+                return Err(CliError::InvalidContextSource {
+                    reason: "excerpt source changed since the package was drafted",
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reads one bounded source selection without accepting manifest text.
+fn read_excerpt(
+    repository_root: &str,
+    path: &str,
+    first_line: u32,
+    last_line: u32,
+    commit_sha: Option<&str>,
+) -> Result<String> {
+    if !is_repository_relative_path(path) {
+        return Err(CliError::InvalidContextSource {
+            reason: "excerpt paths must be repository-relative",
+        });
+    }
+    if first_line == 0 || last_line < first_line {
+        return Err(CliError::InvalidContextSource {
+            reason: "excerpt line range is invalid",
+        });
+    }
+
+    let source = if let Some(commit_sha) = commit_sha {
+        if !matches!(commit_sha.len(), 40 | 64)
+            || !commit_sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(CliError::InvalidContextSource {
+                reason: "excerpt commit must be a full SHA-1 or SHA-256 object ID",
+            });
+        }
+        let commit_expression = format!("{commit_sha}^{{commit}}");
+        let verified = ProcessCommand::new("git")
+            .args(["-C", repository_root, "rev-parse", "--verify"])
+            .arg(&commit_expression)
+            .output()
+            .map_err(|source| CliError::Io {
+                action: "verify the committed context excerpt",
+                source,
+            })?;
+        if !verified.status.success() {
+            return Err(CliError::InvalidContextSource {
+                reason: "excerpt commit does not resolve to a commit",
+            });
+        }
+        let output = ProcessCommand::new("git")
+            .args(["-C", repository_root, "show", "--no-textconv"])
+            .arg(format!("{commit_sha}:{}", path.replace('\\', "/")))
+            .output()
+            .map_err(|source| CliError::Io {
+                action: "read the committed context excerpt",
+                source,
+            })?;
+        if !output.status.success() {
+            return Err(CliError::InvalidContextSource {
+                reason: "excerpt commit or path is unavailable",
+            });
+        }
+        String::from_utf8(output.stdout).map_err(|_| CliError::InvalidContextSource {
+            reason: "excerpt source is not UTF-8 text",
+        })?
+    } else {
+        let root = std::fs::canonicalize(repository_root).map_err(|source| CliError::Io {
+            action: "canonicalize the context repository root",
+            source,
+        })?;
+        let source_path =
+            std::fs::canonicalize(root.join(path.replace('\\', "/"))).map_err(|source| {
+                CliError::Io {
+                    action: "read the context excerpt",
+                    source,
+                }
+            })?;
+        if !source_path.starts_with(&root) {
+            return Err(CliError::InvalidContextSource {
+                reason: "excerpt path escapes its repository",
+            });
+        }
+        std::fs::read_to_string(&source_path).map_err(|source| CliError::Io {
+            action: "read the context excerpt",
+            source,
+        })?
+    };
+
+    let selected = source
+        .lines()
+        .skip((first_line - 1) as usize)
+        .take((last_line - first_line + 1) as usize)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if selected.lines().count() != (last_line - first_line + 1) as usize {
+        return Err(CliError::InvalidContextSource {
+            reason: "excerpt line range is outside the source file",
+        });
+    }
+    Ok(selected)
+}
+
+fn is_repository_relative_path(path: &str) -> bool {
+    // Context manifests move between Windows and Unix. Treat both separators
+    // as separators before asking the host's path parser, or a Windows
+    // traversal could become an ordinary filename on Unix.
+    let normalized = path.replace('\\', "/");
+    let path = Path::new(&normalized);
+    !path.as_os_str().is_empty()
+        && !path.is_absolute()
+        && path.components().all(|component| {
+            !matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
 }
 
 /// `hrc inbox`: the closed metadata set, never a pending body.
@@ -1794,6 +2272,9 @@ pub async fn daemon(context: &Context) -> Result<()> {
     let agent_context = context.clone();
     let trusted_context = context.clone();
     let loop_context = context.clone();
+    let context_authorizations =
+        Arc::new(Mutex::new(hrc_core::rpc::ContextAuthorizationLedger::new()));
+    let trusted_context_authorizations = Arc::clone(&context_authorizations);
 
     tokio::try_join!(
         async {
@@ -1805,7 +2286,7 @@ pub async fn daemon(context: &Context) -> Result<()> {
         },
         async {
             serve(&trusted_endpoint, move |request: TrustedRequest| {
-                handle_trusted_request(&trusted_context, request)
+                handle_trusted_request(&trusted_context, &trusted_context_authorizations, request)
             })
             .await
             .map_err(CliError::from)
@@ -1899,7 +2380,11 @@ fn handle_agent_request(context: &Context, request: Request) -> Value {
     }
 }
 
-fn handle_trusted_request(context: &Context, request: TrustedRequest) -> Value {
+fn handle_trusted_request(
+    context: &Context,
+    context_authorizations: &Mutex<hrc_core::rpc::ContextAuthorizationLedger>,
+    request: TrustedRequest,
+) -> Value {
     let method = request.method();
 
     let mut broker = match DaemonBroker::new(context) {
@@ -1913,10 +2398,17 @@ fn handle_trusted_request(context: &Context, request: TrustedRequest) -> Value {
         }
     };
 
-    // A fresh ledger per connection is deliberate for now: an authorization
-    // is issued, consumed, and discarded inside one call (DEC-040), so
-    // nothing needs to outlive the request that created it.
     let mut ledger = hrc_core::AuthorizationLedger::new();
+    let mut context_ledger = match context_authorizations.lock() {
+        Ok(ledger) => ledger,
+        Err(error) => {
+            return json!({
+                "status": "error",
+                "code": "internal_error",
+                "message": format!("context authorization ledger is unavailable: {error}"),
+            });
+        }
+    };
     let now = match broker.now() {
         Ok(now) => now,
         Err(error) => {
@@ -1928,7 +2420,30 @@ fn handle_trusted_request(context: &Context, request: TrustedRequest) -> Value {
         }
     };
 
-    match hrc_core::rpc::dispatch_trusted(&mut broker, &mut ledger, request, &now) {
+    match hrc_core::rpc::dispatch_trusted(
+        &mut broker,
+        &mut ledger,
+        &mut context_ledger,
+        request,
+        &now,
+    ) {
+        Ok(hrc_core::rpc::TrustedResponse::ContextPreview {
+            package_id,
+            digest,
+            content,
+            authorization,
+            items,
+            total_bytes,
+        }) => json!({
+            "status": "ok",
+            "method": method,
+            "contextId": package_id,
+            "digest": digest,
+            "content": content,
+            "authorization": authorization,
+            "items": items,
+            "totalBytes": total_bytes,
+        }),
         Ok(hrc_core::rpc::TrustedResponse::Delivered { agent, framed }) => json!({
             "status": "ok",
             "method": method,
@@ -1967,6 +2482,9 @@ struct DaemonBroker {
     device_id: String,
     checks: Vec<(String, bool)>,
     audit: Vec<String>,
+    /// Pending data reconstructed from the durable, trusted-only quarantine.
+    pending: Vec<hrc_core::message::QuarantinedMessage>,
+    pending_bodies: HashMap<String, String>,
     /// Where the database lives, so a decision can be appended durably
     /// rather than held in memory until the daemon exits.
     database_path: std::path::PathBuf,
@@ -2023,6 +2541,45 @@ impl DaemonBroker {
             .into_iter()
             .map(|entry| format_audit_entry(&entry))
             .collect();
+        let pending_rows = database.pending_inbound()?;
+        let pending_bodies = pending_rows
+            .iter()
+            .map(|row| (row.message_id.clone(), row.body.clone()))
+            .collect();
+        let pending = pending_rows
+            .into_iter()
+            .map(|row| {
+                Ok(hrc_core::message::QuarantinedMessage {
+                    envelope: MessageEnvelope {
+                        version: hrc_protocol::PROTOCOL_VERSION,
+                        channel_id: row.channel_id,
+                        roster_epoch: row.roster_epoch,
+                        message_id: row.message_id,
+                        device_sequence: 0,
+                        previous_chain_id: None,
+                        created_at: row.created_at,
+                        expires_at: row.expires_at,
+                        to: hrc_protocol::Addressing {
+                            principals: Vec::new(),
+                            endpoint: row.endpoint,
+                        },
+                        recipients: hrc_protocol::RecipientDevices::new([row
+                            .sender_device
+                            .clone()])?,
+                        thread_id: String::new(),
+                        in_reply_to: None,
+                        kind: row.kind,
+                        requested_capability: None,
+                        body: Value::Null,
+                        attachments: Vec::new(),
+                        padding: String::new(),
+                    },
+                    sender_principal: row.sender_principal,
+                    sender_device: row.sender_device,
+                    ciphertext_sha256: row.ciphertext_sha256,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         Ok(Self {
             channel_status,
@@ -2031,6 +2588,8 @@ impl DaemonBroker {
             device_id,
             checks,
             audit,
+            pending,
+            pending_bodies,
             database_path: context.paths.database(),
             context: context.clone(),
         })
@@ -2081,12 +2640,87 @@ impl Broker for DaemonBroker {
         None
     }
 
-    fn pending(&self, _message_id: &str) -> Option<&hrc_core::message::QuarantinedMessage> {
-        None
+    fn preview_context(
+        &self,
+        package_id: &str,
+    ) -> hrc_core::Result<hrc_core::rpc::ContextPreviewSummary> {
+        let (package, digest, repository_root) =
+            load_context_draft(&self.context, package_id).map_err(context_core_error)?;
+        let mut preview = package.preview()?;
+        append_repository_exclusions(&package, repository_root.as_deref(), &mut preview)
+            .map_err(context_core_error)?;
+        verify_excerpt_sources(&package, repository_root.as_deref()).map_err(context_core_error)?;
+        if !preview.is_sendable() {
+            return Err(hrc_core::CoreError::MalformedMessage {
+                reason: "context package is blocked by source or secret checks".into(),
+            });
+        }
+        let content =
+            String::from_utf8_lossy(&hrc_protocol::canonical::to_canonical_bytes(&package)?)
+                .into_owned();
+        Ok(hrc_core::rpc::ContextPreviewSummary {
+            package_id: package.id,
+            digest,
+            content,
+            items: preview.items,
+            total_bytes: preview.total_bytes,
+        })
     }
 
-    fn pending_body(&self, _message_id: &str) -> Option<String> {
-        None
+    fn context_authorization_scope(
+        &self,
+        package_id: &str,
+        recipient: &str,
+    ) -> hrc_core::Result<hrc_core::rpc::ContextAuthorizationScope> {
+        let (_, digest, _) =
+            load_context_draft(&self.context, package_id).map_err(context_core_error)?;
+        let database = Database::open(&self.database_path)
+            .map_err(|error| hrc_core::CoreError::Transport(error.to_string()))?;
+        let channel = only_channel(&database).map_err(context_core_error)?;
+        Ok(hrc_core::rpc::ContextAuthorizationScope {
+            channel_id: channel.channel_id,
+            package_id: package_id.to_owned(),
+            digest,
+            recipient: recipient.to_owned(),
+            action: "send_context".into(),
+        })
+    }
+
+    fn context_authorization_expiry(&self, now: &str) -> hrc_core::Result<String> {
+        expiry_from(now, "5m").map_err(context_core_error)
+    }
+
+    fn send_context(
+        &mut self,
+        scope: &hrc_core::rpc::ContextAuthorizationScope,
+    ) -> hrc_core::Result<()> {
+        let (_, digest, _) =
+            load_context_draft(&self.context, &scope.package_id).map_err(context_core_error)?;
+        if digest != scope.digest {
+            return Err(hrc_core::CoreError::AuthorizationMismatch);
+        }
+        let database = Database::open(&self.database_path)
+            .map_err(|error| hrc_core::CoreError::Transport(error.to_string()))?;
+        if only_channel(&database)
+            .map_err(context_core_error)?
+            .channel_id
+            != scope.channel_id
+        {
+            return Err(hrc_core::CoreError::AuthorizationMismatch);
+        }
+        context_send(&self.context, &scope.recipient, &scope.package_id)
+            .map(|_| ())
+            .map_err(context_core_error)
+    }
+
+    fn pending(&self, message_id: &str) -> Option<&hrc_core::message::QuarantinedMessage> {
+        self.pending
+            .iter()
+            .find(|message| message.envelope.message_id == message_id)
+    }
+
+    fn pending_body(&self, message_id: &str) -> Option<String> {
+        self.pending_bodies.get(message_id).cloned()
     }
 
     fn channel_local_name(&self, _message_id: &str) -> String {
@@ -2106,11 +2740,11 @@ impl Broker for DaemonBroker {
         // Written through to the append-only audit log rather than kept in
         // memory: a decision that a restart erased would not be evidence of
         // anything (PRD requirement HRC-GATE-004).
-        let database = Database::open(&self.database_path)
+        let mut database = Database::open(&self.database_path)
             .map_err(|error| hrc_core::CoreError::Transport(error.to_string()))?;
 
         database
-            .append_decision(&hrc_storage::DecisionRecord {
+            .commit_decision(&hrc_storage::DecisionRecord {
                 channel_id: record.channel_id.clone(),
                 message_id: record.message_id.clone(),
                 action: record.action.to_owned(),
@@ -2153,6 +2787,13 @@ impl Broker for DaemonBroker {
             .map(|_| ())
             .map_err(|error| hrc_core::CoreError::Transport(error.to_string()))
     }
+}
+
+/// The trusted daemon boundary already hides detailed context source errors
+/// from agent-safe callers. Preserve that boundary when the CLI helpers are
+/// called through the trusted RPC implementation.
+fn context_core_error(error: CliError) -> hrc_core::CoreError {
+    hrc_core::CoreError::Transport(error.to_string())
 }
 
 fn format_audit_entry(entry: &hrc_storage::AuditEntry) -> String {

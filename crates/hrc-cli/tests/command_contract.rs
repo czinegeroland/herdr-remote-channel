@@ -33,8 +33,8 @@ fn help_lists_the_published_command_surface() {
 
     for command in [
         "init", "whoami", "create", "channels", "status", "doctor", "rollover", "invite", "join",
-        "members", "member", "device", "send", "ask", "reply", "delegate", "inbox", "show",
-        "thread", "wait", "review", "approve", "sync", "daemon", "audit", "herdr",
+        "members", "member", "device", "send", "ask", "reply", "delegate", "context", "inbox",
+        "show", "thread", "wait", "review", "approve", "sync", "daemon", "audit", "herdr",
     ] {
         assert!(
             help.contains(command),
@@ -191,8 +191,10 @@ fn agent_safe_daemon_endpoint_refuses_trusted_requests() {
                 .await
                 .expect("agent endpoint should come up");
         client
-            .call(&Request::Trusted(TrustedRequest::PreviewPending {
-                message_id: "message-1".into(),
+            .call(&Request::Trusted(TrustedRequest::SendContext {
+                recipient: "recipient".into(),
+                package_id: "ctx-1".into(),
+                authorization: "ctxauth-test".into(),
             }))
             .await
             .expect("trusted call should return a response")
@@ -473,6 +475,19 @@ fn channel_fixture() -> (tempfile::TempDir, tempfile::TempDir) {
         .success();
 
     (home, remote)
+}
+
+fn git_init(path: &std::path::Path) {
+    let output = std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .arg(path)
+        .output()
+        .expect("git should initialize source repository");
+    assert!(
+        output.status.success(),
+        "git init failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn git_in_bare(remote: &std::path::Path, args: &[&str]) -> String {
@@ -1099,6 +1114,259 @@ fn a_message_is_sealed_published_fetched_and_quarantined() {
     assert_eq!(
         entries[0]["disposition"], "quarantined",
         "an arriving message must not be delivered"
+    );
+}
+
+#[test]
+fn context_draft_cannot_authorize_a_noninteractive_preview_or_send() {
+    let (home, remote) = channel_fixture();
+    let principal = principal_of(home.path(), remote.path());
+    let source = tempfile::tempdir().expect("temporary source repository");
+    git_init(source.path());
+    let manifest = source.path().join("context.json");
+    std::fs::create_dir_all(source.path().join("src")).expect("create source directory");
+    std::fs::write(source.path().join("src/lib.rs"), "fn retry() {}").expect("write source");
+    let context_text = "remote context must remain quarantined";
+    std::fs::write(
+        &manifest,
+        format!(
+            r#"{{"version":1,"id":"ctx-review","items":[
+                {{"kind":"note","text":"{context_text}"}},
+                {{"kind":"excerpt","path":"src/lib.rs","firstLine":1,"lastLine":1,"text":"caller text is ignored"}},
+                {{"kind":"reference","reference":"abc123","description":"failing commit"}},
+                {{"kind":"link","url":"https://example.invalid/run/1","description":"run"}}
+            ]}}"#
+        ),
+    )
+    .expect("write manifest");
+
+    let drafted = hrc_in(home.path())
+        .args([
+            "context",
+            "draft",
+            manifest.to_str().expect("manifest path"),
+            "--repository",
+            source.path().to_str().expect("repository path"),
+            "--json",
+        ])
+        .output()
+        .expect("draft should run");
+    assert!(drafted.status.success());
+    let draft_json: Value = serde_json::from_slice(&drafted.stdout).expect("draft JSON");
+    assert_eq!(draft_json["state"], "draft");
+    assert_eq!(draft_json["sendable"], true);
+    assert!(
+        !String::from_utf8_lossy(&drafted.stdout).contains(context_text),
+        "draft output must not quote package content"
+    );
+
+    // Draft emits a digest as an integrity identifier only. It is not a
+    // bearer authorization that an agent can copy into a later command.
+    let digest = draft_json["digest"]
+        .as_str()
+        .expect("draft digest")
+        .to_owned();
+    hrc_in(home.path())
+        .args(["context", "preview", "ctx-review", "--json"])
+        .assert()
+        .code(USAGE);
+
+    hrc_in(home.path())
+        .args(["context", "send", &principal, "ctx-review", "--json"])
+        .assert()
+        .code(USAGE);
+    hrc_in(home.path())
+        .args(["context", "send", &principal, "ctx-review"])
+        .assert()
+        .code(AUTHORIZATION_REQUIRED);
+
+    // Copying the draft digest does not change the refusal.
+    hrc_in(home.path())
+        .args([
+            "context",
+            "send",
+            &principal,
+            "ctx-review",
+            &digest,
+            "--json",
+        ])
+        .assert()
+        .code(USAGE);
+
+    // The same package can leave only through the distinct trusted endpoint.
+    // No digest is supplied as a bearer confirmation; dispatch obtains and
+    // consumes the package/recipient/channel-bound authorization internally.
+    let (mut daemon, _) = start_daemon(home.path());
+    let endpoint = daemon_endpoint(home.path(), Interface::TrustedHuman);
+    let runtime = daemon_runtime();
+    let response: (Value, Value) = runtime.block_on(async move {
+        let mut client =
+            Client::connect_with_retry(&endpoint, 40, std::time::Duration::from_millis(25))
+                .await
+                .expect("trusted endpoint should come up");
+        let preview: Value = client
+            .call(&TrustedRequest::PreviewContext {
+                recipient: principal.clone(),
+                package_id: "ctx-review".into(),
+            })
+            .await
+            .expect("trusted preview should respond");
+        let authorization = preview["authorization"]
+            .as_str()
+            .expect("preview authorization")
+            .to_owned();
+        let sent = client
+            .call(&TrustedRequest::SendContext {
+                recipient: principal.clone(),
+                package_id: "ctx-review".into(),
+                authorization,
+            })
+            .await
+            .expect("trusted send should respond");
+        (preview, sent)
+    });
+    assert_eq!(response.0["status"], "ok");
+    assert_eq!(response.0["method"], "preview_context");
+    assert_eq!(response.0["digest"], digest);
+    assert!(
+        response.0["content"]
+            .as_str()
+            .expect("trusted preview content")
+            .contains(context_text),
+        "trusted preview must show the exact package content"
+    );
+    assert_eq!(response.1["status"], "ok");
+    assert_eq!(response.1["method"], "send_context");
+    daemon.kill().expect("daemon should be killable");
+    let _ = daemon.wait();
+
+    hrc_in(home.path())
+        .args(["sync", "--once", "--json"])
+        .assert()
+        .success();
+    let database =
+        hrc_storage::Database::open(home.path().join("state.sqlite")).expect("open local state");
+    let received = database
+        .inbox_entries(&database.channels().unwrap()[0].channel_id)
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("trusted context send should be received");
+    assert!(
+        database
+            .inbound_context(&received.message_id)
+            .unwrap()
+            .is_some(),
+        "received context must stay behind the same pending inbox gate"
+    );
+    let message_id = received.message_id;
+    drop(database);
+    let (mut daemon, _) = start_daemon(home.path());
+    let endpoint = daemon_endpoint(home.path(), Interface::TrustedHuman);
+    let runtime = daemon_runtime();
+    let revealed: Value = runtime.block_on(async move {
+        let mut client =
+            Client::connect_with_retry(&endpoint, 40, std::time::Duration::from_millis(25))
+                .await
+                .expect("trusted endpoint should restart");
+        client
+            .call(&TrustedRequest::PreviewPending { message_id })
+            .await
+            .expect("trusted pending preview should respond")
+    });
+    assert_eq!(revealed["status"], "ok");
+    assert!(
+        revealed["body"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(context_text),
+        "trusted review must reveal the canonical context that the pending row owns"
+    );
+    daemon.kill().expect("daemon should be killable");
+    let _ = daemon.wait();
+}
+
+#[test]
+fn git_ignored_and_traversal_context_paths_are_blocked_without_stripping() {
+    let (home, _remote) = channel_fixture();
+    let source = tempfile::tempdir().expect("temporary source repository");
+    git_init(source.path());
+    std::fs::write(source.path().join(".gitignore"), "ignored.txt\n").expect("write ignore rule");
+
+    for (id, path) in [
+        ("ctx-ignored", "ignored.txt"),
+        ("ctx-traversal", "../outside.txt"),
+        ("ctx-windows-traversal", "..\\outside.txt"),
+    ] {
+        let manifest = source.path().join(format!("{id}.json"));
+        let path_json = serde_json::to_string(path).expect("serialize path");
+        std::fs::write(
+            &manifest,
+            format!(
+                r#"{{"version":1,"id":"{id}","items":[{{"kind":"excerpt","path":{path_json},"firstLine":1,"lastLine":1,"text":"selected text"}}]}}"#
+            ),
+        )
+        .expect("write manifest");
+
+        let drafted = hrc_in(home.path())
+            .args([
+                "context",
+                "draft",
+                manifest.to_str().expect("manifest path"),
+                "--repository",
+                source.path().to_str().expect("repository path"),
+                "--json",
+            ])
+            .output()
+            .expect("draft should run");
+        assert!(
+            !drafted.status.success(),
+            "{id}: ignored and traversal excerpts must be rejected before their text is read"
+        );
+        assert!(
+            !String::from_utf8_lossy(&drafted.stdout).contains("selected text"),
+            "a rejected package must not be silently reduced or echoed"
+        );
+    }
+}
+
+#[test]
+fn secret_context_is_reported_without_echoing_the_secret() {
+    let (home, _remote) = channel_fixture();
+    let manifest_directory = tempfile::tempdir().expect("temporary manifest directory");
+    let manifest = manifest_directory.path().join("secret-context.json");
+    let marker = "ghp_16CharactersOfTokenHere0000000000";
+    std::fs::write(
+        &manifest,
+        format!(
+            r#"{{"version":1,"id":"ctx-secret","items":[{{"kind":"note","text":"token: {marker}"}}]}}"#
+        ),
+    )
+    .expect("write manifest");
+
+    let drafted = hrc_in(home.path())
+        .args([
+            "context",
+            "draft",
+            manifest.to_str().expect("manifest path"),
+            "--json",
+        ])
+        .output()
+        .expect("draft should run");
+    assert!(drafted.status.success());
+    let draft_json: Value = serde_json::from_slice(&drafted.stdout).expect("draft JSON");
+    assert_eq!(draft_json["sendable"], false);
+    assert_eq!(draft_json["secretFindings"][0]["rule"], "github_token");
+    assert!(!String::from_utf8_lossy(&drafted.stdout).contains(marker));
+
+    let rejected = hrc_in(home.path())
+        .args(["context", "send", "nobody", "ctx-secret", "--json"])
+        .output()
+        .expect("send should run");
+    assert_eq!(rejected.status.code(), Some(USAGE));
+    assert!(
+        !String::from_utf8_lossy(&rejected.stdout).contains(marker),
+        "a secret finding must never echo its match"
     );
 }
 

@@ -121,6 +121,20 @@ pub enum CliError {
         /// The channel the repository actually holds.
         found: String,
     },
+
+    /// A context package with file excerpts needs its source repository.
+    #[error("context package {package_id} has excerpts but no repository was supplied")]
+    ContextRepositoryRequired {
+        /// The package that cannot be checked.
+        package_id: String,
+    },
+
+    /// A source file or line range cannot form a safe excerpt.
+    #[error("cannot use this context source: {reason}")]
+    InvalidContextSource {
+        /// The safe diagnostic; never source bytes.
+        reason: &'static str,
+    },
 }
 
 impl CliError {
@@ -148,6 +162,8 @@ impl CliError {
             CliError::InvalidLifetime { .. } => "invalid_lifetime",
             CliError::NoSuchMessage { .. } => "no_such_message",
             CliError::InviteChannelMismatch { .. } => "invite_channel_mismatch",
+            CliError::ContextRepositoryRequired { .. } => "context_repository_required",
+            CliError::InvalidContextSource { .. } => "invalid_context_source",
         }
     }
 
@@ -165,7 +181,9 @@ impl CliError {
             | CliError::AmbiguousChannel
             | CliError::InviteExpired { .. }
             | CliError::InvalidLifetime { .. }
-            | CliError::NoSuchMessage { .. } => exit::USAGE,
+            | CliError::NoSuchMessage { .. }
+            | CliError::ContextRepositoryRequired { .. }
+            | CliError::InvalidContextSource { .. } => exit::USAGE,
             CliError::Io { .. }
             | CliError::Storage(_)
             | CliError::Crypto(_)

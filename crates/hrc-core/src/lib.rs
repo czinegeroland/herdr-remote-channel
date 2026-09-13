@@ -19,7 +19,7 @@ pub mod roster;
 pub mod rpc;
 pub mod sync;
 
-pub use context::{ContextItem, ContextPackage, ContextPreview};
+pub use context::{ContextItem, ContextPackage, ContextPreview, ExcludedPath};
 pub use delegation::{Delegation, Party};
 pub use enrollment::{PendingJoin, admit, request_join, review_join};
 pub use error::{CoreError, Result};

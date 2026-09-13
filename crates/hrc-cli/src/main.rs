@@ -178,6 +178,19 @@ fn run(cli: &Cli, _path: &str) -> std::result::Result<Value, Failure> {
             args.message.as_deref().unwrap_or_default(),
         )
         .map_err(Failure::from),
+        Command::Context(args) => match &args.action {
+            cli::ContextAction::Draft {
+                manifest,
+                repository,
+            } => commands::context_draft(&context, manifest, repository.as_deref())
+                .map_err(Failure::from),
+            cli::ContextAction::Preview { id } => {
+                commands::context_preview(&context, id).map_err(Failure::from)
+            }
+            cli::ContextAction::Send { recipient, id } => {
+                commands::context_send(&context, recipient, id).map_err(Failure::from)
+            }
+        },
         Command::Inbox(args) => commands::inbox(&context, args.pending).map_err(Failure::from),
         Command::Thread(args) => commands::thread(&context, &args.thread_id).map_err(Failure::from),
         Command::Join(join) => match (&join.invite_code, &join.action) {

@@ -89,15 +89,41 @@ impl ContextItem {
         }
     }
 
-    /// The text this item would contribute, for scanning and counting.
-    fn scannable_text(&self) -> &str {
+    /// Every caller-controlled string serialized for this item.
+    fn scannable_fields(&self) -> Vec<&str> {
         match self {
-            ContextItem::Note { text } => text,
-            ContextItem::Excerpt { text, .. } => text,
-            ContextItem::Patch { diff } => diff,
-            ContextItem::Reference { reference, .. } => reference,
-            ContextItem::Output { text, .. } => text,
-            ContextItem::Link { url, .. } => url,
+            ContextItem::Note { text } => vec![text],
+            ContextItem::Excerpt {
+                path,
+                commit_sha,
+                text,
+                ..
+            } => {
+                let mut fields = vec![path.as_str(), text.as_str()];
+                if let Some(commit_sha) = commit_sha {
+                    fields.push(commit_sha);
+                }
+                fields
+            }
+            ContextItem::Patch { diff } => vec![diff],
+            ContextItem::Reference {
+                reference,
+                description,
+            } => {
+                let mut fields = vec![reference.as_str()];
+                if let Some(description) = description {
+                    fields.push(description);
+                }
+                fields
+            }
+            ContextItem::Output { command, text } => vec![command, text],
+            ContextItem::Link { url, description } => {
+                let mut fields = vec![url.as_str()];
+                if let Some(description) = description {
+                    fields.push(description);
+                }
+                fields
+            }
         }
     }
 
@@ -107,6 +133,58 @@ impl ContextItem {
             ContextItem::Excerpt { path, .. } => Some(path),
             _ => None,
         }
+    }
+
+    /// Material that is never an acceptable context source, independent of
+    /// whether it happens to contain a recognizable secret.
+    fn excluded_content_reason(&self) -> Option<&'static str> {
+        let command = match self {
+            ContextItem::Patch { .. } => {
+                return Some("patch items require HRC-controlled source capture");
+            }
+            ContextItem::Output { command, .. } => command,
+            _ => return None,
+        };
+
+        let command = command
+            .trim()
+            .trim_matches(|character| matches!(character, '"' | '\''))
+            .to_ascii_lowercase();
+        let normalized = command.replace('\\', "/");
+        let environmental_dump = matches!(
+            normalized.as_str(),
+            "env" | "printenv" | "set" | "setenv" | "export" | "get-childitem env:"
+        ) || normalized.starts_with("env ")
+            || normalized.starts_with("printenv ")
+            || normalized.starts_with("set ")
+            || normalized.starts_with("export ")
+            || normalized.starts_with("get-childitem env:")
+            || normalized.starts_with("dir env:")
+            || normalized.ends_with("/env")
+            || normalized.ends_with("/printenv")
+            || normalized.contains(" -c env")
+            || normalized.contains(" -c printenv")
+            || normalized.contains(" -lc env")
+            || normalized.contains(" -lc printenv")
+            || normalized.contains(" /c set")
+            || normalized.contains(" -command get-childitem env:")
+            || normalized.contains(" -command dir env:");
+        if environmental_dump {
+            return Some("environment dumps are excluded from context packages");
+        }
+
+        if command.contains("scrollback")
+            || command.contains("terminal history")
+            || command.contains("prompt transcript")
+            || command.contains("agent transcript")
+            || matches!(command.as_str(), "history" | "fc")
+        {
+            return Some(
+                "terminal scrollback and agent transcripts are excluded from context packages",
+            );
+        }
+
+        Some("output items require HRC-controlled command capture")
     }
 }
 
@@ -197,17 +275,16 @@ impl ContextPackage {
     /// encoding overhead, and a user told the smaller number would be told
     /// something untrue.
     pub fn preview(&self) -> Result<ContextPreview> {
-        let items = self
-            .items
-            .iter()
-            .map(|item| (item.kind().to_owned(), item.scannable_text().len()))
-            .collect();
-
-        let mut secrets = Vec::new();
+        let mut items = Vec::with_capacity(self.items.len());
+        let mut secrets = scan_for_secrets(usize::MAX, &self.id);
         let mut excluded = Vec::new();
 
         for (index, item) in self.items.iter().enumerate() {
-            secrets.extend(scan_for_secrets(index, item.scannable_text()));
+            let encoded = canonical::to_canonical_bytes(item)?;
+            items.push((item.kind().to_owned(), encoded.len()));
+            for field in item.scannable_fields() {
+                secrets.extend(scan_for_secrets(index, field));
+            }
 
             if let Some(path) = item.source_path()
                 && let Some(reason) = excluded_path_reason(path)
@@ -215,6 +292,13 @@ impl ContextPackage {
                 excluded.push(ExcludedPath {
                     item_index: index,
                     path: path.to_owned(),
+                    reason,
+                });
+            }
+            if let Some(reason) = item.excluded_content_reason() {
+                excluded.push(ExcludedPath {
+                    item_index: index,
+                    path: item.kind().to_owned(),
                     reason,
                 });
             }
@@ -249,6 +333,42 @@ impl ContextPackage {
 
         Ok(preview)
     }
+
+    /// Decodes a context package announced inside a message body.
+    ///
+    /// The digest is checked before the caller stores or displays any part
+    /// of the package. The returned package remains quarantined; verifying
+    /// integrity does not make remote content trusted.
+    pub fn from_message_body(body: &serde_json::Value) -> Result<Option<(Self, String)>> {
+        let Some(value) = body.get("context") else {
+            return Ok(None);
+        };
+        let expected = body
+            .get("contextDigest")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| CoreError::MalformedMessage {
+                reason: "context package has no digest".into(),
+            })?;
+        let encoded = canonical::to_canonical_json(value)?;
+        let package = canonical::from_json_str::<ContextPackage>(&encoded)?;
+
+        if package.version != hrc_protocol::PROTOCOL_VERSION {
+            return Err(CoreError::MalformedMessage {
+                reason: "context package has an unsupported version".into(),
+            });
+        }
+        package.verify_digest(expected)?;
+
+        Ok(Some((package, expected.to_owned())))
+    }
+
+    /// Source paths that require a repository-aware exclusion check.
+    pub fn source_paths(&self) -> impl Iterator<Item = (usize, &str)> {
+        self.items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| item.source_path().map(|path| (index, path)))
+    }
 }
 
 /// Why a path may not be read into a package, if it may not.
@@ -265,11 +385,11 @@ pub fn excluded_path_reason(path: &str) -> Option<&'static str> {
         return Some("environment files are excluded by default");
     }
 
-    if lower.starts_with(".git/") || lower.contains("/.git/") {
+    if name == ".git" || lower.starts_with(".git/") || lower.contains("/.git/") {
         return Some("git internals are excluded by default");
     }
 
-    if lower.starts_with(".ssh/") || lower.contains("/.ssh/") {
+    if name == ".ssh" || lower.starts_with(".ssh/") || lower.contains("/.ssh/") {
         return Some("ssh material is excluded by default");
     }
 

@@ -249,3 +249,19 @@ fn the_skill_keeps_invite_secrets_out_of_machine_readable_output() {
         "the skill should forbid emitting an invite through machine-readable output"
     );
 }
+
+#[test]
+fn the_skill_limits_agents_to_context_drafts() {
+    // HRC-SKILL-006 and HRC-SKILL-008: a manifest can be drafted by an
+    // agent, but reviewing disclosure and authorizing the send are decisions
+    // for the local human.
+    let lower = skill().to_lowercase();
+
+    assert!(lower.contains("hrc context draft"));
+    assert!(lower.contains("do not run `hrc context preview`"));
+    assert!(lower.contains("do not run `hrc context send`"));
+    assert!(lower.contains("human-controlled"));
+    assert!(lower.contains("one-use authorization"));
+    assert!(lower.contains("copy a draft digest"));
+    assert!(lower.contains("ignored-path") || lower.contains("ignored path"));
+}
