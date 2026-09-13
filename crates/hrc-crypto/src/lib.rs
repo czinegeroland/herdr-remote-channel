@@ -12,9 +12,11 @@
 //!   has no accessor for its bytes and its `Debug` output is a placeholder.
 
 pub mod encryption;
+pub mod enrollment;
 pub mod store;
 
 pub use encryption::{DeviceIdentity, DeviceRecipient, encrypt_to};
+pub use enrollment::{Invite, SafetyPhrase, invite_proof, safety_phrase, verify_invite_proof};
 pub use store::{DeviceSecrets, KeyStore, PassphraseStore};
 
 use ed25519_dalek::{Signer as _, Verifier as _};
@@ -92,6 +94,23 @@ pub enum CryptoError {
         /// The configured limit.
         limit: usize,
     },
+
+    /// An invite code was malformed or unsupported.
+    #[error("the invite code is malformed or unsupported")]
+    MalformedInvite,
+
+    /// An invite secret was below the required strength.
+    #[error("invite secret has {bits} bits, below the {minimum_bits} bit minimum")]
+    WeakInviteSecret {
+        /// Strength of the rejected secret.
+        bits: usize,
+        /// Minimum the protocol requires.
+        minimum_bits: usize,
+    },
+
+    /// An invite proof did not verify.
+    #[error("the invite proof is not valid for this invite and joiner")]
+    InviteProofInvalid,
 
     /// A key store passphrase was empty.
     #[error("refusing to protect a key with an empty passphrase")]
