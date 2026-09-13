@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-13T22:55:00+02:00 |
+| Last updated | 2026-09-14T00:20:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -1671,6 +1671,26 @@ to adopt a fuller scanner later.
 The ciphertext and plaintext hard maxima are enforced in
 `crates/hrc-crypto/src/encryption.rs`, before decryption rather than after.
 
+Attachments are references, not content. The declared size travels in the
+signed envelope, so a receiver refuses an oversized attachment before
+fetching or decrypting anything — a limit applied after decryption is not a
+limit. The declaration is sender-controlled and therefore never trusted
+alone: the bytes that arrive must match both the declared size and the
+declared digest, which is what catches a small declaration attached to a
+large object.
+
+HRC extracts no archives. Compressed content is carried as opaque bytes and
+bounded by the ordinary attachment limit, so there is no expansion step for a
+decompression bomb to exploit. A declaration whose plaintext exceeds its
+ciphertext is refused, since age never produces one and such a claim
+describes exactly the expansion that does not happen here. See decision
+DEC-045.
+
+Attachment names are sender-controlled text. They are quarantined with the
+body, never placed on an agent-safe surface, and never used as a path: a name
+is reduced to its last component with traversal, control characters, device
+names, and shell-significant characters removed before anything is saved.
+
 | Object | Default | Hard maximum |
 |---|---:|---:|
 | Message plaintext | 256 KiB | 1 MiB |
@@ -2081,8 +2101,8 @@ npx skills add <owner>/herdr-remote-channel `
 | HRC-SEC-003 | Every message is authenticated by a valid sender-device signature. | Implemented | `crates/hrc-core/src/message.rs`: the signer is resolved from the roster and the signature verified before any field is trusted |
 | HRC-SEC-004 | Roster changes are signed and hash chained. | Implemented | `crates/hrc-core/src/roster.rs`; chain, sequence, epoch, and authority all enforced on apply |
 | HRC-SEC-005 | Removed devices cannot receive future-epoch messages. | Implemented | `crates/hrc-core/src/message.rs` addresses only active devices, proven end to end in `crates/hrc-core/src/message/tests.rs` |
-| HRC-SEC-006 | Received attachments are size checked before decryption. | Approved | Pending |
-| HRC-SEC-007 | Decompressed data has strict size limits. | Approved | Pending |
+| HRC-SEC-006 | Received attachments are size checked before decryption. | Implemented | `crates/hrc-protocol/src/attachment.rs`: the declared size travels in the signed envelope and is checked against the section 20.3 limits before anything is fetched, and `verify_fetched` checks the arriving bytes against that declaration and its digest |
+| HRC-SEC-007 | Decompressed data has strict size limits. | Implemented | HRC extracts no archives, so there is no expansion step to bound: `crates/hrc-protocol/src/attachment.rs` carries compressed content as opaque bytes under the ordinary attachment limit and refuses a declaration whose plaintext exceeds its ciphertext. See decision DEC-045 |
 | HRC-SEC-008 | Outgoing context is previewed and secret scanned. | Implemented | `crates/hrc-core/src/context.rs`: `ready_to_send` refuses a package with findings rather than stripping them |
 | HRC-SEC-009 | Incoming content is quarantined and treated as untrusted. | Implemented | `crates/hrc-core/src/message.rs` returns `QuarantinedMessage`; `crates/hrc-core/src/gate.rs` frames approved content as untrusted before delivery |
 | HRC-SEC-010 | Security-sensitive commands require trusted human authorization and reject agent-safe/non-interactive invocation. | Implemented | `crates/hrc-core/src/rpc.rs` refuses every section 22.7 operation on the agent-safe surface before reading or writing any state; `crates/hrc-cli/src/dispatch.rs` refuses the same set non-interactively, and a test joins the two lists so they cannot drift |
@@ -2425,7 +2445,7 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 | HRC-SKILL-001 through HRC-SKILL-007 | M3 | `AC-SKILL`: an agent guides setup and drafts communication while tests prove it cannot retrieve private keys/invite secrets, approve joins, or bypass the prompt gate. | Partial: `.agents/skills/herdr-remote-channel/SKILL.md` ships at the section 24 path, and `crates/hrc-cli/tests/skill_contract.rs` proves it states every section 24.2 prohibition, documents every exit code the CLI produces, covers every section 24.1 responsibility, invokes no command the CLI does not define, frames inbound content as data rather than instructions, and contains no secret material. Remaining: the enrollment and context commands the skill describes. |
 | HRC-SKILL-008 | M4 | `AC-SKILL-CONTEXT`: an agent can draft supported context packages while preview and send remain human-controlled. | Partial: the skill states that preview reports the exact bytes, that a detected secret blocks the send, and that pasting the content elsewhere to defeat the scan is prohibited. Remaining: the CLI commands that build and preview a package. |
 | HRC-SEC-001 through HRC-SEC-005, HRC-SEC-013, HRC-SEC-015, HRC-SEC-016 | M1 | `AC-KEYS-AND-ROSTER`: key isolation, signed recipient intent, signature validation, control-chain validation, control-only publication ordering, revocation, and stale-epoch rejection pass adversarial tests. | Partial: `crates/hrc-core/src/message/tests.rs` and `crates/hrc-core/src/roster/tests.rs` cover forged signatures, unknown signing devices, foreign channels, stale epochs, a revoked device's message reintroduced after revocation, and a recipient set that disagrees with the roster; `crates/hrc-crypto/src/store.rs` proves the stored key file contains no plaintext secret and that a wrong passphrase, a tampered file, and a corrupt document all fail closed. Remaining: the OS keychain backend. |
-| HRC-SEC-006 through HRC-SEC-008 | M4 | `AC-CONTENT-SECURITY`: ciphertext/decompression limits, secret scanning, and preview reject malicious fixtures. | Partial: `crates/hrc-crypto/src/encryption.rs` enforces ciphertext and plaintext limits before decryption, and `crates/hrc-core/src/context/tests.rs` covers secret scanning and preview. Remaining: decompression limits and archive fixtures. |
+| HRC-SEC-006 through HRC-SEC-008 | M4 | `AC-CONTENT-SECURITY`: ciphertext/decompression limits, secret scanning, and preview reject malicious fixtures. | `crates/hrc-crypto/src/encryption.rs` enforces ciphertext and plaintext limits before decryption; `crates/hrc-core/src/context/tests.rs` covers secret scanning and preview; `crates/hrc-protocol/src/attachment/tests.rs` covers a declaration over the ceiling, a per-message total exceeded across attachments within it, an unbounded count, a repeated blob reference, an object larger than declared, a substituted object of the declared size, a plaintext claiming to exceed its ciphertext, and compressed content carried opaquely, plus traversal, control characters, Windows device names, dot-only names, and shell-significant characters in sender-chosen file names. |
 | HRC-SEC-009 | M3 | `AC-QUARANTINE`: every inbound body is quarantined and framed as untrusted before any approved disclosure. | `crates/hrc-core/src/message.rs` and `crates/hrc-core/src/gate/tests.rs`: opening yields quarantined content, and delivery is impossible without a consumed authorization that applies the provenance banner. |
 | HRC-SEC-010, HRC-SEC-014 | M3 | `AC-HUMAN-AUTH`: agent-safe and non-interactive callers cannot read pending bodies, authorize actions, or reuse an authorization. | `crates/hrc-core/src/rpc/tests.rs`: all nine section 22.7 operations are refused on the agent-safe surface with the stable `authorization_required` error and leave no state behind; every agent-safe answer is rendered and searched for the pending body; a pending message and an unknown one produce the same error, so the refusal reveals nothing; an approval is spent by the call that issues it and never returned; unknown methods and unknown parameters fail to decode. `crates/hrc-cli/src/dispatch.rs` joins the daemon's reserved set to the CLI's, and `crates/hrc-cli/tests/command_contract.rs` proves the live daemon agent endpoint still returns `authorization_required` when a trusted request reaches it. Verified on Linux, macOS, and Windows CI. |
 | HRC-SEC-011 and HRC-SEC-012 | M2 | `AC-AUDIT-AND-HISTORY`: local actions are audited and observed rewrite and substitution scenarios fail closed. | Partial: `crates/hrc-core/src/sync/tests.rs` proves rewrite and substitution halt the channel and are audited. Remaining: auditing approval decisions, which arrive with the prompt gate. |
@@ -2455,7 +2475,7 @@ Every implementation PR must update this table.
 | M1 Secure foundation | 99% | Adds the framed local IPC layer, verified against a Unix socket and a Windows named pipe on CI, closing the compatibility spike | Local IPC | Persist the principal key, then integrate an OS keychain backend |
 | M2 Git messaging | 90% | Adds the synchronization engine plus real `hrc sync --once`, `hrc daemon`, `hrc audit`, and live daemon IPC hosting over the local store and Git transport | Daemon IPC hosting | Add receipts, threading, deduplication, end-to-end restart coverage, and audit decision recording |
 | M3 Herdr integration | 55% | Adds the daemon's two local interfaces as two request and response types, and now hosts them from the resident daemon so agent-safe callers still cannot name a pending body | Live daemon boundary | Build the trusted approval TUI, then the Herdr inbox UI |
-| M4 Context/delegation | 50% | Adds structured delegation: the section 18.4 lifecycle, party rules for who may report what, and a task shape with nothing executable in it | Delegation messages | Add git-ignored path checking and attachment limits, then wire delegation to the CLI |
+| M4 Context/delegation | 65% | Adds attachment limits checked before any fetch and again on arrival, and sender-chosen file names treated as hostile text | Attachment limits | Add git-ignored path checking, then wire context and delegation to the CLI |
 | M5 Provider ecosystem | 0% | Not started | N/A | Deferred until core protocol stabilizes |
 
 ### Requirement completion summary
@@ -2541,6 +2561,7 @@ recorded either directly in this PRD or in a stable linked artifact.
 | DEC-016 | RFC 8785 canonical JSON uses a pinned Rust implementation, initially `serde_jcs`, guarded by protocol vectors. | Accepted | Avoids custom canonicalization while making signed bytes interoperable. |
 | DEC-017 | Build and test run in a separate `pull_request` workflow rather than being added to the `pull_request_target` traceability workflow. | Accepted | Compiling and running pull-request code under `pull_request_target` would hand a write-capable, secret-bearing context to untrusted code; the two triggers stay separated. |
 | DEC-018 | The CLI publishes a fixed numeric exit-code contract: 0 success, 1 runtime failure, 2 usage, 3 unimplemented, 4 authorization required. | Accepted | PRD section 11.1 requires documented exit codes, and the Herdr plugin and skill must branch on stable numbers rather than parsing prose. |
+| DEC-045 | HRC never decompresses received content, and attachment limits are enforced on the declaration before fetching and again on the bytes that arrive. | Accepted | A decompression limit protects an expansion step; not having the step is stronger than bounding it, and archive handling is not needed to move opaque ciphertext. Checking only the declaration would make it a promise rather than a limit, and checking only after decryption would make it a postmortem. |
 | DEC-044 | Delegation state changes are checked against both the lifecycle and the party reporting them, and terminal states are final. | Accepted | A lifecycle check alone would let an assignee accept a task on its own behalf and then declare its own work reviewed and complete, which is the judgement the requester is supposed to make. Making terminal states final stops a closed task from being reopened by whoever speaks last. |
 | DEC-043 | A receipt is accepted only from a device that was an intended recipient of every message it names, and receipt state is per device rather than per message. | Accepted | A signature proves who sent a receipt, not that they were ever entitled to report on the message it names; without the recipient check any channel member could tell a sender their message landed. Per-device state keeps the sender's picture honest, since one device reporting delivery says nothing about the other devices the message was addressed to. |
 | DEC-042 | Inbound messages are ordered by local arrival, and a message whose predecessor is missing is held rather than dropped or accepted early. | Accepted | `createdAt` is sender-chosen, so a backdated message could otherwise be placed anywhere in a recipient's view of a thread. Holding rather than dropping keeps lazy and partial fetching workable; holding rather than accepting keeps per-device order a guarantee. A fabricated predecessor and a genuinely missing one are indistinguishable at the receiver, and holding is the correct answer to both: whoever invented a link cannot produce it. |
