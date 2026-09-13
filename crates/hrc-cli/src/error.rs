@@ -106,6 +106,13 @@ pub enum CliError {
         value: String,
     },
 
+    /// No message with that identifier is known locally.
+    #[error("no message {message_id} in this channel")]
+    NoSuchMessage {
+        /// The message asked about.
+        message_id: String,
+    },
+
     /// The invite names a different channel than the repository holds.
     #[error("the invite is for channel {expected}, but the repository holds {found}")]
     InviteChannelMismatch {
@@ -139,6 +146,7 @@ impl CliError {
             CliError::LocalDeviceNotInChannel => "device_not_in_channel",
             CliError::InviteExpired { .. } => "invite_expired",
             CliError::InvalidLifetime { .. } => "invalid_lifetime",
+            CliError::NoSuchMessage { .. } => "no_such_message",
             CliError::InviteChannelMismatch { .. } => "invite_channel_mismatch",
         }
     }
@@ -156,7 +164,8 @@ impl CliError {
             | CliError::NoChannel
             | CliError::AmbiguousChannel
             | CliError::InviteExpired { .. }
-            | CliError::InvalidLifetime { .. } => exit::USAGE,
+            | CliError::InvalidLifetime { .. }
+            | CliError::NoSuchMessage { .. } => exit::USAGE,
             CliError::Io { .. }
             | CliError::Storage(_)
             | CliError::Crypto(_)

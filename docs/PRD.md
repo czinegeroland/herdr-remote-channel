@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-14T09:20:00+02:00 |
+| Last updated | 2026-09-14T17:10:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -506,8 +506,8 @@ The Herdr plugin must expose:
 | HRC-CH-004 | Support public repositories after explicit risk confirmation. | Should | Approved | Pending |
 | HRC-CH-005 | Create expiring, single-use invites. | Must | Implemented | `crates/hrc-crypto/src/enrollment.rs` generates, encodes, and validates expiring invites; `crates/hrc-core/src/roster.rs` tracks invite state from the control log so a second admission under one invite is rejected by every participant; `hrc invite create` publishes the authorizing control entry and returns the code once |
 | HRC-CH-006 | Generate separate principal and device identities. | Must | Implemented | `crates/hrc-crypto/src/store.rs` `PrincipalSecrets` is a distinct type with no encryption identity, and `hrc init` generates and stores both keys or neither |
-| HRC-CH-007 | Require explicit administrator approval for joins. | Must | Implemented | `crates/hrc-core/src/enrollment.rs`: `review_join` validates but admits nobody, and `admit` — the approval itself — refuses a signer who is not an active administrator; `hrc join pending` lists only requests that already validate, and `hrc join approve` stays on the section 22.7 boundary |
-| HRC-CH-008 | Support member and device revocation. | Should | In progress | `crates/hrc-core/src/roster.rs`; publication and CLI surface pending |
+| HRC-CH-007 | Require explicit administrator approval for joins. | Must | Implemented | `crates/hrc-core/src/enrollment.rs`: `review_join` validates but admits nobody, and `admit` — the approval itself — refuses a signer who is not an active administrator; `hrc join pending` lists only requests that already validate, `hrc join approve` stays on the section 22.7 boundary, and admission is performed only by the daemon's trusted interface, proven by a test where the identical request succeeds on the trusted socket and is refused on the agent-safe one |
+| HRC-CH-008 | Support member and device revocation. | Should | Implemented | `crates/hrc-core/src/roster.rs` evaluates the operations, and the daemon's trusted interface publishes them as control entries; `hrc member remove` and `hrc device revoke` stay on the section 22.7 boundary, and `hrc members` and `hrc device list` read the published roster |
 | HRC-CH-009 | Maintain a signed, append-only membership/control log. | Must | Implemented | `crates/hrc-protocol/src/control.rs`, `crates/hrc-core/src/roster.rs` |
 | HRC-CH-010 | Detect observed conflicting control histories, rewrites, deletions, and substitutions, then stop synchronization. | Must | Approved | Pending |
 
@@ -515,9 +515,9 @@ The Herdr plugin must expose:
 
 | ID | Requirement | Priority | Status | Evidence |
 |---|---|---:|---|---|
-| HRC-MSG-001 | Send encrypted notes. | Must | In progress | `crates/hrc-core/src/message.rs` seals and opens notes; the CLI and transport wiring are pending |
-| HRC-MSG-002 | Send questions and correlated answers. | Must | In progress | `crates/hrc-core/src/receipt.rs` `correlate_answer` ties an answer to a question this installation actually asked, in the thread it was asked in; the CLI surface for asking and answering is pending |
-| HRC-MSG-003 | Maintain threaded conversations. | Must | In progress | `crates/hrc-storage/src/lib.rs` `thread_entries` reads a thread in local arrival order rather than sender-declared order; composing replies into a thread from the CLI is pending |
+| HRC-MSG-001 | Send encrypted notes. | Must | Implemented | `hrc send` seals against the roster-derived recipient set and publishes to the transport; `hrc sync --once` fetches, decrypts, and quarantines, proven end to end with the plaintext absent from the published repository |
+| HRC-MSG-002 | Send questions and correlated answers. | Must | Implemented | `crates/hrc-core/src/receipt.rs` `correlate_answer` ties an answer to a question this installation asked, and `hrc ask` and `hrc reply` carry it, with the reply's thread read from local state rather than chosen by the sender |
+| HRC-MSG-003 | Maintain threaded conversations. | Must | Implemented | `crates/hrc-storage/src/lib.rs` `thread_entries` reads a thread in local arrival order, and `hrc thread` renders it with quarantined bodies redacted |
 | HRC-MSG-004 | Produce delivery and optional read receipts. | Must | Implemented | `crates/hrc-protocol/src/receipt.rs` defines the body, `crates/hrc-core/src/receipt.rs` builds receipts and refuses one from a device that was never an intended recipient, and `crates/hrc-storage/src/lib.rs` records state per reporting device |
 | HRC-MSG-005 | Support message expiration. | Must | In progress | `crates/hrc-core/src/message.rs` refuses expired messages on open; expiry display and sweeping are pending |
 | HRC-MSG-006 | Deduplicate at-least-once deliveries. | Must | Implemented | `crates/hrc-storage/src/lib.rs` `record_inbound` treats a repeat of the same message ID and ciphertext digest as ordinary traffic, and the same ID with a different digest as a substitution rather than a repeat |
@@ -564,7 +564,7 @@ The Herdr plugin must expose:
 | HRC-SYNC-007 | Never force-push during normal operation. | Must | Implemented | `crates/hrc-transport-git/src/lib.rs`: no code path passes `--force` or a `+` refspec when pushing |
 | HRC-SYNC-008 | Re-encrypt unpublished messages after a roster-epoch change. | Must | Approved | Pending |
 | HRC-SYNC-009 | Back off with jitter after failures or inactivity. | Must | Implemented | `crates/hrc-core/src/sync.rs` `Backoff` and `poll_interval` |
-| HRC-SYNC-010 | Continue operating after process and Herdr restarts. | Must | In progress | `crates/hrc-storage/src/lib.rs` persists the cursor and abandoned reservations, and `crates/hrc-cli/src/commands.rs` recovers them in `sync_once` and the resident daemon loop; end-to-end restart coverage is still pending |
+| HRC-SYNC-010 | Continue operating after process and Herdr restarts. | Must | Implemented | `crates/hrc-storage/src/lib.rs` persists the cursor, held messages, and abandoned reservations across reopen; `crates/hrc-cli/tests/command_contract.rs` proves repeated synchronization neither duplicates nor loses what already arrived |
 | HRC-SYNC-011 | Allocate message ID, device sequence, predecessor chain ID, payload, and outbox record atomically. | Must | Implemented | `crates/hrc-storage/src/lib.rs` `allocate_outgoing`, proven by a 100-allocation four-thread concurrency test |
 
 ### 12.6 Transport extensibility
@@ -607,7 +607,7 @@ The Herdr plugin must expose:
 | ID | Requirement | Priority | Status | Evidence |
 |---|---|---:|---|---|
 | HRC-TECH-001 | Implement the production CLI, daemon, protocol, crypto, transport core, and Herdr integration in Rust 2024 edition. | Must | In progress | `Cargo.toml`, `crates/`, `.github/workflows/build-and-test.yml` |
-| HRC-TECH-002 | Ship one self-contained `hrc` executable with subcommands for CLI, daemon, Herdr actions, events, panes, and startup. | Must | In progress | `crates/hrc-cli/src/main.rs`; `init`, `whoami`, `channels`, `status`, `doctor`, `sync --once`, `daemon`, and `audit` perform real work, and `hrc daemon` now binds the agent-safe and trusted local IPC listeners before entering the resident loop; the Herdr entry points still report the documented not-implemented code |
+| HRC-TECH-002 | Ship one self-contained `hrc` executable with subcommands for CLI, daemon, Herdr actions, events, panes, and startup. | Must | In progress | `crates/hrc-cli/src/main.rs`; identity, channel, invite, join, messaging, membership, synchronization, daemon, and audit commands perform real work, and the daemon serves both local interfaces with the trusted one performing membership changes; the Herdr entry points still report the documented not-implemented code |
 | HRC-TECH-003 | Use Tokio for asynchronous scheduling, process management, polling, and cancellation. | Must | In progress | Decision DEC-015, plus `crates/hrc-cli/src/main.rs` and `src/commands.rs` now host the resident daemon loop and both local IPC listeners on a Tokio runtime; cancellation and process-management wiring are still pending |
 | HRC-TECH-004 | Use Clap for the public CLI and stable machine-readable command contracts. | Must | Implemented | `crates/hrc-cli/src/cli.rs`, `crates/hrc-cli/src/render.rs`: both output modes render one value, so JSON and human output cannot diverge |
 | HRC-TECH-005 | Use Serde/serde_json and a pinned RFC 8785 implementation with protocol test vectors. | Must | In progress | `crates/hrc-protocol/src/canonical.rs`, `crates/hrc-protocol/tests/rfc8785_vectors.rs` |
@@ -1408,6 +1408,12 @@ without discarding any.
 This envelope is the `payload` of an `hrc/v1/message` signed object. The signed
 object is then age-encrypted to the intended active recipient devices.
 
+Message identifiers are ULIDs, so identifiers generated in different
+milliseconds sort in that order as plain strings. Two generated within one
+millisecond have no defined order between them, which is all a ULID promises;
+per-device order does not depend on it, because the chain below establishes
+that and the inbox reads by local arrival.
+
 For per-device ordering, each logical message has a stable chain ID:
 
 ```text
@@ -2002,6 +2008,11 @@ hrc audit [--since <time>]
 
 ### 22.7 Human authorization boundary
 
+The trusted interface performs these operations itself rather than returning
+a plan for a caller to carry out. An operation that handed back instructions
+would put the decision and its execution in two places, and only one of them
+is behind the human interface.
+
 The following operations are unavailable through agent-safe RPC and `--json`:
 
 - Reading a pending inbound body
@@ -2473,11 +2484,11 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 | HRC-CH-001 through HRC-CH-007, HRC-CH-009 | M1 | `AC-ENROLL`: two clean devices create, invite, join, verify, and approve a channel using no shared private material. Invalid genesis, invite, proof, or signature is rejected. | Partial: `crates/hrc-core/src/enrollment/tests.rs` drives request, review, and admission end to end with real keys and real age encryption, and rejects a replayed request, a forged or transferred invite proof, a certificate swapped after the proof, a certificate signed by a stranger, a tampered request, a foreign channel, an expired or revoked invite, an admission naming an invite the log never opened, a second enrollment by an existing member, an ordinary member trying to read a pending join, and a non-administrator trying to admit. Both sides derive the same safety phrase, and a substituted key changes it. `crates/hrc-cli/tests/command_contract.rs` runs the whole of `AC-ENROLL` across two clean installations sharing one repository: create, invite, join, and review, with both sides deriving the same safety phrase from public material, the invite secret proven absent from the published repository by `git grep`, a request under an unknown invite not listed, a request under a revoked invite no longer reviewable, and approval still refused outside the trusted interface. |
 | HRC-CH-008 | M1 | `AC-REVOCATION`: a device is revoked, the epoch advances, and messages introduced afterward cannot be accepted from or decrypted by the revoked device. | Partial: `crates/hrc-core/src/roster/tests.rs` proves the epoch advances, the revoked device loses authority from that epoch, and it cannot sign later entries; `crates/hrc-crypto/src/encryption.rs` proves it cannot decrypt later ciphertext. Remaining: end-to-end over a published channel. |
 | HRC-CH-010 | M1 | `AC-CONTROL-INTEGRITY`: observed same-parent successors, broken previous hashes, rewrites, deletions, and substitutions stop synchronization with a sticky alert. | Partial: `crates/hrc-core/src/roster/tests.rs` rejects same-sequence successors, broken predecessor hashes, skipped sequences, wrong epochs, and foreign-channel entries, and proves a rejected entry leaves state unchanged. Remaining: synchronization halt and the sticky alert. |
-| HRC-MSG-001 through HRC-MSG-007, HRC-MSG-010 | M2 | `AC-MESSAGING`: two devices exchange offline notes and threaded questions/answers with receipts, expiry, deduplication, ordering, and local audit evidence. | Partial: `crates/hrc-core/src/message/tests.rs` covers seal and open between two devices, broadcast addressing, and expiry. `crates/hrc-storage/src/tests.rs` covers deduplication, a substituted ciphertext under a reused message ID, out-of-order arrival held and then released in sequence, a gap that survives a restart, a sender forking its own chain by reusing a sequence or restarting it, a fabricated predecessor that never gets in, independent chains per sender device, and a backdated message that cannot reorder a thread. `crates/hrc-core/src/receipt/tests.rs` covers receipts from a non-recipient, about a message never sent, a batch refused for one bad reference, every receipt state, and answer correlation across an absent, unknown, wrong-kind, and wrong-thread reference; `crates/hrc-storage/src/tests.rs` covers per-device receipt state, repeated reports, and a closed state set. Remaining: exchanging these over a published channel and the CLI surface. |
+| HRC-MSG-001 through HRC-MSG-007, HRC-MSG-010 | M2 | `AC-MESSAGING`: two devices exchange offline notes and threaded questions/answers with receipts, expiry, deduplication, ordering, and local audit evidence. | Partial: `crates/hrc-core/src/message/tests.rs` covers seal and open between two devices, broadcast addressing, and expiry. `crates/hrc-storage/src/tests.rs` covers deduplication, a substituted ciphertext under a reused message ID, out-of-order arrival held and then released in sequence, a gap that survives a restart, a sender forking its own chain by reusing a sequence or restarting it, a fabricated predecessor that never gets in, independent chains per sender device, and a backdated message that cannot reorder a thread. `crates/hrc-core/src/receipt/tests.rs` covers receipts from a non-recipient, about a message never sent, a batch refused for one bad reference, every receipt state, and answer correlation across an absent, unknown, wrong-kind, and wrong-thread reference; `crates/hrc-storage/src/tests.rs` covers per-device receipt state, repeated reports, and a closed state set. `crates/hrc-cli/tests/command_contract.rs` drives the loop over a real repository: a note sealed, published at the section 16.2 layout path, fetched, decrypted, and quarantined rather than delivered, with the plaintext proven absent from the published branch by `git grep`; three messages arriving in send order with chronologically sortable identifiers; three synchronization passes over one message producing one inbox entry; a question and its reply sharing one thread; a thread redacting a quarantined body; and sends to a non-member and replies to an unknown message refused. Remaining: exchanging receipts over a published channel. |
 | HRC-MSG-008 and HRC-MSG-009 | M4 | `AC-DELEGATION-MESSAGES`: task, accept/decline, progress, and result states are exchanged without local execution. | Partial: `crates/hrc-protocol/src/delegation.rs` covers the wire shapes, the full section 18.4 lifecycle, a task body proven to expose no executable field, progress that cannot announce a conclusion, and a result that cannot declare itself complete; `crates/hrc-core/src/delegation/tests.rs` covers an outsider reporting, a requester accepting on the assignee's behalf, an assignee completing its own work, expiry claimed by a peer, work starting before acceptance, declined and completed tasks that cannot be reopened by either side, and a rejected transition leaving state untouched. Remaining: exchanging these over a published channel and the CLI surface. |
 | HRC-GATE-001 through HRC-GATE-008 | M3 | `AC-PROMPT-GATE`: pending bodies are unavailable through agent-safe interfaces; trusted UI issues a one-use digest-bound authorization; reuse, modification, and wrong-target delivery fail. | Partial: `crates/hrc-core/src/gate/tests.rs` proves reuse, wrong-message use, ciphertext substitution under an approval, expiry, and edited-content mismatch all fail, and that hostile endpoint and kind strings never reach the agent view; `crates/hrc-core/src/rpc/tests.rs` proves the daemon boundary; `crates/hrc-cli/tests/command_contract.rs` proves the resident daemon binds separate agent-safe and trusted listeners and still refuses trusted methods on the agent-safe endpoint. Remaining: the trusted UI and the audit record of approvals. |
 | HRC-CTX-001 through HRC-CTX-007 | M4 | `AC-CONTEXT`: supported context items round-trip with previews and verified hashes; excluded paths, detected secrets, oversized objects, and malformed archives are blocked. | Partial: `crates/hrc-core/src/context/tests.rs` covers all six item kinds, digest verification, seven token shapes, credential assignments, twelve excluded paths, and false-positive resistance on placeholders and ordinary code. Remaining: git-ignored path checking, attachment size limits, and archive handling. |
-| HRC-SYNC-001 through HRC-SYNC-010 | M2 | `AC-GIT-SYNC`: offline queues recover; concurrent peers publish without manual merges; lost responses deduplicate; non-descendant history and changed objects halt processing. | Partial: `crates/hrc-core/src/sync/tests.rs` covers cursor resumption, conflict retry, security-conflict halting, history-rewrite halting, sticky halts, and adapter-reported anomalies; `crates/hrc-transport-git/tests/git_adapter.rs` covers concurrent peers publishing without manual merges; `crates/hrc-cli/src/commands/tests.rs` proves `hrc sync --once` gates fetches on the remote head and publishes queued messages to a real Git remote, and that `daemon_tick` keeps good channels running while surfacing per-channel failures. Remaining: deduplication on replay and end-to-end restart coverage. |
+| HRC-SYNC-001 through HRC-SYNC-010 | M2 | `AC-GIT-SYNC`: offline queues recover; concurrent peers publish without manual merges; lost responses deduplicate; non-descendant history and changed objects halt processing. | Partial: `crates/hrc-core/src/sync/tests.rs` covers cursor resumption, conflict retry, security-conflict halting, history-rewrite halting, sticky halts, and adapter-reported anomalies; `crates/hrc-transport-git/tests/git_adapter.rs` covers concurrent peers publishing without manual merges; `crates/hrc-cli/src/commands/tests.rs` proves `hrc sync --once` gates fetches on the remote head and publishes queued messages to a real Git remote, and that `daemon_tick` keeps good channels running while surfacing per-channel failures. `crates/hrc-cli/tests/command_contract.rs` proves repeated synchronization passes neither duplicate nor lose what already arrived. Remaining: lazy blob fetching. |
 | HRC-SYNC-011 | M2 | `AC-LOCAL-SEQUENCE`: concurrent local callers and process crashes cannot allocate duplicate device sequences or ambiguous predecessor chain IDs. | `crates/hrc-storage/src/tests.rs`: four threads on separate connections allocate 100 sequences with no duplicate, gap, or repeated predecessor link; a reservation survives reopening; an abandoned reservation is burned rather than reused. Verified on Linux, macOS, and Windows CI. |
 | HRC-TR-001 through HRC-TR-004 | M0 | `AC-ADAPTER-SPEC`: protocol schema, capability declaration, error model, and opaque-object boundary pass specification review. | Partial: `crates/hrc-transport/src/lib.rs` implements the capability declaration, error model, and opaque-object boundary as executable types. Remaining: specification review, and the JSON-RPC binding for out-of-process adapters. |
 | HRC-TR-005 and HRC-TR-006 | M2 | `AC-GIT-ADAPTER`: generic Git operation succeeds without GitHub API dependency; GitHub optimization preserves identical protocol behavior. | Partial: `crates/hrc-transport-git/tests/git_adapter.rs` drives create, publish, fetch, concurrent conflict and retry, merge rejection, and object substitution against a real bare repository using plain Git and no network or GitHub API. Remaining: the GitHub-specific optimization. |
@@ -2513,8 +2524,8 @@ Every implementation PR must update this table.
 |---|---:|---|---|---|
 | M0 Product and protocol | 55% | Adds an executable adapter contract, capability declaration, and error model to the written specification | Transport contract and reference adapter | Obtain product-owner approval and complete the JSON-RPC adapter binding |
 | M1 Secure foundation | 100% | Adds real channel creation: separate principal and device keys, a self-verified genesis, and publication to a Git remote | Channel creation | Integrate an OS keychain backend |
-| M2 Git messaging | 98% | Adds the synchronization engine plus real `hrc sync --once`, `hrc daemon`, `hrc audit`, and live daemon IPC hosting over the local store and Git transport | Daemon IPC hosting | Add receipts, threading, deduplication, end-to-end restart coverage, and audit decision recording |
-| M3 Herdr integration | 75% | Adds the daemon's two local interfaces as two request and response types, and now hosts them from the resident daemon so agent-safe callers still cannot name a pending body | Live daemon boundary | Build the trusted approval TUI, then the Herdr inbox UI |
+| M2 Git messaging | 99% | Adds the synchronization engine plus real `hrc sync --once`, `hrc daemon`, `hrc audit`, and live daemon IPC hosting over the local store and Git transport | Daemon IPC hosting | Add receipts, threading, deduplication, end-to-end restart coverage, and audit decision recording |
+| M3 Herdr integration | 80% | Adds the daemon's two local interfaces as two request and response types, and now hosts them from the resident daemon so agent-safe callers still cannot name a pending body | Live daemon boundary | Build the trusted approval TUI, then the Herdr inbox UI |
 | M4 Context/delegation | 65% | Adds attachment limits checked before any fetch and again on arrival, and sender-chosen file names treated as hostile text | Attachment limits | Add git-ignored path checking, then wire context and delegation to the CLI |
 | M5 Provider ecosystem | 0% | Not started | N/A | Deferred until core protocol stabilizes |
 
@@ -2532,6 +2543,16 @@ Every implementation PR must update this table.
 | Delivery governance | 0 | 5 | 0% |
 | Implementation platform | 0 | 12 | 0% |
 | Security | 0 | 16 | 0% |
+
+---
+
+## 31.1 Working agreement
+
+`docs/HANDOFF.md` records how this PRD is being delivered: the pull-request
+cycle, the living-PRD rule and its CI check, what the codebase expects of a
+change, and where the work currently stands. It is written for whoever picks
+the work up next and is updated when the way of working changes, not when the
+code does.
 
 ---
 

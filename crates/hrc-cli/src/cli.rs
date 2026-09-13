@@ -179,6 +179,7 @@ pub enum MemberAction {
     /// Remove a member and advance the roster epoch.
     Remove {
         /// Principal ID of the member.
+        #[arg(allow_hyphen_values = true)]
         id: String,
     },
 }
@@ -208,6 +209,7 @@ pub enum DeviceAction {
 #[derive(Debug, Args)]
 pub struct SendArgs {
     /// Recipient principal.
+    #[arg(allow_hyphen_values = true)]
     pub recipient: String,
     /// Message text.
     pub message: String,
@@ -220,6 +222,7 @@ pub struct AskArgs {
     ///
     /// An endpoint is advisory. The receiver decides whether any content
     /// reaches a local agent.
+    #[arg(allow_hyphen_values = true)]
     pub recipient: String,
     /// Question text.
     pub question: String,
@@ -238,6 +241,7 @@ pub struct ReplyArgs {
 #[derive(Debug, Args)]
 pub struct DelegateArgs {
     /// Recipient principal.
+    #[arg(allow_hyphen_values = true)]
     pub recipient: String,
     /// Short task title.
     #[arg(long, value_name = "TITLE")]

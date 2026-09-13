@@ -28,6 +28,11 @@ pub fn success(as_json: bool, command: &str, value: &Value) {
         "audit" => render_audit(value),
         "invite create" | "invite list" | "invite revoke" => render_invite(value),
         "join" | "join pending" => render_join(value),
+        "send" | "ask" | "reply" => render_sent(value),
+        "inbox" => render_inbox(value),
+        "members" => render_members(value),
+        "device list" => render_devices(value),
+        "thread" => render_thread(value),
         _ => println!("{value}"),
     }
 }
@@ -334,6 +339,143 @@ fn render_join(value: &Value) {
         value["safetyPhrase"].as_str().unwrap_or("?")
     );
     println!("Compare it with the administrator out loud before they approve.");
+}
+
+/// Renders a sent message.
+fn render_sent(value: &Value) {
+    println!(
+        "{} {} in thread {}",
+        value["kind"].as_str().unwrap_or("message"),
+        value["messageId"].as_str().unwrap_or("?"),
+        value["threadId"].as_str().unwrap_or("?")
+    );
+
+    if value["published"].as_bool() == Some(false) {
+        println!("Queued locally; it will publish on the next synchronization.");
+    }
+}
+
+/// Renders the inbox.
+fn render_inbox(value: &Value) {
+    let entries = value["entries"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+
+    if entries.is_empty() {
+        println!("Inbox is empty.");
+        return;
+    }
+
+    for entry in entries {
+        println!(
+            "{:>4}  {}  {} from {}  [{}]",
+            entry["arrival"].as_u64().unwrap_or(0),
+            entry["messageId"].as_str().unwrap_or("?"),
+            entry["kind"].as_str().unwrap_or("?"),
+            entry["sender"].as_str().unwrap_or("?"),
+            entry["disposition"].as_str().unwrap_or("?")
+        );
+    }
+}
+
+/// Renders one thread.
+fn render_thread(value: &Value) {
+    let entries = value["entries"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+
+    if entries.is_empty() {
+        println!("No messages in that thread.");
+        return;
+    }
+
+    for entry in entries {
+        println!(
+            "{:>4}  {} from {}",
+            entry["arrival"].as_u64().unwrap_or(0),
+            entry["kind"].as_str().unwrap_or("?"),
+            entry["sender"].as_str().unwrap_or("?")
+        );
+
+        if let Some(body) = entry["body"].as_str() {
+            println!("      {body}");
+        }
+    }
+}
+
+/// Renders the member list.
+fn render_members(value: &Value) {
+    println!(
+        "Roster epoch {}",
+        value["rosterEpoch"].as_u64().unwrap_or(0)
+    );
+
+    for member in value["members"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+    {
+        // Role and state are words rather than colours, so a terminal
+        // without colour shows the same information (PRD section 27).
+        println!(
+            "{}  {}  {}",
+            if member["active"].as_bool() == Some(true) {
+                "active  "
+            } else {
+                "removed "
+            },
+            if member["administrator"].as_bool() == Some(true) {
+                "admin "
+            } else {
+                "member"
+            },
+            member["principalId"].as_str().unwrap_or("?")
+        );
+
+        for device in member["devices"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+        {
+            println!(
+                "    {}  {}",
+                if device["active"].as_bool() == Some(true) {
+                    "active "
+                } else {
+                    "revoked"
+                },
+                device["deviceId"].as_str().unwrap_or("?")
+            );
+        }
+    }
+}
+
+/// Renders this principal's devices.
+fn render_devices(value: &Value) {
+    let devices = value["devices"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+
+    if devices.is_empty() {
+        println!("No devices in this channel.");
+        return;
+    }
+
+    for device in devices {
+        println!(
+            "{}  {}  added in epoch {}",
+            if device["active"].as_bool() == Some(true) {
+                "active "
+            } else {
+                "revoked"
+            },
+            device["deviceId"].as_str().unwrap_or("?"),
+            device["addedInEpoch"].as_u64().unwrap_or(0)
+        );
+    }
 }
 
 #[cfg(test)]

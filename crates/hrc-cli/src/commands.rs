@@ -20,6 +20,7 @@ use hrc_protocol::control::{
 };
 use hrc_protocol::domain;
 use hrc_protocol::identity::{DeviceCertificatePayload, DeviceDescriptor};
+use hrc_protocol::message::MessageEnvelope;
 use hrc_protocol::signed::{SignedObject, Signer};
 use hrc_storage::Database;
 use hrc_transport::{ObjectClass, PublishObject, Revision, Transport};
@@ -722,7 +723,12 @@ pub fn join_pending(context: &Context) -> Result<Value> {
                     &now,
                 ) {
                     pending.push(json!({
-                        "requestId": object.name.rsplit('/').next().unwrap_or_default(),
+                        "requestId": object
+                            .name
+                            .rsplit('/')
+                            .next()
+                            .and_then(|file| file.strip_suffix(".age"))
+                            .unwrap_or_default(),
                         "inviteId": review.invite_id,
                         "principalId": review.principal_id,
                         "deviceId": review.device_id(),
@@ -775,6 +781,683 @@ fn local_invite(
 
     let secret: InviteSecret = store.load(&name)?;
     Ok(Some(Invite::from_code(secret.code())?))
+}
+
+/// Publishes one membership change as a control entry.
+///
+/// Reached only from the trusted interface: removing a member and revoking a
+/// device are both on the section 22.7 list, so this is never called from an
+/// agent-safe path.
+fn publish_membership_change(context: &Context, operation: ControlOperation) -> Result<String> {
+    let store = context.key_store()?;
+    let device: DeviceSecrets = store.load::<DeviceSecrets>(DEVICE_KEY_NAME)?;
+    let principal: PrincipalSecrets = store.load(PRINCIPAL_KEY_NAME)?;
+
+    let database = Database::open(context.paths.database())?;
+    let now = database.utc_now()?;
+    let channel = only_channel(&database)?;
+
+    let mut transport = GitTransport::open(
+        context.paths.channel_transport(&channel.channel_id),
+        &channel.transport_locator,
+    )?;
+    transport.sync_from_remote()?;
+    let (roster, revision) = load_roster(&transport, &channel.channel_id)?;
+
+    let action = operation.name();
+    let signer = Signer {
+        principal_id: principal.signing_key().verifying_key().to_base64url(),
+        device_id: local_device_id(&roster, &device)?,
+    };
+
+    let name = publish_control(
+        &mut transport,
+        &roster,
+        revision,
+        &device.signing_key(),
+        signer,
+        operation,
+        &now,
+    )?;
+
+    database.append_audit(
+        Some(&channel.channel_id),
+        None,
+        action,
+        None,
+        Some(&name),
+        &now,
+    )?;
+
+    Ok(name)
+}
+
+/// Admits a pending joiner, on the administrator's decision.
+///
+/// The request is validated again here rather than trusted from the listing:
+/// the channel may have moved between the human reading a safety phrase and
+/// answering, and the entry that gets published has to be built from what is
+/// true now.
+fn admit_join(context: &Context, request_id: &str) -> Result<()> {
+    let store = context.key_store()?;
+    let device: DeviceSecrets = store.load::<DeviceSecrets>(DEVICE_KEY_NAME)?;
+    let principal: PrincipalSecrets = store.load(PRINCIPAL_KEY_NAME)?;
+
+    let database = Database::open(context.paths.database())?;
+    let now = database.utc_now()?;
+    let channel = only_channel(&database)?;
+
+    let mut transport = GitTransport::open(
+        context.paths.channel_transport(&channel.channel_id),
+        &channel.transport_locator,
+    )?;
+    transport.sync_from_remote()?;
+    let (roster, revision) = load_roster(&transport, &channel.channel_id)?;
+    let identity = device.device_identity()?;
+
+    let mut cursor = None;
+    let mut admitted = None;
+
+    'outer: loop {
+        let page = transport.fetch(cursor.as_deref(), 100)?;
+
+        for publication in &page.publications {
+            for object in &publication.objects {
+                if object.class != ObjectClass::Join
+                    || !object.name.ends_with(&format!("/{request_id}.age"))
+                {
+                    continue;
+                }
+
+                let Some(invite_id) = object
+                    .name
+                    .strip_prefix("joins/")
+                    .and_then(|rest| rest.split('/').next())
+                else {
+                    continue;
+                };
+
+                let Some(invite) = local_invite(&store, &database, &channel.channel_id, invite_id)?
+                else {
+                    continue;
+                };
+
+                let ciphertext = transport.get_object(&object.name, &object.sha256)?;
+                admitted = Some((
+                    hrc_core::enrollment::review_join(
+                        &roster,
+                        &invite,
+                        &identity,
+                        &ciphertext,
+                        &now,
+                    )?,
+                    invite_id.to_owned(),
+                ));
+                break 'outer;
+            }
+        }
+
+        if !page.more {
+            break;
+        }
+        cursor = page.cursor;
+    }
+
+    let (pending, invite_id) = admitted.ok_or_else(|| CliError::NoSuchMessage {
+        message_id: request_id.to_owned(),
+    })?;
+
+    let entry = hrc_core::enrollment::admit(
+        &roster,
+        &device.signing_key(),
+        Signer {
+            principal_id: principal.signing_key().verifying_key().to_base64url(),
+            device_id: local_device_id(&roster, &device)?,
+        },
+        &pending,
+        &now,
+    )?;
+
+    transport.publish(hrc_transport::PublishRequest {
+        expected_revision: Some(revision),
+        class: hrc_transport::PublicationClass::Control,
+        objects: vec![PublishObject {
+            name: format!(
+                "control/log/{:08}-{}.json",
+                entry.payload.sequence,
+                &entry.payload.entry_hash()?[..16]
+            ),
+            class: ObjectClass::Control,
+            bytes: canonical::to_canonical_bytes(&entry)?,
+        }],
+    })?;
+
+    // The invite is spent, so its secret has no further purpose.
+    store.delete(&invite_store_name(&invite_id))?;
+    database.set_invite_state(&channel.channel_id, &invite_id, "consumed")?;
+    database.append_audit(
+        Some(&channel.channel_id),
+        None,
+        "approve_join",
+        None,
+        Some(&pending.principal_id),
+        &now,
+    )?;
+
+    Ok(())
+}
+
+/// `hrc members`: who is in the channel, from the published control log.
+pub fn members(context: &Context) -> Result<Value> {
+    let database = Database::open(context.paths.database())?;
+    let channel = only_channel(&database)?;
+
+    let transport = GitTransport::open(
+        context.paths.channel_transport(&channel.channel_id),
+        &channel.transport_locator,
+    )?;
+    transport.sync_from_remote()?;
+    let (roster, _) = load_roster(&transport, &channel.channel_id)?;
+
+    let members: Vec<Value> = roster
+        .members()
+        .map(|member| {
+            json!({
+                "principalId": member.principal_id,
+                "administrator": member.is_administrator,
+                "active": member.is_active,
+                "devices": roster
+                    .devices()
+                    .filter(|device| device.principal_id == member.principal_id)
+                    .map(|device| json!({
+                        "deviceId": device.device_id,
+                        "active": device.status == hrc_core::DeviceStatus::Active,
+                        "addedInEpoch": device.added_in_epoch,
+                    }))
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "status": "ok",
+        "channelId": channel.channel_id,
+        "rosterEpoch": roster.epoch(),
+        "members": members,
+    }))
+}
+
+/// `hrc device list`: this principal's devices.
+pub fn device_list(context: &Context) -> Result<Value> {
+    let store = context.key_store()?;
+    let principal: PrincipalSecrets = store.load(PRINCIPAL_KEY_NAME)?;
+    let principal_id = principal.signing_key().verifying_key().to_base64url();
+
+    let database = Database::open(context.paths.database())?;
+    let channel = only_channel(&database)?;
+
+    let transport = GitTransport::open(
+        context.paths.channel_transport(&channel.channel_id),
+        &channel.transport_locator,
+    )?;
+    transport.sync_from_remote()?;
+    let (roster, _) = load_roster(&transport, &channel.channel_id)?;
+
+    let devices: Vec<Value> = roster
+        .devices()
+        .filter(|device| device.principal_id == principal_id)
+        .map(|device| {
+            json!({
+                "deviceId": device.device_id,
+                "active": device.status == hrc_core::DeviceStatus::Active,
+                "addedInEpoch": device.added_in_epoch,
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "status": "ok",
+        "principalId": principal_id,
+        "devices": devices,
+    }))
+}
+
+/// Opens a fresh transport and device identity for the receive pass.
+///
+/// Separate from the synchronization pass because receiving needs the key
+/// store, and a channel can be synchronized by a process that has no
+/// passphrase — a locked installation still keeps its queue moving, it just
+/// cannot read anything.
+fn receive_for(
+    paths: &Paths,
+    channel: &hrc_storage::ChannelRecord,
+    now: &str,
+) -> Result<Vec<String>> {
+    let Some(passphrase) = paths.stored_passphrase() else {
+        return Ok(Vec::new());
+    };
+
+    let store = PassphraseStore::open(paths.keys(), passphrase)?;
+    if !store.contains(DEVICE_KEY_NAME)? {
+        return Ok(Vec::new());
+    }
+
+    let device: DeviceSecrets = store.load::<DeviceSecrets>(DEVICE_KEY_NAME)?;
+    let transport = GitTransport::open(
+        paths.channel_transport(&channel.channel_id),
+        &channel.transport_locator,
+    )?;
+
+    let mut database = Database::open(paths.database())?;
+    receive_messages(
+        &transport,
+        &mut database,
+        channel,
+        &device.device_identity()?,
+        now,
+    )
+}
+
+/// Decrypts and records every message published since the last receive pass.
+///
+/// The walk replays control and message objects together, in publication
+/// order, applying control entries to the roster as it goes. That ordering is
+/// the point: a message must be opened against the roster as it stood when
+/// the message was introduced, not as it stands now. Using the current epoch
+/// would reject a message that was legitimate when it was sent and whose
+/// sender has since been revoked — and accepting one under the wrong epoch
+/// would do the opposite.
+fn receive_messages(
+    transport: &GitTransport,
+    database: &mut Database,
+    channel: &hrc_storage::ChannelRecord,
+    identity: &hrc_crypto::DeviceIdentity,
+    now: &str,
+) -> Result<Vec<String>> {
+    let mut roster: Option<Roster> = None;
+    let mut received = Vec::new();
+    let mut cursor = None;
+
+    loop {
+        let page = transport.fetch(cursor.as_deref(), 100)?;
+
+        for publication in &page.publications {
+            for object in &publication.objects {
+                let bytes = transport.get_object(&object.name, &object.sha256)?;
+
+                match object.class {
+                    ObjectClass::Control => {
+                        let text = std::str::from_utf8(&bytes).map_err(|_| {
+                            CliError::ChannelNotPublished {
+                                channel_id: channel.channel_id.clone(),
+                            }
+                        })?;
+
+                        match &mut roster {
+                            None => {
+                                let genesis: SignedObject<GenesisPayload> =
+                                    canonical::from_json_str(text)?;
+                                roster = Some(Roster::from_genesis(&genesis)?);
+                            }
+                            Some(roster) => {
+                                let entry: SignedObject<ControlEntryPayload> =
+                                    canonical::from_json_str(text)?;
+                                roster.apply(&entry)?;
+                            }
+                        }
+                    }
+
+                    ObjectClass::Message => {
+                        let Some(roster) = roster.as_ref() else {
+                            continue;
+                        };
+
+                        // A message this installation cannot decrypt is not
+                        // an error: it was addressed to someone else, and a
+                        // channel member seeing ciphertext they are not a
+                        // recipient of is the ordinary case.
+                        let Ok(opened) =
+                            hrc_core::message::open(roster, identity, &bytes, roster.epoch(), now)
+                        else {
+                            continue;
+                        };
+
+                        let body = opened
+                            .envelope
+                            .body
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned();
+
+                        let kind = hrc_protocol::MessageKind::parse(&opened.envelope.kind)
+                            .map(|kind| kind.as_str())
+                            .unwrap_or("unsupported");
+
+                        let chain_id = hrc_storage::chain_id_for(
+                            &channel.channel_id,
+                            &opened.sender_device,
+                            opened.envelope.device_sequence,
+                            &opened.envelope.message_id,
+                        )?;
+
+                        let outcome = database.record_inbound(
+                            &hrc_storage::InboundMessage {
+                                channel_id: &channel.channel_id,
+                                message_id: &opened.envelope.message_id,
+                                sender_principal: &opened.sender_principal,
+                                sender_device: &opened.sender_device,
+                                device_sequence: opened.envelope.device_sequence,
+                                chain_id: &chain_id,
+                                previous_chain_id: opened.envelope.previous_chain_id.as_deref(),
+                                kind,
+                                thread_id: Some(&opened.envelope.thread_id),
+                                in_reply_to: opened.envelope.in_reply_to.as_deref(),
+                                roster_epoch: opened.envelope.roster_epoch,
+                                endpoint: opened.envelope.to.endpoint.as_deref(),
+                                ciphertext_bytes: bytes.len() as u64,
+                                plaintext_bytes: body.len() as u64,
+                                ciphertext_sha256: &opened.ciphertext_sha256,
+                                created_at: &opened.envelope.created_at,
+                                expires_at: opened.envelope.expires_at.as_deref(),
+                                body: body.as_bytes(),
+                                ciphertext: &bytes,
+                            },
+                            now,
+                        )?;
+
+                        if let hrc_storage::InboundOutcome::Accepted { released, .. } = outcome {
+                            received.push(opened.envelope.message_id.clone());
+                            received.extend(released);
+                        }
+                    }
+
+                    _ => {}
+                }
+            }
+        }
+
+        if !page.more {
+            break;
+        }
+        cursor = page.cursor;
+    }
+
+    Ok(received)
+}
+
+/// `hrc send`, `hrc ask`, and `hrc reply` share this path.
+///
+/// Sealing needs the roster, because the recipient set is derived from it
+/// rather than supplied: a caller that could pass a list separately could
+/// commit to one set and encrypt to another (HRC-SEC-016). Allocation comes
+/// before sealing, so a crash between them loses a sequence number rather
+/// than a message the user believes was sent.
+fn compose(
+    context: &Context,
+    kind: hrc_protocol::MessageKind,
+    recipient: &str,
+    text: &str,
+    in_reply_to: Option<&str>,
+) -> Result<Value> {
+    let store = context.key_store()?;
+    let device: DeviceSecrets = store.load::<DeviceSecrets>(DEVICE_KEY_NAME)?;
+    let principal: PrincipalSecrets = store.load(PRINCIPAL_KEY_NAME)?;
+
+    let mut database = Database::open(context.paths.database())?;
+    let now = database.utc_now()?;
+    let channel = only_channel(&database)?;
+
+    // An endpoint is advisory: it asks the receiving human to consider
+    // routing the message somewhere, and decides nothing on their machine.
+    let (principal_id, endpoint) = match recipient.split_once('/') {
+        Some((principal_id, endpoint)) => (principal_id, Some(endpoint.to_owned())),
+        None => (recipient, None),
+    };
+
+    let mut transport = GitTransport::open(
+        context.paths.channel_transport(&channel.channel_id),
+        &channel.transport_locator,
+    )?;
+    transport.sync_from_remote()?;
+    let (roster, _) = load_roster(&transport, &channel.channel_id)?;
+
+    let device_id = local_device_id(&roster, &device)?;
+    let message_id = hrc_protocol::ulid_at(unix_milliseconds()?)?;
+
+    let (thread_id, in_reply_to) = match in_reply_to {
+        // A reply continues the thread of what it answers, so the thread is
+        // read from local state rather than chosen: a sender that picked its
+        // own would be able to attach a reply to any conversation.
+        Some(message_id) => {
+            let entry = database
+                .inbox_entries(&channel.channel_id)?
+                .into_iter()
+                .find(|entry| entry.message_id == message_id)
+                .ok_or_else(|| CliError::NoSuchMessage {
+                    message_id: message_id.to_owned(),
+                })?;
+
+            (
+                entry.thread_id.unwrap_or_else(|| message_id.to_owned()),
+                Some(message_id.to_owned()),
+            )
+        }
+        None => (message_id.clone(), None),
+    };
+
+    let body = serde_json::json!({ "text": text });
+    let payload_hash = canonical::canonical_sha256_hex(&body)?;
+
+    let reservation = database.allocate_outgoing(
+        &channel.channel_id,
+        &device_id,
+        &message_id,
+        roster.epoch(),
+        &payload_hash,
+        &now,
+    )?;
+
+    let envelope = MessageEnvelope {
+        version: hrc_protocol::PROTOCOL_VERSION,
+        channel_id: channel.channel_id.clone(),
+        roster_epoch: roster.epoch(),
+        message_id: message_id.clone(),
+        device_sequence: reservation.device_sequence,
+        previous_chain_id: reservation.previous_chain_id.clone(),
+        created_at: now.clone(),
+        expires_at: None,
+        to: hrc_protocol::Addressing {
+            principals: vec![principal_id.to_owned()],
+            endpoint,
+        },
+        recipients: hrc_protocol::RecipientDevices::new([device_id.clone()])?,
+        thread_id: thread_id.clone(),
+        in_reply_to,
+        kind: kind.as_str().to_owned(),
+        requested_capability: None,
+        body,
+        attachments: Vec::new(),
+        padding: String::new(),
+    };
+
+    let ciphertext = hrc_core::message::seal(
+        &roster,
+        &device.signing_key(),
+        Signer {
+            principal_id: principal.signing_key().verifying_key().to_base64url(),
+            device_id: device_id.clone(),
+        },
+        envelope,
+    )?;
+
+    database.queue_outgoing(&message_id, &ciphertext, &now)?;
+
+    let outcome = hrc_core::sync::publish_one(
+        &mut transport,
+        &database,
+        &channel.channel_id,
+        &message_id,
+        PublishObject {
+            name: message_object_name(&now, &message_id),
+            class: ObjectClass::Message,
+            bytes: ciphertext,
+        },
+        5,
+        &now,
+    )?;
+
+    database.append_audit(
+        Some(&channel.channel_id),
+        Some(&message_id),
+        "send",
+        Some(&payload_hash),
+        Some(kind.as_str()),
+        &now,
+    )?;
+
+    Ok(json!({
+        "status": "ok",
+        "messageId": message_id,
+        "threadId": thread_id,
+        "kind": kind.as_str(),
+        "published": !outcome.published.is_empty(),
+        "deferred": !outcome.deferred.is_empty(),
+    }))
+}
+
+/// `hrc send`: an informational note.
+pub fn send(context: &Context, recipient: &str, text: &str) -> Result<Value> {
+    compose(
+        context,
+        hrc_protocol::MessageKind::Note,
+        recipient,
+        text,
+        None,
+    )
+}
+
+/// `hrc ask`: a question, optionally addressed to a logical endpoint.
+pub fn ask(context: &Context, recipient: &str, text: &str) -> Result<Value> {
+    compose(
+        context,
+        hrc_protocol::MessageKind::Question,
+        recipient,
+        text,
+        None,
+    )
+}
+
+/// `hrc reply`: an answer in the thread of an existing message.
+pub fn reply(context: &Context, message_id: &str, text: &str) -> Result<Value> {
+    let database = Database::open(context.paths.database())?;
+    let channel = only_channel(&database)?;
+
+    let entry = database
+        .inbox_entries(&channel.channel_id)?
+        .into_iter()
+        .find(|entry| entry.message_id == message_id)
+        .ok_or_else(|| CliError::NoSuchMessage {
+            message_id: message_id.to_owned(),
+        })?;
+
+    compose(
+        context,
+        hrc_protocol::MessageKind::Answer,
+        &entry.sender_principal,
+        text,
+        Some(message_id),
+    )
+}
+
+/// `hrc inbox`: the closed metadata set, never a pending body.
+pub fn inbox(context: &Context, pending_only: bool) -> Result<Value> {
+    let database = Database::open(context.paths.database())?;
+    let channel = only_channel(&database)?;
+
+    let entries: Vec<Value> = database
+        .inbox_entries(&channel.channel_id)?
+        .into_iter()
+        .filter(|entry| !pending_only || entry.disposition == "quarantined")
+        .map(|entry| {
+            json!({
+                "messageId": entry.message_id,
+                "sender": entry.sender_principal,
+                "kind": entry.kind,
+                "threadId": entry.thread_id,
+                "inReplyTo": entry.in_reply_to,
+                "arrival": entry.arrival_sequence,
+                "disposition": entry.disposition,
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "status": "ok",
+        "channelId": channel.channel_id,
+        "entries": entries,
+    }))
+}
+
+/// `hrc thread`: one conversation in local arrival order.
+///
+/// Pending bodies stay redacted. Ordering is by arrival rather than by the
+/// sender's timestamp, which a sender chooses.
+pub fn thread(context: &Context, thread_id: &str) -> Result<Value> {
+    let database = Database::open(context.paths.database())?;
+    let channel = only_channel(&database)?;
+
+    let entries: Vec<Value> = database
+        .thread_entries(&channel.channel_id, thread_id)?
+        .into_iter()
+        .map(|entry| {
+            json!({
+                "messageId": entry.message_id,
+                "sender": entry.sender_principal,
+                "kind": entry.kind,
+                "arrival": entry.arrival_sequence,
+                "disposition": entry.disposition,
+                "body": if entry.disposition == "quarantined" {
+                    Value::String("[redacted until approved]".into())
+                } else {
+                    Value::Null
+                },
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "status": "ok",
+        "threadId": thread_id,
+        "entries": entries,
+    }))
+}
+
+/// Where a message object lives in the channel layout (PRD section 16.2).
+fn message_object_name(now: &str, message_id: &str) -> String {
+    let year = now.get(0..4).unwrap_or("0000");
+    let month = now.get(5..7).unwrap_or("00");
+
+    format!("messages/{year}/{month}/{message_id}.age")
+}
+
+/// Milliseconds since the Unix epoch, for a message identifier.
+///
+/// Read from the system clock rather than derived from the RFC 3339
+/// timestamp the rest of the record uses, because that one has second
+/// precision. A ULID built from it would give every message sent within the
+/// same second an identical time prefix, and their order would then be
+/// decided by the random half — which is to say, not ordered at all.
+///
+/// Sub-second ties remain possible and remain unordered; that is what a ULID
+/// promises and no more. Per-device order does not depend on this: the chain
+/// in section 18.1 establishes it, and the inbox reads by arrival.
+fn unix_milliseconds() -> Result<u64> {
+    let since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| CliError::Entropy)?;
+
+    Ok(since_epoch.as_millis() as u64)
 }
 
 /// Turns a lifetime such as `24h` into an absolute RFC 3339 expiry.
@@ -1219,15 +1902,58 @@ fn handle_agent_request(context: &Context, request: Request) -> Value {
     }
 }
 
-fn handle_trusted_request(_context: &Context, request: TrustedRequest) -> Value {
-    json!({
-        "status": "error",
-        "code": "unimplemented",
-        "message": format!(
-            "the trusted daemon method `{}` is not implemented yet",
-            request.method()
-        ),
-    })
+fn handle_trusted_request(context: &Context, request: TrustedRequest) -> Value {
+    let method = request.method();
+
+    let mut broker = match DaemonBroker::new(context) {
+        Ok(broker) => broker,
+        Err(error) => {
+            return json!({
+                "status": "error",
+                "code": error.code(),
+                "message": error.to_string(),
+            });
+        }
+    };
+
+    // A fresh ledger per connection is deliberate for now: an authorization
+    // is issued, consumed, and discarded inside one call (DEC-040), so
+    // nothing needs to outlive the request that created it.
+    let mut ledger = hrc_core::AuthorizationLedger::new();
+    let now = match broker.now() {
+        Ok(now) => now,
+        Err(error) => {
+            return json!({
+                "status": "error",
+                "code": error.code(),
+                "message": error.to_string(),
+            });
+        }
+    };
+
+    match hrc_core::rpc::dispatch_trusted(&mut broker, &mut ledger, request, &now) {
+        Ok(hrc_core::rpc::TrustedResponse::Delivered { agent, framed }) => json!({
+            "status": "ok",
+            "method": method,
+            "agent": agent,
+            "framed": framed,
+        }),
+        Ok(hrc_core::rpc::TrustedResponse::Pending { message_id, body }) => json!({
+            "status": "ok",
+            "method": method,
+            "messageId": message_id,
+            "body": body,
+        }),
+        Ok(hrc_core::rpc::TrustedResponse::Done) => json!({
+            "status": "ok",
+            "method": method,
+        }),
+        Err(error) => json!({
+            "status": "error",
+            "code": core_error_code(&error),
+            "message": error.to_string(),
+        }),
+    }
 }
 
 fn core_error_code(error: &hrc_core::CoreError) -> &'static str {
@@ -1247,6 +1973,13 @@ struct DaemonBroker {
     /// Where the database lives, so a decision can be appended durably
     /// rather than held in memory until the daemon exits.
     database_path: std::path::PathBuf,
+    /// Everything a trusted operation needs to publish a control entry.
+    ///
+    /// The broker performs membership changes itself rather than handing a
+    /// plan back to a caller. A trusted operation that returned instructions
+    /// would put the decision and its execution in two places, and only one
+    /// of them is behind the human interface.
+    context: Context,
 }
 
 impl DaemonBroker {
@@ -1302,7 +2035,15 @@ impl DaemonBroker {
             checks,
             audit,
             database_path: context.paths.database(),
+            context: context.clone(),
         })
+    }
+}
+
+impl DaemonBroker {
+    /// The local clock, from the database so every record agrees on it.
+    fn now(&self) -> Result<String> {
+        Ok(Database::open(&self.database_path)?.utc_now()?)
     }
 }
 
@@ -1389,8 +2130,31 @@ impl Broker for DaemonBroker {
         Ok(())
     }
 
-    fn apply_trusted(&mut self, _request: &TrustedRequest) -> hrc_core::Result<()> {
-        Ok(())
+    fn apply_trusted(&mut self, request: &TrustedRequest) -> hrc_core::Result<()> {
+        let operation = match request {
+            TrustedRequest::RemoveMember { principal_id } => ControlOperation::RemoveMember {
+                principal_id: principal_id.clone(),
+            },
+            TrustedRequest::RevokeDevice { device_id } => ControlOperation::RevokeDevice {
+                device_id: device_id.clone(),
+            },
+            TrustedRequest::ApproveJoin { request_id } => {
+                return admit_join(&self.context, request_id)
+                    .map_err(|error| hrc_core::CoreError::Transport(error.to_string()));
+            }
+
+            // Declining a join publishes nothing. A refusal that left a
+            // record in the channel would tell everyone who was turned away,
+            // which is the administrator's business and not the channel's.
+            TrustedRequest::RejectJoin { .. } => return Ok(()),
+
+            // The rest are not membership changes and have no control entry.
+            _ => return Ok(()),
+        };
+
+        publish_membership_change(&self.context, operation)
+            .map(|_| ())
+            .map_err(|error| hrc_core::CoreError::Transport(error.to_string()))
     }
 }
 
@@ -1444,6 +2208,12 @@ fn sync_git_channel(
     if remote_changed || (remote_head.is_some() && local_missing) {
         transport.sync_from_remote()?;
     }
+
+    let received = if remote_changed || local_missing {
+        receive_for(paths, channel, now)?
+    } else {
+        Vec::new()
+    };
 
     let fetch = if remote_changed {
         Some(hrc_core::sync::fetch_once(
@@ -1499,6 +2269,7 @@ fn sync_git_channel(
         "fetchedPublications": fetch.as_ref().map(|outcome| outcome.publications).unwrap_or(0),
         "fetchedControlObjects": fetch.as_ref().map(|outcome| outcome.control_objects).unwrap_or(0),
         "fetchedMessageObjects": fetch.as_ref().map(|outcome| outcome.message_objects).unwrap_or(0),
+        "receivedMessages": received,
         "cursor": fetch.and_then(|outcome| outcome.cursor),
     }))
 }

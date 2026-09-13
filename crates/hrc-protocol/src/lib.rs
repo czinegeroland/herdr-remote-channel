@@ -17,6 +17,7 @@ pub mod message;
 pub mod receipt;
 pub mod recipients;
 pub mod signed;
+pub mod ulid;
 
 pub use attachment::{Attachment, safe_file_name, validate_attachments};
 pub use control::{ControlEntryPayload, ControlOperation, GenesisPayload};
@@ -27,6 +28,7 @@ pub use message::{Addressing, MessageEnvelope};
 pub use receipt::{ReceiptBody, ReceiptState};
 pub use recipients::RecipientDevices;
 pub use signed::{SignedObject, Signer, signature_input};
+pub use ulid::{is_ulid, ulid_at};
 
 /// Version carried by every signed protocol object.
 pub const PROTOCOL_VERSION: u32 = 1;
