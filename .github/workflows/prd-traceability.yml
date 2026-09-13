@@ -17,9 +17,9 @@ jobs:
     runs-on: [self-hosted, windows]
     defaults:
       run:
-        # Windows PowerShell rather than `pwsh`: PowerShell 7 is a separate
-        # install. The validator uses no syntax newer than 5.1.
-        shell: powershell
+        # Bash, from Git for Windows. The validator itself is PowerShell and
+        # is invoked explicitly below.
+        shell: bash
 
     steps:
       - name: Check out trusted base revision
@@ -31,11 +31,17 @@ jobs:
       - name: Fetch untrusted pull request objects
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: git fetch --no-tags origin "pull/$env:PR_NUMBER/head"
+        run: git fetch --no-tags origin "pull/$PR_NUMBER/head"
 
       - name: Validate living PRD
+        # Invoked through `-File` with an explicit policy for this process
+        # only: the default execution policy on a Windows machine refuses to
+        # run script files, and changing the machine's policy to suit CI
+        # would be a wider grant than one job needs. The validator uses no
+        # syntax newer than Windows PowerShell 5.1.
         run: >
-          .github/scripts/check-prd-traceability.ps1
+          powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass
+          -File .github/scripts/check-prd-traceability.ps1
           -BaseSha '${{ github.event.pull_request.base.sha }}'
           -HeadSha '${{ github.event.pull_request.head.sha }}'
           -EventPath '${{ github.event_path }}'

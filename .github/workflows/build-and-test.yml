@@ -44,12 +44,13 @@ jobs:
     runs-on: [self-hosted, windows]
     defaults:
       run:
-        # Windows PowerShell, not `pwsh`. PowerShell 7 is a separate install
-        # that a self-hosted Windows machine does not necessarily have, while
-        # `powershell` ships with the operating system. GitHub's hosted
-        # Windows images have both, which is why this was not obvious until
-        # the job ran on a real machine.
-        shell: powershell
+        # Bash, from the Git for Windows installation the runner already
+        # needs. Neither PowerShell option works unconfigured here: `pwsh` is
+        # a separate install, and `powershell` runs the temporary script
+        # files Actions generates, which the default execution policy blocks.
+        # Bash also brings `set -eo pipefail`, so a failing command in a
+        # multi-line step fails the step.
+        shell: bash
     steps:
       - name: Check out the pull request
         uses: actions/checkout@v4
@@ -81,7 +82,7 @@ jobs:
       - name: Smoke-test the hrc executable
         run: |
           cargo run --locked --quiet --bin hrc -- --version
-          cargo run --locked --quiet --bin hrc -- --help | Out-Null
+          cargo run --locked --quiet --bin hrc -- --help > /dev/null
 
   hosted-matrix:
     name: Build and test (${{ matrix.os }})

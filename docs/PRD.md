@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-14T15:45:00+02:00 |
+| Last updated | 2026-09-14T16:05:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -2257,10 +2257,14 @@ self-hosted Windows runner. The GitHub-hosted Linux, macOS, and Windows matrix
 is a `workflow_dispatch` job on the same workflow, and it is what
 `AC-RUST-FOUNDATION` is measured against.
 
-CI steps use Windows PowerShell rather than `pwsh`. PowerShell 7 is a separate
-install that a self-hosted Windows machine does not necessarily have, and
-GitHub's hosted Windows images carry both, so the difference only appears on a
-real runner. The traceability validator uses no syntax newer than 5.1.
+CI steps run under bash, from the Git for Windows installation the runner
+already needs. Neither PowerShell option works on an unconfigured Windows
+machine: `pwsh` is a separate install, and `powershell` executes the temporary
+script files Actions generates, which the default execution policy refuses.
+Bash also supplies `set -eo pipefail`, so a failing command in a multi-line
+step fails the step. The traceability validator is itself PowerShell and is
+invoked with an execution policy scoped to that one process, rather than
+relaxing the machine's policy to suit CI.
 
 This is a deliberate gap, not an oversight: between dispatches, only Windows
 is continuously verified. Windows is the platform kept because it is where the
