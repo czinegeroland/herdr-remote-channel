@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-14T18:36:24+02:00 |
+| Last updated | 2026-09-14T19:00:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -2525,7 +2525,7 @@ Every implementation PR must update this table.
 |---|---:|---|---|---|
 | M0 Product and protocol | 55% | Adds an executable adapter contract, capability declaration, and error model to the written specification | Transport contract and reference adapter | Obtain product-owner approval and complete the JSON-RPC adapter binding |
 | M1 Secure foundation | 100% | Makes observed Git history rewrites, deletions, substitutions, conflicting control successors, and branch disappearance halt synchronization with a sticky reason | Observed-history halt | Hand the work over: `docs/HANDOFF.md` section 4 now records the post-M1 state and the remaining order of work |
-| M2 Git messaging | 99% | Queued messages are now re-encrypted against the roster at each publication attempt, while locked daemons advance public state and defer stale ciphertext | Epoch-safe queued publishing | Add receipts and end-to-end restart coverage |
+| M2 Git messaging | 99% | Queued messages are now re-encrypted against the roster at each publication attempt, while locked daemons advance public state and defer stale ciphertext | Post-#32 handoff | Add receipts and end-to-end restart coverage |
 | M3 Herdr integration | 80% | Adds the daemon's two local interfaces as two request and response types, and now hosts them from the resident daemon so agent-safe callers still cannot name a pending body | Live daemon boundary | Build the trusted approval TUI, then the Herdr inbox UI |
 | M4 Context/delegation | 65% | Adds attachment limits checked before any fetch and again on arrival, and sender-chosen file names treated as hostile text | Attachment limits | Add git-ignored path checking, then wire context and delegation to the CLI |
 | M5 Provider ecosystem | 0% | Not started | N/A | Deferred until core protocol stabilizes |

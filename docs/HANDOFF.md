@@ -139,19 +139,45 @@ request as the work it describes, or it will lie.*
 
 ### State
 
-**75 of 122 requirement rows Implemented.** Milestones: **M0 55%, M1 100%,
+**76 of 122 requirement rows Implemented.** Milestones: **M0 55%, M1 100%,
 M2 99%, M3 80%, M4 65%, M5 0%.**
 
-Thirty-one pull requests merged; nothing is in flight. `main` is at
-`fix(sync): halt on observed Git history tampering (#31)` and the development
-branch is level with it.
+Thirty-two pull requests merged; nothing is in flight. `main` is at
+`feat(sync): re-encrypt queued messages after roster changes (#32)` and the
+development branch is level with it.
 
 What works today, end to end and proven by tests against a real Git
 repository: two installations create a channel, invite, join, derive and
 compare matching safety phrases, admit a member through the trusted interface,
 exchange encrypted notes and threaded questions and answers, and have
 everything arrive quarantined behind the prompt gate. Observed history
-rewrites, deletions, and substitutions halt synchronization stickily.
+rewrites, deletions, and substitutions halt synchronization stickily. A
+queued message whose roster epoch becomes stale is rebuilt for the current
+recipient set without changing its logical identity; a locked daemon advances
+public state but withholds the stale ciphertext.
+
+### Most recent implementation
+
+#32 completed `HRC-SYNC-008`.
+
+- Migration 006 adds optional `reseal_material` to the outbox. New messages
+  store their canonical logical envelope encrypted only to the sending device;
+  legacy rows migrate with `NULL`.
+- Every publication attempt reloads the current roster. Stale ciphertext is
+  replaced only after the protected envelope is decrypted and checked against
+  the durable message ID, device sequence, predecessor, creation time, chain
+  ID, and payload hash.
+- Conflict retries revalidate the durable trusted cursor and rerun
+  preparation. Git pushes name the exact commit, failed-attempt ref rollback
+  uses compare-and-swap, and local transport state is reconciled to the remote
+  tip before lost-ack detection.
+- Locked stores defer stale rows. An unlocked legacy row without reseal
+  material records an explicit error and blocks later messages on the same
+  device chain rather than publishing an unfillable gap.
+- The five required checks passed on #32. Local Rust builds on this machine
+  remain unavailable because MSVC `link.exe` and the Windows SDK are absent;
+  `cargo fmt` and Cargo metadata do work through
+  `%USERPROFILE%\.cargo\bin\cargo.exe`.
 
 ### Start here
 
@@ -165,24 +191,21 @@ loose ends.
    a message body, and git-ignored paths excluded. `excluded_path_reason`
    already handles the path-decidable rules; the git-ignored check needs the
    repository. This is the largest remaining cluster and closes four rows.
-2. **`HRC-SYNC-008`** — re-encrypt queued messages after a roster epoch
-   change. The outbox stores `roster_epoch` and a payload hash that is stable
-   across re-encryption, so the data needed is already there.
-3. **`HRC-MSG-005`** — expiry display and sweeping. Opening already refuses an
+2. **`HRC-MSG-005`** — expiry display and sweeping. Opening already refuses an
    expired message; what is missing is surfacing and reaping.
-4. **`HRC-TR-001`, `HRC-TR-003`, `HRC-TR-006`** — the out-of-process JSON-RPC
+3. **`HRC-TR-001`, `HRC-TR-003`, `HRC-TR-006`** — the out-of-process JSON-RPC
    adapter binding, push-capable adapters, and the GitHub optimization. The
    conformance suite exists and a deliberately broken adapter is already
    proven to fail it, so a new adapter has a target to hit.
-5. **`HRC-TECH-002`** — the Herdr plugin entry points, still reporting the
+4. **`HRC-TECH-002`** — the Herdr plugin entry points, still reporting the
    documented not-implemented code.
-6. **`HRC-TECH-011`, `HRC-TECH-012`** — `cargo-dist` release artifacts and a
+5. **`HRC-TECH-011`, `HRC-TECH-012`** — `cargo-dist` release artifacts and a
    clean-host install fixture. `OQ-012` asks whether to pin an exact toolchain
    first; answer it in that pull request.
-7. **`HRC-CH-004`** — public repositories after typed confirmation. `OQ-008`
+6. **`HRC-CH-004`** — public repositories after typed confirmation. `OQ-008`
    asks for the warning wording and is unanswered. It needs a human: implement
    the mechanism and leave the wording marked, or ask.
-8. **`HRC-GOV-004`** — the evidence pass. Every row claiming `Verified` must
+7. **`HRC-GOV-004`** — the evidence pass. Every row claiming `Verified` must
    cite something stable. Do this last, once the rows have stopped moving.
 
 `HRC-TECH-001`, `HRC-TECH-003`, `HRC-TECH-005`, and `HRC-TECH-010` are
@@ -248,7 +271,7 @@ second.
 the first class locally. It does not work for crates that depend on
 `hrc-storage`, because bundled SQLite needs a Windows C compiler.
 
-**CI takes 4 to 8 minutes.** Wait for all five checks — `PRD traceability`,
+**CI takes 5 to 16 minutes.** Wait for all five checks — `PRD traceability`,
 `Format and lint`, and `Build and test` on ubuntu, macOS, and Windows. The
 Windows job is slowest and finishes several minutes after the others; do not
 merge on the strength of the first four.
