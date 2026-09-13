@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-14T15:20:00+02:00 |
+| Last updated | 2026-09-14T15:45:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -2256,6 +2256,11 @@ Every push and pull request runs format, lint, build, and the full suite on a
 self-hosted Windows runner. The GitHub-hosted Linux, macOS, and Windows matrix
 is a `workflow_dispatch` job on the same workflow, and it is what
 `AC-RUST-FOUNDATION` is measured against.
+
+CI steps use Windows PowerShell rather than `pwsh`. PowerShell 7 is a separate
+install that a self-hosted Windows machine does not necessarily have, and
+GitHub's hosted Windows images carry both, so the difference only appears on a
+real runner. The traceability validator uses no syntax newer than 5.1.
 
 This is a deliberate gap, not an oversight: between dispatches, only Windows
 is continuously verified. Windows is the platform kept because it is where the

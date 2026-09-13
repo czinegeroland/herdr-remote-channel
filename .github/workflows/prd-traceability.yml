@@ -15,6 +15,11 @@ jobs:
     # revision and fetches the pull request's objects without building or
     # running any of them (decision DEC-014).
     runs-on: [self-hosted, windows]
+    defaults:
+      run:
+        # Windows PowerShell rather than `pwsh`: PowerShell 7 is a separate
+        # install. The validator uses no syntax newer than 5.1.
+        shell: powershell
 
     steps:
       - name: Check out trusted base revision
@@ -24,13 +29,11 @@ jobs:
           fetch-depth: 0
 
       - name: Fetch untrusted pull request objects
-        shell: pwsh
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: git fetch --no-tags origin "pull/$env:PR_NUMBER/head"
 
       - name: Validate living PRD
-        shell: pwsh
         run: >
           .github/scripts/check-prd-traceability.ps1
           -BaseSha '${{ github.event.pull_request.base.sha }}'

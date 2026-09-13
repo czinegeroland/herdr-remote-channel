@@ -42,12 +42,19 @@ jobs:
     # machine: splitting them would serialize anyway and pay the checkout and
     # dependency-resolution cost twice.
     runs-on: [self-hosted, windows]
+    defaults:
+      run:
+        # Windows PowerShell, not `pwsh`. PowerShell 7 is a separate install
+        # that a self-hosted Windows machine does not necessarily have, while
+        # `powershell` ships with the operating system. GitHub's hosted
+        # Windows images have both, which is why this was not obvious until
+        # the job ran on a real machine.
+        shell: powershell
     steps:
       - name: Check out the pull request
         uses: actions/checkout@v4
 
       - name: Report the toolchain
-        shell: pwsh
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt,clippy
           rustup default stable
@@ -60,23 +67,18 @@ jobs:
       # incremental build it replaces.
 
       - name: Check formatting
-        shell: pwsh
         run: cargo fmt --all --check
 
       - name: Run clippy
-        shell: pwsh
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Build the workspace
-        shell: pwsh
         run: cargo build --workspace --all-targets --locked
 
       - name: Run the test suite
-        shell: pwsh
         run: cargo test --workspace --locked
 
       - name: Smoke-test the hrc executable
-        shell: pwsh
         run: |
           cargo run --locked --quiet --bin hrc -- --version
           cargo run --locked --quiet --bin hrc -- --help | Out-Null
