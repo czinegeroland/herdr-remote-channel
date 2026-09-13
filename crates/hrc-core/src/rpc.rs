@@ -258,7 +258,7 @@ impl TrustedRequest {
 /// No variant carries message content that a human has not approved. That is
 /// the invariant of PRD section 19.1, and here it is a property of the type
 /// rather than of the handlers: there is no field to put a pending body in.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum AgentResponse {
     /// Channel and queue state.
     Status {
@@ -312,7 +312,7 @@ pub enum AgentResponse {
 }
 
 /// Per-channel state, as the agent-safe surface reports it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ChannelStatus {
     /// Locally chosen channel name.
     pub local_name: String,
@@ -328,7 +328,7 @@ pub struct ChannelStatus {
 ///
 /// This is where content and authorizations live. Nothing here is reachable
 /// from [`dispatch_agent`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum TrustedResponse {
     /// The decrypted body, for display to the human only.
     Pending {

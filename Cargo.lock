@@ -949,6 +949,7 @@ dependencies = [
  "clap",
  "hrc-core",
  "hrc-crypto",
+ "hrc-ipc",
  "hrc-protocol",
  "hrc-storage",
  "hrc-transport",

@@ -41,6 +41,7 @@ use std::collections::HashSet;
 
 use hrc_protocol::canonical;
 use hrc_protocol::message::is_valid_endpoint;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, Result};
 use crate::message::QuarantinedMessage;
@@ -233,7 +234,7 @@ impl AuthorizationLedger {
 ///
 /// Section 19.1 enumerates these fields. Anything not listed there is
 /// sender-controlled text and stays with the body.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentView {
     /// Verified principal, resolved from the roster rather than the message.
     pub sender_principal: String,

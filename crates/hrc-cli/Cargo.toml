@@ -15,6 +15,7 @@ path = "src/main.rs"
 clap = { workspace = true }
 hrc-core = { workspace = true }
 hrc-crypto = { workspace = true }
+hrc-ipc = { workspace = true }
 hrc-protocol = { workspace = true }
 hrc-storage = { workspace = true }
 hrc-transport = { workspace = true }

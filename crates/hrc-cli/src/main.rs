@@ -94,7 +94,7 @@ fn run_daemon(cli: &Cli, path: &str) -> std::process::ExitCode {
     }
 
     let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_time()
+        .enable_all()
         .build()
     {
         Ok(runtime) => runtime,

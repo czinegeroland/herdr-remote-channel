@@ -49,6 +49,10 @@ pub enum CliError {
     /// The Git transport failed.
     #[error(transparent)]
     Git(#[from] hrc_transport_git::GitError),
+
+    /// Local IPC failed.
+    #[error(transparent)]
+    Ipc(#[from] hrc_ipc::IpcError),
 }
 
 impl CliError {
@@ -63,6 +67,7 @@ impl CliError {
             CliError::Crypto(_) => "crypto_error",
             CliError::Core(_) => "core_error",
             CliError::Git(_) => "git_error",
+            CliError::Ipc(_) => "ipc_error",
         }
     }
 
@@ -79,7 +84,8 @@ impl CliError {
             | CliError::Storage(_)
             | CliError::Crypto(_)
             | CliError::Core(_)
-            | CliError::Git(_) => exit::FAILURE,
+            | CliError::Git(_)
+            | CliError::Ipc(_) => exit::FAILURE,
         }
     }
 }
