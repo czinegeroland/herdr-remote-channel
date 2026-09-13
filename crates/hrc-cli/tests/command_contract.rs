@@ -6,7 +6,13 @@
 //! callers instead of quietly doing the work.
 
 use assert_cmd::Command;
+use hrc_core::rpc::{AgentRequest, Request, TrustedRequest};
+use hrc_ipc::{
+    Client,
+    endpoint::{Endpoint, Interface},
+};
 use serde_json::Value;
+use std::io::{BufRead, BufReader, Read};
 
 /// Documented exit codes, mirrored from `crates/hrc-cli/src/exit.rs`. A test
 /// that reads the constant from the binary would not notice a value change,
@@ -69,6 +75,163 @@ fn unimplemented_commands_report_a_stable_json_shape() {
     assert_eq!(value["command"], "inbox");
     assert!(value["milestone"].is_string());
     assert!(value["message"].is_string());
+}
+
+#[test]
+fn audit_reports_a_stable_json_shape() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("state");
+
+    hrc_in(&home).arg("init").assert().success();
+
+    let output = hrc_in(&home)
+        .args(["audit", "--json"])
+        .output()
+        .expect("audit should run");
+    assert!(output.status.success());
+
+    let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(value["status"], "ok");
+    assert!(value["entries"].is_array());
+}
+
+#[test]
+fn sync_once_reports_a_stable_json_shape() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("state");
+
+    hrc_in(&home).arg("init").assert().success();
+
+    let output = hrc_in(&home)
+        .args(["sync", "--once", "--json"])
+        .output()
+        .expect("sync should run");
+    assert!(output.status.success());
+
+    let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(value["status"], "ok");
+    assert!(value["syncedAt"].is_string());
+    assert!(value["channels"].is_array());
+}
+
+#[test]
+fn daemon_reports_a_stable_startup_json_shape() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("state");
+
+    hrc_in(&home).arg("init").assert().success();
+
+    let mut child = hrc_std_in(&home)
+        .args(["daemon", "--json"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("daemon should start");
+
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    child.kill().expect("daemon should be killable in the test");
+
+    let mut stdout = String::new();
+    child
+        .stdout
+        .take()
+        .expect("stdout piped")
+        .read_to_string(&mut stdout)
+        .expect("stdout should be readable");
+    let _ = child.wait();
+
+    let value: Value = serde_json::from_str(stdout.trim()).expect("stdout should be JSON");
+    assert!(matches!(value["status"].as_str(), Some("ok" | "degraded")));
+    assert!(value["syncedAt"].is_string());
+    assert!(value["nextPollSeconds"].is_u64());
+    assert!(value["channels"].is_array());
+}
+
+#[test]
+fn daemon_serves_agent_safe_status_over_local_ipc() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("state");
+
+    hrc_in(&home).arg("init").assert().success();
+
+    let (mut child, _) = start_daemon(&home);
+    let endpoint = daemon_endpoint(&home, Interface::AgentSafe);
+    let runtime = daemon_runtime();
+    let response: Value = runtime.block_on(async move {
+        let mut client =
+            Client::connect_with_retry(&endpoint, 40, std::time::Duration::from_millis(25))
+                .await
+                .expect("agent endpoint should come up");
+        client
+            .call(&Request::Agent(AgentRequest::Status))
+            .await
+            .expect("status call should succeed")
+    });
+
+    assert_eq!(response["status"], "ok");
+    assert!(response["response"]["Status"]["channels"].is_array());
+
+    child.kill().expect("daemon should be killable in the test");
+    let _ = child.wait();
+}
+
+#[test]
+fn agent_safe_daemon_endpoint_refuses_trusted_requests() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("state");
+
+    hrc_in(&home).arg("init").assert().success();
+
+    let (mut child, _) = start_daemon(&home);
+    let endpoint = daemon_endpoint(&home, Interface::AgentSafe);
+    let runtime = daemon_runtime();
+    let response: Value = runtime.block_on(async move {
+        let mut client =
+            Client::connect_with_retry(&endpoint, 40, std::time::Duration::from_millis(25))
+                .await
+                .expect("agent endpoint should come up");
+        client
+            .call(&Request::Trusted(TrustedRequest::PreviewPending {
+                message_id: "message-1".into(),
+            }))
+            .await
+            .expect("trusted call should return a response")
+    });
+
+    assert_eq!(response["status"], "error");
+    assert_eq!(response["code"], "authorization_required");
+
+    child.kill().expect("daemon should be killable in the test");
+    let _ = child.wait();
+}
+
+#[test]
+fn daemon_binds_the_trusted_endpoint_separately() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("state");
+
+    hrc_in(&home).arg("init").assert().success();
+
+    let (mut child, _) = start_daemon(&home);
+    let endpoint = daemon_endpoint(&home, Interface::TrustedHuman);
+    let runtime = daemon_runtime();
+    let response: Value = runtime.block_on(async move {
+        let mut client =
+            Client::connect_with_retry(&endpoint, 40, std::time::Duration::from_millis(25))
+                .await
+                .expect("trusted endpoint should come up");
+        client
+            .call(&TrustedRequest::PreviewPending {
+                message_id: "message-1".into(),
+            })
+            .await
+            .expect("trusted call should return a response")
+    });
+
+    assert_eq!(response["status"], "error");
+    assert_eq!(response["code"], "unimplemented");
+
+    child.kill().expect("daemon should be killable in the test");
+    let _ = child.wait();
 }
 
 #[test]
@@ -192,6 +355,43 @@ fn hrc_in(home: &std::path::Path) -> Command {
         .env("HRC_HOME", home)
         .env("HRC_PASSPHRASE", "correct horse battery staple");
     command
+}
+
+fn hrc_std_in(home: &std::path::Path) -> std::process::Command {
+    let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("hrc"));
+    command
+        .env("HRC_HOME", home)
+        .env("HRC_PASSPHRASE", "correct horse battery staple");
+    command
+}
+
+fn start_daemon(home: &std::path::Path) -> (std::process::Child, Value) {
+    let mut child = hrc_std_in(home)
+        .args(["daemon", "--json"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("daemon should start");
+
+    let mut startup = String::new();
+    let stdout = child.stdout.take().expect("stdout piped");
+    let mut reader = BufReader::new(stdout);
+    reader
+        .read_line(&mut startup)
+        .expect("daemon startup line should be readable");
+
+    let value = serde_json::from_str(startup.trim()).expect("startup line should be JSON");
+    (child, value)
+}
+
+fn daemon_endpoint(home: &std::path::Path, interface: Interface) -> Endpoint {
+    Endpoint::new(&home.join("run"), interface).expect("endpoint should resolve")
+}
+
+fn daemon_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime should build")
 }
 
 #[test]

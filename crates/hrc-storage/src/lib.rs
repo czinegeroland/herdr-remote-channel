@@ -46,6 +46,17 @@ pub struct OutgoingReservation {
     pub roster_epoch: u64,
 }
 
+/// One queued outbox entry ready for publication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingOutgoing {
+    /// Sortable message identifier.
+    pub message_id: String,
+    /// RFC 3339 UTC creation time used for the message object path.
+    pub created_at: String,
+    /// Stored ciphertext bytes.
+    pub ciphertext: Vec<u8>,
+}
+
 /// State of an outbox record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutboxState {
@@ -123,6 +134,21 @@ pub struct ChannelCounts {
     pub pending_approval: u64,
     /// The most recent transport error recorded against this channel.
     pub last_error: Option<String>,
+}
+
+/// One recorded audit entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditEntry {
+    /// Channel the action applied to, when any.
+    pub channel_id: Option<String>,
+    /// Message the action applied to, when any.
+    pub message_id: Option<String>,
+    /// Stable action name.
+    pub action: String,
+    /// Optional detail for a human.
+    pub detail: Option<String>,
+    /// RFC 3339 time the action occurred.
+    pub occurred_at: String,
 }
 
 /// The local state database.
@@ -427,6 +453,23 @@ impl Database {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Queued outbox records with the bytes needed for publication, in send order.
+    pub fn pending_outgoing_records(&self, channel_id: &str) -> Result<Vec<PendingOutgoing>> {
+        let mut statement = self.connection.prepare(
+            "SELECT message_id, created_at, ciphertext FROM outbox
+             WHERE channel_id = ?1 AND state IN ('queued', 'publishing')
+             ORDER BY device_sequence",
+        )?;
+        let rows = statement.query_map(params![channel_id], |row| {
+            Ok(PendingOutgoing {
+                message_id: row.get(0)?,
+                created_at: row.get(1)?,
+                ciphertext: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     /// Resolves reservations left behind by a crash.
     ///
     /// A reserved slot has a sequence but no ciphertext, so nothing can be
@@ -531,6 +574,15 @@ impl Database {
         Ok(result == "ok")
     }
 
+    /// Current UTC time from SQLite, in RFC 3339 form.
+    pub fn utc_now(&self) -> Result<String> {
+        self.connection
+            .query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now')", [], |row| {
+                row.get(0)
+            })
+            .map_err(StorageError::from)
+    }
+
     /// Appends an audit record. There is no update or delete counterpart.
     pub fn append_audit(
         &self,
@@ -555,6 +607,26 @@ impl Database {
             .connection
             .prepare("SELECT action FROM audit ORDER BY id")?;
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Audit entries in reverse chronological order.
+    pub fn audit_entries(&self, since: Option<&str>) -> Result<Vec<AuditEntry>> {
+        let mut statement = self.connection.prepare(
+            "SELECT channel_id, message_id, action, detail, occurred_at
+             FROM audit
+             WHERE (?1 IS NULL OR occurred_at >= ?1)
+             ORDER BY occurred_at DESC, id DESC",
+        )?;
+        let rows = statement.query_map(params![since], |row| {
+            Ok(AuditEntry {
+                channel_id: row.get(0)?,
+                message_id: row.get(1)?,
+                action: row.get(2)?,
+                detail: row.get(3)?,
+                occurred_at: row.get(4)?,
+            })
+        })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 

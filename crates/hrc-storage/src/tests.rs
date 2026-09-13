@@ -364,6 +364,23 @@ fn recovery_leaves_queued_messages_alone() {
 }
 
 #[test]
+fn pending_outgoing_records_include_ciphertext_and_created_at() {
+    let mut database = database();
+    database
+        .allocate_outgoing(CHANNEL, DEVICE, "msg-1", 1, "hash", NOW)
+        .unwrap();
+    database
+        .queue_outgoing("msg-1", b"ciphertext", NOW)
+        .unwrap();
+
+    let records = database.pending_outgoing_records(CHANNEL).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].message_id, "msg-1");
+    assert_eq!(records[0].created_at, NOW);
+    assert_eq!(records[0].ciphertext, b"ciphertext");
+}
+
+#[test]
 fn the_outbox_lifecycle_advances_and_is_ordered() {
     let mut database = database();
     for index in 1..=3 {
@@ -473,6 +490,56 @@ fn audit_records_are_appended_in_order() {
         database.audit_actions().unwrap(),
         vec!["quarantine", "approve_to_agent"]
     );
+}
+
+#[test]
+fn utc_now_is_an_rfc_3339_utc_timestamp() {
+    let database = database();
+    let now = database.utc_now().unwrap();
+
+    assert_eq!(now.len(), 20);
+    assert_eq!(&now[4..5], "-");
+    assert_eq!(&now[7..8], "-");
+    assert_eq!(&now[10..11], "T");
+    assert_eq!(&now[13..14], ":");
+    assert_eq!(&now[16..17], ":");
+    assert_eq!(&now[19..20], "Z");
+}
+
+#[test]
+fn audit_entries_are_filtered_and_returned_newest_first() {
+    let database = database();
+    database
+        .append_audit(
+            Some(CHANNEL),
+            Some("msg-1"),
+            "quarantine",
+            Some("hash"),
+            Some("first"),
+            "2026-09-13T00:00:00Z",
+        )
+        .unwrap();
+    database
+        .append_audit(
+            Some(CHANNEL),
+            Some("msg-2"),
+            "approve_to_agent",
+            Some("hash"),
+            Some("second"),
+            "2026-09-13T01:00:00Z",
+        )
+        .unwrap();
+
+    let all = database.audit_entries(None).unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].message_id.as_deref(), Some("msg-2"));
+    assert_eq!(all[1].message_id.as_deref(), Some("msg-1"));
+
+    let filtered = database
+        .audit_entries(Some("2026-09-13T00:30:00Z"))
+        .unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].detail.as_deref(), Some("second"));
 }
 
 #[test]

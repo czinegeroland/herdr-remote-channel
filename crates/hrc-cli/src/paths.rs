@@ -54,6 +54,17 @@ impl Paths {
         self.home.join("state.sqlite")
     }
 
+    /// The locally managed Git repository for one channel.
+    pub fn channel_transport(&self, channel_id: &str) -> PathBuf {
+        let tag = hrc_protocol::canonical::sha256_hex(channel_id.as_bytes());
+        self.home.join("transport").join(format!("{tag}.git"))
+    }
+
+    /// The private runtime directory for local sockets and pipes.
+    pub fn runtime(&self) -> PathBuf {
+        self.home.join("run")
+    }
+
     /// The directory holding protected key files.
     pub fn keys(&self) -> PathBuf {
         self.home.join("keys")
@@ -105,6 +116,7 @@ mod tests {
         assert_eq!(paths.home(), Path::new("/tmp/example"));
         assert_eq!(paths.database(), Path::new("/tmp/example/state.sqlite"));
         assert_eq!(paths.keys(), Path::new("/tmp/example/keys"));
+        assert_eq!(paths.runtime(), Path::new("/tmp/example/run"));
     }
 
     #[test]

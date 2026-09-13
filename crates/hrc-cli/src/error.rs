@@ -41,6 +41,18 @@ pub enum CliError {
     /// A key or cryptographic operation failed.
     #[error(transparent)]
     Crypto(#[from] hrc_crypto::CryptoError),
+
+    /// The synchronization core refused an operation.
+    #[error(transparent)]
+    Core(#[from] hrc_core::CoreError),
+
+    /// The Git transport failed.
+    #[error(transparent)]
+    Git(#[from] hrc_transport_git::GitError),
+
+    /// Local IPC failed.
+    #[error(transparent)]
+    Ipc(#[from] hrc_ipc::IpcError),
 }
 
 impl CliError {
@@ -53,6 +65,9 @@ impl CliError {
             CliError::Io { .. } => "io_error",
             CliError::Storage(_) => "storage_error",
             CliError::Crypto(_) => "crypto_error",
+            CliError::Core(_) => "core_error",
+            CliError::Git(_) => "git_error",
+            CliError::Ipc(_) => "ipc_error",
         }
     }
 
@@ -65,7 +80,12 @@ impl CliError {
             CliError::NoStateDirectory | CliError::NoPassphrase | CliError::AlreadyInitialized => {
                 exit::USAGE
             }
-            CliError::Io { .. } | CliError::Storage(_) | CliError::Crypto(_) => exit::FAILURE,
+            CliError::Io { .. }
+            | CliError::Storage(_)
+            | CliError::Crypto(_)
+            | CliError::Core(_)
+            | CliError::Git(_)
+            | CliError::Ipc(_) => exit::FAILURE,
         }
     }
 }

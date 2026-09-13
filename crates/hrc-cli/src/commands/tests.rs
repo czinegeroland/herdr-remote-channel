@@ -10,6 +10,11 @@
 //! test in a binary, and a test that mutated it would race the others.
 
 use super::*;
+use std::path::Path;
+use std::process::Command as ProcessCommand;
+
+use hrc_transport::{ObjectClass, PublicationClass, PublishObject, PublishRequest, Transport};
+use hrc_transport_git::GitTransport;
 
 /// A fresh state directory and a context that can unlock its key store.
 fn home() -> (tempfile::TempDir, Context) {
@@ -21,6 +26,35 @@ fn home() -> (tempfile::TempDir, Context) {
         )),
     };
     (directory, context)
+}
+
+fn bare_remote(path: &Path) {
+    let status = ProcessCommand::new("git")
+        .args(["init", "--bare", "--quiet"])
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+fn peer(root: &Path, name: &str, remote: &Path) -> GitTransport {
+    GitTransport::open(root.join(name), remote.to_str().unwrap()).unwrap()
+}
+
+fn control(sequence: u32) -> PublishObject {
+    PublishObject {
+        name: format!("control/log/{sequence:08}.json"),
+        class: ObjectClass::Control,
+        bytes: format!("control-entry-{sequence}").into_bytes(),
+    }
+}
+
+fn message(name: &str) -> PublishObject {
+    PublishObject {
+        name: format!("messages/2026/09/{name}.age"),
+        class: ObjectClass::Message,
+        bytes: format!("ciphertext-{name}").into_bytes(),
+    }
 }
 
 #[test]
@@ -266,4 +300,232 @@ fn doctor_finds_the_git_executable() {
 
     assert_eq!(git["ok"], true, "git is required and is present in CI");
     assert!(git["detail"].as_str().unwrap().starts_with("git version"));
+}
+
+#[test]
+fn audit_is_empty_before_any_action_is_recorded() {
+    let (_directory, context) = home();
+    init(&context).unwrap();
+
+    let value = audit(&context, None).unwrap();
+    assert_eq!(value["status"], "ok");
+    assert!(value["entries"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn audit_reports_entries_newest_first_and_can_filter_by_time() {
+    let (_directory, context) = home();
+    init(&context).unwrap();
+
+    let database = Database::open(context.paths.database()).unwrap();
+    database
+        .append_audit(
+            Some("channel-1"),
+            Some("msg-1"),
+            "draft_saved",
+            Some("hash-1"),
+            Some("first"),
+            "2026-09-13T00:00:00Z",
+        )
+        .unwrap();
+    database
+        .append_audit(
+            Some("channel-1"),
+            Some("msg-2"),
+            "synchronization_halted",
+            None,
+            Some("history rewritten"),
+            "2026-09-13T01:00:00Z",
+        )
+        .unwrap();
+
+    let value = audit(&context, None).unwrap();
+    let entries = value["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["action"], "synchronization_halted");
+    assert_eq!(entries[0]["detail"], "history rewritten");
+    assert_eq!(entries[1]["action"], "draft_saved");
+
+    let filtered = audit(&context, Some("2026-09-13T00:30:00Z")).unwrap();
+    let entries = filtered["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["messageId"], "msg-2");
+}
+
+#[test]
+fn sync_once_fetches_only_when_the_remote_head_changed() {
+    let (directory, context) = home();
+    init(&context).unwrap();
+
+    let remote = directory.path().join("remote.git");
+    bare_remote(&remote);
+
+    let mut publisher = peer(directory.path(), "publisher", &remote);
+    let genesis = publisher.create_group(vec![control(0)]).unwrap();
+    let message = publisher
+        .publish(PublishRequest {
+            expected_revision: Some(genesis.revision.clone()),
+            class: PublicationClass::Data,
+            objects: vec![message("msg-1")],
+        })
+        .unwrap();
+
+    let database = Database::open(context.paths.database()).unwrap();
+    database
+        .insert_channel(
+            "channel-1",
+            "git",
+            remote.to_str().unwrap(),
+            "Test channel",
+            "2026-09-13T00:00:00Z",
+        )
+        .unwrap();
+
+    let first = sync_once(&context).unwrap();
+    assert_eq!(first["status"], "ok");
+    assert_eq!(first["channels"][0]["remoteChanged"], true);
+    assert_eq!(first["channels"][0]["fetchedPublications"], 2);
+    assert_eq!(
+        Database::open(context.paths.database())
+            .unwrap()
+            .channel("channel-1")
+            .unwrap()
+            .unwrap()
+            .sync_cursor
+            .as_deref(),
+        Some(message.revision.as_str())
+    );
+
+    let second = sync_once(&context).unwrap();
+    assert_eq!(second["channels"][0]["remoteChanged"], false);
+    assert_eq!(second["channels"][0]["fetchedPublications"], 0);
+}
+
+#[test]
+fn sync_once_publishes_queued_messages() {
+    let (directory, context) = home();
+    init(&context).unwrap();
+
+    let remote = directory.path().join("remote.git");
+    bare_remote(&remote);
+
+    let mut publisher = peer(directory.path(), "publisher", &remote);
+    let genesis = publisher.create_group(vec![control(0)]).unwrap();
+
+    let mut database = Database::open(context.paths.database()).unwrap();
+    database
+        .insert_channel(
+            "channel-1",
+            "git",
+            remote.to_str().unwrap(),
+            "Test channel",
+            "2026-09-13T00:00:00Z",
+        )
+        .unwrap();
+    database
+        .set_sync_cursor("channel-1", &genesis.revision)
+        .unwrap();
+    database
+        .allocate_outgoing(
+            "channel-1",
+            "device-1",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            1,
+            "hash",
+            "2026-09-13T00:00:00Z",
+        )
+        .unwrap();
+    database
+        .queue_outgoing(
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            b"ciphertext-queued",
+            "2026-09-13T00:00:00Z",
+        )
+        .unwrap();
+    drop(database);
+
+    let value = sync_once(&context).unwrap();
+    assert_eq!(
+        value["channels"][0]["publishedMessages"][0],
+        "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    );
+    assert_eq!(
+        Database::open(context.paths.database())
+            .unwrap()
+            .outbox_state("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+            .unwrap(),
+        Some(hrc_storage::OutboxState::Published)
+    );
+
+    let reader = peer(directory.path(), "reader", &remote);
+    reader.sync_from_remote().unwrap();
+    let page = reader.fetch(Some(&genesis.revision), 100).unwrap();
+    assert_eq!(page.publications.len(), 1);
+    let object = &page.publications[0].objects[0];
+    assert_eq!(
+        object.name,
+        "messages/2026/09/01ARZ3NDEKTSV4RRFFQ69G5FAV.age"
+    );
+    assert_eq!(
+        reader.get_object(&object.name, &object.sha256).unwrap(),
+        b"ciphertext-queued"
+    );
+}
+
+#[test]
+fn daemon_tick_reports_the_next_poll_interval() {
+    let (_directory, context) = home();
+    init(&context).unwrap();
+
+    let value = daemon_tick(&context).unwrap();
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["nextPollSeconds"], 30);
+    assert!(value["channels"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn daemon_tick_degrades_one_channel_without_skipping_the_rest() {
+    let (directory, context) = home();
+    init(&context).unwrap();
+
+    let remote = directory.path().join("remote.git");
+    bare_remote(&remote);
+
+    let mut publisher = peer(directory.path(), "publisher", &remote);
+    publisher.create_group(vec![control(0)]).unwrap();
+
+    let database = Database::open(context.paths.database()).unwrap();
+    database
+        .insert_channel(
+            "ok-channel",
+            "git",
+            remote.to_str().unwrap(),
+            "OK",
+            "2026-09-13T00:00:00Z",
+        )
+        .unwrap();
+    database
+        .insert_channel(
+            "bad-channel",
+            "git",
+            directory.path().join("missing.git").to_str().unwrap(),
+            "Bad",
+            "2026-09-13T00:00:00Z",
+        )
+        .unwrap();
+
+    let value = daemon_tick(&context).unwrap();
+    assert_eq!(value["status"], "degraded");
+    let channels = value["channels"].as_array().unwrap();
+    assert_eq!(channels.len(), 2);
+    assert!(
+        channels
+            .iter()
+            .any(|channel| channel["channelId"] == "ok-channel" && channel["status"].is_null())
+    );
+    assert!(
+        channels
+            .iter()
+            .any(|channel| channel["channelId"] == "bad-channel" && channel["status"] == "error")
+    );
 }
