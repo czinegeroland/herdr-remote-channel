@@ -408,7 +408,7 @@ fn sync_once_publishes_queued_messages() {
             channel_id,
             "device-1",
             "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            1,
+            0,
             "hash",
             "2026-09-13T00:00:00Z",
         )
@@ -447,6 +447,330 @@ fn sync_once_publishes_queued_messages() {
     assert_eq!(
         reader.get_object(&object.name, &object.sha256).unwrap(),
         b"ciphertext-queued"
+    );
+}
+
+#[test]
+fn stale_queued_ciphertext_waits_for_keys_then_reencrypts_for_the_new_roster() {
+    let (directory, context) = home();
+    init(&context).unwrap();
+
+    let remote = directory.path().join("remote.git");
+    bare_remote(&remote);
+    let created = create(&context, remote.to_str().unwrap(), Some("Test channel")).unwrap();
+    let channel_id = created["channelId"].as_str().unwrap().to_owned();
+
+    let store = context.key_store().unwrap();
+    let device: DeviceSecrets = store.load(DEVICE_KEY_NAME).unwrap();
+    let principal: PrincipalSecrets = store.load(PRINCIPAL_KEY_NAME).unwrap();
+    let transport = peer(directory.path(), "old-roster", &remote);
+    transport.sync_from_remote().unwrap();
+    let (old_roster, _) = load_roster(&transport, &channel_id).unwrap();
+    let device_id = local_device_id(&old_roster, &device).unwrap();
+
+    let message_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let created_at = "2026-09-13T00:00:00Z";
+    let body = json!({ "text": "survives a roster change" });
+    let payload_hash = canonical::canonical_sha256_hex(&body).unwrap();
+    let mut database = Database::open(context.paths.database()).unwrap();
+    let reservation = database
+        .allocate_outgoing(
+            &channel_id,
+            &device_id,
+            message_id,
+            old_roster.epoch(),
+            &payload_hash,
+            created_at,
+        )
+        .unwrap();
+    let envelope = MessageEnvelope {
+        version: hrc_protocol::PROTOCOL_VERSION,
+        channel_id: channel_id.clone(),
+        roster_epoch: old_roster.epoch(),
+        message_id: message_id.to_owned(),
+        device_sequence: reservation.device_sequence,
+        previous_chain_id: reservation.previous_chain_id.clone(),
+        created_at: created_at.to_owned(),
+        expires_at: None,
+        to: hrc_protocol::Addressing {
+            principals: Vec::new(),
+            endpoint: Some("reviewer".into()),
+        },
+        recipients: hrc_protocol::RecipientDevices::new([device_id.clone()]).unwrap(),
+        thread_id: "thread-before-epoch-change".into(),
+        in_reply_to: Some("earlier-message".into()),
+        kind: hrc_protocol::MessageKind::Note.as_str().into(),
+        requested_capability: None,
+        body: body.clone(),
+        attachments: Vec::new(),
+        padding: String::new(),
+    };
+    let old_ciphertext = hrc_core::message::seal(
+        &old_roster,
+        &device.signing_key(),
+        Signer {
+            principal_id: principal.signing_key().verifying_key().to_base64url(),
+            device_id: device_id.clone(),
+        },
+        envelope.clone(),
+    )
+    .unwrap();
+    let reseal_material = hrc_crypto::encrypt_to(
+        &[device.device_identity().unwrap().recipient()],
+        &canonical::to_canonical_bytes(&envelope).unwrap(),
+    )
+    .unwrap();
+    database
+        .queue_outgoing_resealable(
+            message_id,
+            &old_ciphertext,
+            Some(&reseal_material),
+            created_at,
+        )
+        .unwrap();
+    drop(database);
+
+    let joiner_directory = tempfile::tempdir().unwrap();
+    let joiner = Context {
+        paths: Paths::at(joiner_directory.path().join("state")),
+        passphrase: context.passphrase.clone(),
+    };
+    init(&joiner).unwrap();
+    let invite = invite_create(&context, "bob", "24h").unwrap();
+    let joined = join(&joiner, invite["inviteCode"].as_str().unwrap()).unwrap();
+    admit_join(&context, joined["requestId"].as_str().unwrap()).unwrap();
+
+    let locked = Context {
+        paths: context.paths.clone(),
+        passphrase: None,
+    };
+    let deferred = daemon_tick(&locked).unwrap();
+    assert_eq!(deferred["channels"][0]["deferredMessages"][0], message_id);
+    let queued = Database::open(context.paths.database())
+        .unwrap()
+        .pending_outgoing_records(&channel_id)
+        .unwrap()
+        .remove(0);
+    assert_eq!(queued.roster_epoch, old_roster.epoch());
+    assert_eq!(queued.ciphertext, old_ciphertext);
+    let before_unlock = peer(directory.path(), "before-unlock", &remote);
+    before_unlock.sync_from_remote().unwrap();
+    assert!(
+        before_unlock
+            .fetch(None, 100)
+            .unwrap()
+            .publications
+            .iter()
+            .flat_map(|publication| &publication.objects)
+            .all(|object| object.class != ObjectClass::Message),
+        "stale-epoch ciphertext was published while the key store was locked"
+    );
+
+    let published = sync_once(&context).unwrap();
+    assert_eq!(published["channels"][0]["publishedMessages"][0], message_id);
+
+    let reader = peer(directory.path(), "new-roster", &remote);
+    reader.sync_from_remote().unwrap();
+    let (new_roster, _) = load_roster(&reader, &channel_id).unwrap();
+    assert_eq!(new_roster.epoch(), old_roster.epoch() + 1);
+    let page = reader.fetch(None, 100).unwrap();
+    let object = page
+        .publications
+        .iter()
+        .flat_map(|publication| &publication.objects)
+        .find(|object| object.class == ObjectClass::Message)
+        .unwrap();
+    let new_ciphertext = reader.get_object(&object.name, &object.sha256).unwrap();
+    assert_ne!(new_ciphertext, old_ciphertext);
+
+    let joiner_store = joiner.key_store().unwrap();
+    let joiner_device: DeviceSecrets = joiner_store.load(DEVICE_KEY_NAME).unwrap();
+    assert!(
+        joiner_device
+            .device_identity()
+            .unwrap()
+            .decrypt(&old_ciphertext)
+            .is_err(),
+        "the newly admitted device unexpectedly opened stale ciphertext"
+    );
+    let opened = hrc_core::message::open(
+        &new_roster,
+        &joiner_device.device_identity().unwrap(),
+        &new_ciphertext,
+        new_roster.epoch(),
+        created_at,
+    )
+    .unwrap();
+    assert_eq!(opened.envelope.roster_epoch, new_roster.epoch());
+    assert_eq!(opened.envelope.message_id, message_id);
+    assert_eq!(opened.envelope.device_sequence, reservation.device_sequence);
+    assert_eq!(
+        opened.envelope.previous_chain_id,
+        reservation.previous_chain_id
+    );
+    assert_eq!(opened.envelope.thread_id, envelope.thread_id);
+    assert_eq!(opened.envelope.in_reply_to, envelope.in_reply_to);
+    assert_eq!(
+        canonical::canonical_sha256_hex(&opened.envelope.body).unwrap(),
+        payload_hash
+    );
+}
+
+#[test]
+fn an_acknowledgement_lost_before_an_epoch_change_does_not_reseal_published_bytes() {
+    let (directory, context) = home();
+    init(&context).unwrap();
+
+    let remote = directory.path().join("remote.git");
+    bare_remote(&remote);
+    let created = create(&context, remote.to_str().unwrap(), Some("Test channel")).unwrap();
+    let channel_id = created["channelId"].as_str().unwrap().to_owned();
+    let created_at = "2026-09-13T00:00:00Z";
+    let message_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let ciphertext = b"published-before-local-ack";
+
+    let store = context.key_store().unwrap();
+    let device: DeviceSecrets = store.load(DEVICE_KEY_NAME).unwrap();
+    let mut publisher = peer(directory.path(), "lost-ack-publisher", &remote);
+    publisher.sync_from_remote().unwrap();
+    let (old_roster, _) = load_roster(&publisher, &channel_id).unwrap();
+    let device_id = local_device_id(&old_roster, &device).unwrap();
+
+    let mut database = Database::open(context.paths.database()).unwrap();
+    database
+        .allocate_outgoing(
+            &channel_id,
+            &device_id,
+            message_id,
+            old_roster.epoch(),
+            "payload-hash",
+            created_at,
+        )
+        .unwrap();
+    database
+        .queue_outgoing(message_id, ciphertext, created_at)
+        .unwrap();
+    drop(database);
+
+    let head = publisher.open_group().unwrap().revision;
+    publisher
+        .publish(PublishRequest {
+            expected_revision: head,
+            class: PublicationClass::Data,
+            objects: vec![outgoing_message_object(
+                message_id,
+                created_at,
+                ciphertext.to_vec(),
+            )],
+        })
+        .unwrap();
+
+    let joiner_directory = tempfile::tempdir().unwrap();
+    let joiner = Context {
+        paths: Paths::at(joiner_directory.path().join("state")),
+        passphrase: context.passphrase.clone(),
+    };
+    init(&joiner).unwrap();
+    let invite = invite_create(&context, "bob", "24h").unwrap();
+    let joined = join(&joiner, invite["inviteCode"].as_str().unwrap()).unwrap();
+    admit_join(&context, joined["requestId"].as_str().unwrap()).unwrap();
+
+    let before = peer(directory.path(), "before-lost-ack-sync", &remote);
+    before.sync_from_remote().unwrap();
+    let publications_before = before.fetch(None, 100).unwrap().publications.len();
+
+    let result = sync_once(&context).unwrap();
+    assert_eq!(result["channels"][0]["publishedMessages"][0], message_id);
+    assert_eq!(
+        Database::open(context.paths.database())
+            .unwrap()
+            .outbox_state(message_id)
+            .unwrap(),
+        Some(hrc_storage::OutboxState::Published)
+    );
+
+    let after = peer(directory.path(), "after-lost-ack-sync", &remote);
+    after.sync_from_remote().unwrap();
+    assert_eq!(
+        after.fetch(None, 100).unwrap().publications.len(),
+        publications_before
+    );
+}
+
+#[test]
+fn an_unresealable_predecessor_blocks_later_messages_from_the_same_device() {
+    let (directory, context) = home();
+    init(&context).unwrap();
+
+    let remote = directory.path().join("remote.git");
+    bare_remote(&remote);
+    let created = create(&context, remote.to_str().unwrap(), Some("Test channel")).unwrap();
+    let channel_id = created["channelId"].as_str().unwrap().to_owned();
+
+    let store = context.key_store().unwrap();
+    let device: DeviceSecrets = store.load(DEVICE_KEY_NAME).unwrap();
+    let principal: PrincipalSecrets = store.load(PRINCIPAL_KEY_NAME).unwrap();
+    let transport = peer(directory.path(), "legacy-roster", &remote);
+    transport.sync_from_remote().unwrap();
+    let (old_roster, _) = load_roster(&transport, &channel_id).unwrap();
+    let device_id = local_device_id(&old_roster, &device).unwrap();
+
+    let mut database = Database::open(context.paths.database()).unwrap();
+    database
+        .allocate_outgoing(
+            &channel_id,
+            &device_id,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            old_roster.epoch(),
+            "legacy-payload-hash",
+            "2026-09-13T00:00:00Z",
+        )
+        .unwrap();
+    database
+        .queue_outgoing(
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            b"legacy-ciphertext",
+            "2026-09-13T00:00:00Z",
+        )
+        .unwrap();
+    drop(database);
+
+    let joiner_directory = tempfile::tempdir().unwrap();
+    let joiner = Context {
+        paths: Paths::at(joiner_directory.path().join("state")),
+        passphrase: context.passphrase.clone(),
+    };
+    init(&joiner).unwrap();
+    let invite = invite_create(&context, "bob", "24h").unwrap();
+    let joined = join(&joiner, invite["inviteCode"].as_str().unwrap()).unwrap();
+    admit_join(&context, joined["requestId"].as_str().unwrap()).unwrap();
+
+    let recipient = principal.signing_key().verifying_key().to_base64url();
+    let sent = send(&context, &recipient, "must wait for the predecessor").unwrap();
+    assert_eq!(sent["published"], false);
+    assert_eq!(sent["deferred"], true);
+
+    let database = Database::open(context.paths.database()).unwrap();
+    assert_eq!(database.pending_outgoing(&channel_id).unwrap().len(), 2);
+    assert!(
+        database
+            .channel_counts(&channel_id)
+            .unwrap()
+            .last_error
+            .unwrap()
+            .contains("predates re-encryption support")
+    );
+
+    let reader = peer(directory.path(), "blocked-descendant-reader", &remote);
+    reader.sync_from_remote().unwrap();
+    assert!(
+        reader
+            .fetch(None, 100)
+            .unwrap()
+            .publications
+            .iter()
+            .flat_map(|publication| &publication.objects)
+            .all(|object| object.class != ObjectClass::Message)
     );
 }
 

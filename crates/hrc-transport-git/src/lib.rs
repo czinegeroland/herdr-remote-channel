@@ -223,8 +223,8 @@ impl GitTransport {
     ///
     /// Returns `false` when the remote rejected the push, which means
     /// another peer published first.
-    fn push(&self) -> Result<bool, GitError> {
-        let refspec = format!("refs/heads/{0}:refs/heads/{0}", self.branch);
+    fn push(&self, commit: &str) -> Result<bool, GitError> {
+        let refspec = format!("{commit}:refs/heads/{}", self.branch);
         // No `--force`, and no `+` in the refspec. A rejected push is a
         // signal to rebuild, never something to override.
         match self
@@ -241,13 +241,25 @@ impl GitTransport {
     }
 
     /// Rewinds the local branch after a rejected push.
-    fn reset_local(&self, to: Option<&str>) -> Result<(), GitError> {
+    fn reset_local(&self, to: Option<&str>, expected: &str) -> Result<(), GitError> {
         let reference = format!("refs/heads/{}", self.branch);
-        match to {
-            Some(sha) => self.repository.run(["update-ref", &reference, sha])?,
-            None => self.repository.run(["update-ref", "-d", &reference])?,
+        let result = match to {
+            Some(sha) => self
+                .repository
+                .try_run(["update-ref", &reference, sha, expected])?,
+            None => self
+                .repository
+                .try_run(["update-ref", "-d", &reference, expected])?,
         };
-        Ok(())
+
+        match result {
+            Ok(_) => Ok(()),
+            Err(_) if self.local_head()?.as_deref() != Some(expected) => Ok(()),
+            Err(stderr) => Err(GitError::Command {
+                status: None,
+                stderr,
+            }),
+        }
     }
 
     /// Lists commits on the branch, oldest first.
@@ -446,11 +458,12 @@ impl Transport for GitTransport {
             .commit(None, &request.objects, "hrc: genesis")
             .map_err(to_transport_error)?;
 
-        if !self.push().map_err(to_transport_error)? {
+        if !self.push(&commit).map_err(to_transport_error)? {
             // Someone else created the channel between the fetch and the
             // push. Drop the local branch so the next attempt starts from
             // their history rather than ours.
-            self.reset_local(None).map_err(to_transport_error)?;
+            self.reset_local(None, &commit)
+                .map_err(to_transport_error)?;
             return Err(TransportError::GroupExists);
         }
 
@@ -498,18 +511,27 @@ impl Transport for GitTransport {
             )
             .map_err(to_transport_error)?;
 
-        if !self.push().map_err(to_transport_error)? {
-            // Another peer pushed first. Rewind to the tip we built on and
-            // report a conflict; the caller re-fetches and rebuilds. The
-            // objects of this attempt are unreferenced and never appear in
-            // the channel.
-            self.reset_local(Some(&parent))
-                .map_err(to_transport_error)?;
-            self.sync_from_remote().map_err(to_transport_error)?;
+        match self.push(&commit) {
+            Ok(true) => {}
+            Ok(false) => {
+                // Another peer pushed first. Rewind to the tip we built on
+                // and report a conflict; the caller re-fetches and rebuilds.
+                self.reset_local(Some(&parent), &commit)
+                    .map_err(to_transport_error)?;
+                self.sync_from_remote().map_err(to_transport_error)?;
 
-            return Err(TransportError::Conflict {
-                current: self.local_head().map_err(to_transport_error)?,
-            });
+                return Err(TransportError::Conflict {
+                    current: self.local_head().map_err(to_transport_error)?,
+                });
+            }
+            Err(error) => {
+                // A failed push never proves that the local commit reached
+                // the remote. Drop it so later lost-ack detection only sees
+                // history confirmed by a subsequent fetch.
+                self.reset_local(Some(&parent), &commit)
+                    .map_err(to_transport_error)?;
+                return Err(to_transport_error(error));
+            }
         }
 
         self.publication_for(&commit)

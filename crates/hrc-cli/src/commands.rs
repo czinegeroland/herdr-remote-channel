@@ -22,7 +22,7 @@ use hrc_protocol::domain;
 use hrc_protocol::identity::{DeviceCertificatePayload, DeviceDescriptor};
 use hrc_protocol::message::MessageEnvelope;
 use hrc_protocol::signed::{SignedObject, Signer};
-use hrc_storage::Database;
+use hrc_storage::{Database, PendingOutgoing};
 use hrc_transport::{ObjectClass, PublishObject, Revision, Transport};
 use hrc_transport_git::GitTransport;
 use secrecy::SecretString;
@@ -1026,16 +1026,17 @@ pub fn device_list(context: &Context) -> Result<Value> {
 ///
 /// Separate from the synchronization pass because receiving needs the key
 /// store, and a channel can be synchronized by a process that has no
-/// passphrase — a locked installation still keeps its queue moving, it just
-/// cannot read anything.
+/// passphrase. A locked installation can still validate and advance public
+/// state; queued ciphertext that became stale stays deferred until the key
+/// store can be unlocked.
 fn receive_for(
-    paths: &Paths,
+    context: &Context,
     channel: &hrc_storage::ChannelRecord,
     now: &str,
 ) -> Result<Vec<String>> {
-    let identity = match paths.stored_passphrase() {
+    let identity = match context.passphrase.clone() {
         Some(passphrase) => {
-            let store = PassphraseStore::open(paths.keys(), passphrase)?;
+            let store = PassphraseStore::open(context.paths.keys(), passphrase)?;
             if store.contains(DEVICE_KEY_NAME)? {
                 let device: DeviceSecrets = store.load::<DeviceSecrets>(DEVICE_KEY_NAME)?;
                 Some(device.device_identity()?)
@@ -1047,11 +1048,11 @@ fn receive_for(
     };
 
     let transport = GitTransport::open(
-        paths.channel_transport(&channel.channel_id),
+        context.paths.channel_transport(&channel.channel_id),
         &channel.transport_locator,
     )?;
 
-    let mut database = Database::open(paths.database())?;
+    let mut database = Database::open(context.paths.database())?;
     receive_messages(&transport, &mut database, channel, identity.as_ref(), now)
 }
 
@@ -1285,6 +1286,9 @@ fn compose(
         padding: String::new(),
     };
 
+    let reseal_plaintext = canonical::to_canonical_bytes(&envelope)?;
+    let reseal_material =
+        hrc_crypto::encrypt_to(&[device.device_identity()?.recipient()], &reseal_plaintext)?;
     let ciphertext = hrc_core::message::seal(
         &roster,
         &device.signing_key(),
@@ -1295,21 +1299,19 @@ fn compose(
         envelope,
     )?;
 
-    database.queue_outgoing(&message_id, &ciphertext, &now)?;
+    database.queue_outgoing_resealable(&message_id, &ciphertext, Some(&reseal_material), &now)?;
 
-    let outcome = hrc_core::sync::publish_one(
+    let outcomes = publish_pending_outgoing(
         &mut transport,
         &database,
         &channel.channel_id,
-        &message_id,
-        PublishObject {
-            name: message_object_name(&now, &message_id),
-            class: ObjectClass::Message,
-            bytes: ciphertext,
-        },
+        Some(&device),
         5,
         &now,
     )?;
+    let published = outcomes
+        .iter()
+        .any(|outcome| outcome.published.contains(&message_id));
 
     database.append_audit(
         Some(&channel.channel_id),
@@ -1325,8 +1327,8 @@ fn compose(
         "messageId": message_id,
         "threadId": thread_id,
         "kind": kind.as_str(),
-        "published": !outcome.published.is_empty(),
-        "deferred": !outcome.deferred.is_empty(),
+        "published": published,
+        "deferred": !published,
     }))
 }
 
@@ -1435,14 +1437,6 @@ pub fn thread(context: &Context, thread_id: &str) -> Result<Value> {
         "threadId": thread_id,
         "entries": entries,
     }))
-}
-
-/// Where a message object lives in the channel layout (PRD section 16.2).
-fn message_object_name(now: &str, message_id: &str) -> String {
-    let year = now.get(0..4).unwrap_or("0000");
-    let month = now.get(5..7).unwrap_or("00");
-
-    format!("messages/{year}/{month}/{message_id}.age")
 }
 
 /// Milliseconds since the Unix epoch, for a message identifier.
@@ -1749,9 +1743,8 @@ pub fn sync_once(context: &Context) -> Result<Value> {
     let database = Database::open(context.paths.database())?;
     let now = database.utc_now()?;
     let mut channels = Vec::new();
-
     for channel in database.channels()? {
-        channels.push(sync_git_channel(&context.paths, &database, &channel, &now)?);
+        channels.push(sync_git_channel(context, &database, &channel, &now)?);
     }
 
     Ok(json!({
@@ -1769,7 +1762,7 @@ pub fn daemon_tick(context: &Context) -> Result<Value> {
     let mut healthy = true;
 
     for channel in database.channels()? {
-        match sync_git_channel(&context.paths, &database, &channel, &now) {
+        match sync_git_channel(context, &database, &channel, &now) {
             Ok(value) => channels.push(value),
             Err(error) => {
                 healthy = false;
@@ -2177,7 +2170,7 @@ fn format_audit_entry(entry: &hrc_storage::AuditEntry) -> String {
 }
 
 fn sync_git_channel(
-    paths: &Paths,
+    context: &Context,
     database: &Database,
     channel: &hrc_storage::ChannelRecord,
     now: &str,
@@ -2199,7 +2192,7 @@ fn sync_git_channel(
         });
     }
 
-    let git_dir = paths.channel_transport(&channel.channel_id);
+    let git_dir = context.paths.channel_transport(&channel.channel_id);
     if let Some(parent) = git_dir.parent() {
         std::fs::create_dir_all(parent).map_err(|source| CliError::Io {
             action: "create the local transport directory",
@@ -2209,10 +2202,12 @@ fn sync_git_channel(
 
     let mut transport = GitTransport::open(&git_dir, &channel.transport_locator)?;
     let remote_head = transport.remote_head()?;
-    let local_missing = matches!(
-        transport.open_group(),
-        Err(hrc_transport::TransportError::NoSuchGroup)
-    );
+    let local_head = match transport.open_group() {
+        Ok(group) => group.revision,
+        Err(hrc_transport::TransportError::NoSuchGroup) => None,
+        Err(error) => return Err(error.into()),
+    };
+    let local_missing = local_head.is_none();
 
     if remote_head.is_none() {
         let error = hrc_core::CoreError::Transport(
@@ -2230,16 +2225,17 @@ fn sync_git_channel(
     let remote_changed = remote_head != channel.sync_cursor;
     let recovered = database.recover_reservations(&channel.channel_id, now)?;
 
-    if remote_changed || (remote_head.is_some() && local_missing) {
+    let local_out_of_sync = local_head != remote_head;
+    if remote_changed || local_out_of_sync {
         transport.sync_from_remote()?;
     }
 
-    if remote_changed {
+    if remote_changed || local_out_of_sync {
         validate_trusted_cursor(&transport, database, channel, now)?;
     }
 
     let received = if remote_changed || local_missing {
-        receive_for(paths, channel, now).map_err(|error| {
+        receive_for(context, channel, now).map_err(|error| {
             halt_if_received_history_is_invalid(database, &channel.channel_id, error, now)
         })?
     } else {
@@ -2258,21 +2254,26 @@ fn sync_git_channel(
         None
     };
 
-    let published = database
-        .pending_outgoing_records(&channel.channel_id)?
-        .into_iter()
-        .map(|record| {
-            hrc_core::sync::publish_one(
-                &mut transport,
-                database,
-                &channel.channel_id,
-                &record.message_id,
-                outgoing_message_object(&record.message_id, &record.created_at, record.ciphertext),
-                3,
-                now,
-            )
-        })
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let device = match context.passphrase.clone() {
+        Some(passphrase) => {
+            let store = PassphraseStore::open(context.paths.keys(), passphrase)?;
+            if store.contains(DEVICE_KEY_NAME)? {
+                Some(store.load::<DeviceSecrets>(DEVICE_KEY_NAME)?)
+            } else {
+                None
+            }
+        }
+        None => None,
+    };
+
+    let published = publish_pending_outgoing(
+        &mut transport,
+        database,
+        &channel.channel_id,
+        device.as_ref(),
+        3,
+        now,
+    )?;
 
     let published_messages = published
         .iter()
@@ -2303,6 +2304,166 @@ fn sync_git_channel(
         "receivedMessages": received,
         "cursor": fetch.and_then(|outcome| outcome.cursor),
     }))
+}
+
+fn publish_pending_outgoing(
+    transport: &mut GitTransport,
+    database: &Database,
+    channel_id: &str,
+    device: Option<&DeviceSecrets>,
+    max_attempts: u32,
+    now: &str,
+) -> Result<Vec<hrc_core::sync::PublishOutcome>> {
+    let mut blocked_devices = std::collections::HashSet::new();
+    let mut outcomes = Vec::new();
+
+    for outgoing in database.pending_outgoing_records(channel_id)? {
+        if blocked_devices.contains(&outgoing.device_id) {
+            outcomes.push(hrc_core::sync::PublishOutcome {
+                published: Vec::new(),
+                conflicts: 0,
+                deferred: vec![outgoing.message_id],
+            });
+            continue;
+        }
+
+        let device_id = outgoing.device_id.clone();
+        let outcome = publish_outgoing(
+            transport,
+            database,
+            channel_id,
+            outgoing,
+            device,
+            max_attempts,
+            now,
+        )?;
+        if !outcome.deferred.is_empty() {
+            blocked_devices.insert(device_id);
+        }
+        outcomes.push(outcome);
+    }
+
+    Ok(outcomes)
+}
+
+fn publish_outgoing(
+    transport: &mut GitTransport,
+    database: &Database,
+    channel_id: &str,
+    mut outgoing: PendingOutgoing,
+    device: Option<&DeviceSecrets>,
+    max_attempts: u32,
+    now: &str,
+) -> Result<hrc_core::sync::PublishOutcome> {
+    let message_id = outgoing.message_id.clone();
+    let object_name =
+        outgoing_message_object(&outgoing.message_id, &outgoing.created_at, Vec::new()).name;
+    let mut known_ciphertexts = vec![outgoing.ciphertext.clone()];
+    Ok(hrc_core::sync::publish_one_prepared(
+        transport,
+        database,
+        channel_id,
+        &message_id,
+        |transport| {
+            let channel = database.channel(channel_id)?.ok_or_else(|| {
+                hrc_core::CoreError::UnknownChannelState {
+                    channel_id: channel_id.to_owned(),
+                }
+            })?;
+            validate_trusted_cursor(transport, database, &channel, now)
+                .map_err(|error| hrc_core::CoreError::Transport(error.to_string()))?;
+
+            let mut object_exists = false;
+            for ciphertext in &known_ciphertexts {
+                let expected = canonical::sha256_hex(ciphertext);
+                match transport.get_object(&object_name, &expected) {
+                    Ok(_) => {
+                        return Ok(hrc_core::sync::PreparedPublication::AlreadyPublished);
+                    }
+                    Err(hrc_transport::TransportError::NoSuchObject { .. }) => {
+                        object_exists = false;
+                        break;
+                    }
+                    Err(hrc_transport::TransportError::ObjectHashMismatch { .. }) => {
+                        object_exists = true;
+                    }
+                    Err(error) => {
+                        return Err(hrc_core::CoreError::Transport(error.to_string()));
+                    }
+                }
+            }
+            if object_exists {
+                return Err(hrc_core::sync::halt_synchronization(
+                    database,
+                    channel_id,
+                    hrc_core::CoreError::Transport(
+                        hrc_transport::TransportError::ObjectHashMismatch {
+                            name: object_name.clone(),
+                        }
+                        .to_string(),
+                    ),
+                    now,
+                ));
+            }
+
+            let (roster, _) = load_roster(transport, channel_id).map_err(|error| {
+                hrc_core::sync::halt_synchronization(
+                    database,
+                    channel_id,
+                    hrc_core::CoreError::Transport(error.to_string()),
+                    now,
+                )
+            })?;
+
+            if outgoing.roster_epoch > roster.epoch() {
+                return Err(hrc_core::CoreError::EpochOutOfOrder {
+                    expected: roster.epoch(),
+                    found: outgoing.roster_epoch,
+                });
+            }
+
+            if outgoing.roster_epoch < roster.epoch() {
+                let Some(device) = device else {
+                    return Ok(hrc_core::sync::PreparedPublication::Defer);
+                };
+                if outgoing.reseal_material.is_none() {
+                    database.record_attempt_failure(
+                        &outgoing.message_id,
+                        "queued message predates re-encryption support and cannot be resealed",
+                        now,
+                    )?;
+                    return Ok(hrc_core::sync::PreparedPublication::Defer);
+                }
+
+                let ciphertext = hrc_core::message::reseal_outgoing(
+                    &roster,
+                    &device.device_identity()?,
+                    &device.signing_key(),
+                    &outgoing,
+                )?;
+                database.replace_outgoing_ciphertext(
+                    &outgoing.message_id,
+                    outgoing.roster_epoch,
+                    roster.epoch(),
+                    &ciphertext,
+                    now,
+                )?;
+                outgoing.roster_epoch = roster.epoch();
+                outgoing.ciphertext = ciphertext;
+                known_ciphertexts.push(outgoing.ciphertext.clone());
+            }
+
+            Ok(hrc_core::sync::PreparedPublication::Publish(
+                outgoing_message_object(
+                    &outgoing.message_id,
+                    &outgoing.created_at,
+                    outgoing.ciphertext.clone(),
+                ),
+            ))
+        },
+        max_attempts,
+        now,
+    )?)
 }
 
 fn validate_trusted_cursor(

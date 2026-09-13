@@ -124,6 +124,17 @@ pub struct PublishOutcome {
     pub deferred: Vec<String>,
 }
 
+/// The result of preparing one queued message against the current tip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreparedPublication {
+    /// Publish these bytes.
+    Publish(PublishObject),
+    /// The exact queued bytes are already present in canonical history.
+    AlreadyPublished,
+    /// Keep the message queued without attempting a publication.
+    Defer,
+}
+
 /// What a fetch pass did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchOutcome {
@@ -152,6 +163,37 @@ pub fn publish_one<T: Transport>(
     max_attempts: u32,
     now: &str,
 ) -> Result<PublishOutcome> {
+    publish_one_prepared(
+        transport,
+        database,
+        channel_id,
+        message_id,
+        move |_| Ok(PreparedPublication::Publish(object.clone())),
+        max_attempts,
+        now,
+    )
+}
+
+/// Publishes one queued record, rebuilding its object against every observed tip.
+///
+/// `prepare` runs after the current tip is read and again after every
+/// conflict. It can publish rebuilt bytes, confirm that a prior attempt
+/// already reached canonical history, or defer without publishing. This is
+/// the hook used to discard and re-encrypt stale-epoch ciphertext before a
+/// commit is built.
+pub fn publish_one_prepared<T, F>(
+    transport: &mut T,
+    database: &Database,
+    channel_id: &str,
+    message_id: &str,
+    mut prepare: F,
+    max_attempts: u32,
+    now: &str,
+) -> Result<PublishOutcome>
+where
+    T: Transport,
+    F: FnMut(&T) -> Result<PreparedPublication>,
+{
     let mut conflicts = 0;
 
     for _ in 0..max_attempts.max(1) {
@@ -159,11 +201,29 @@ pub fn publish_one<T: Transport>(
             Ok(state) => state.revision,
             Err(error) => return Err(halt(database, channel_id, error, now)),
         };
+        let object = match prepare(transport)? {
+            PreparedPublication::Publish(object) => object,
+            PreparedPublication::AlreadyPublished => {
+                database.mark_published(message_id, now)?;
+                return Ok(PublishOutcome {
+                    published: vec![message_id.to_owned()],
+                    conflicts,
+                    deferred: Vec::new(),
+                });
+            }
+            PreparedPublication::Defer => {
+                return Ok(PublishOutcome {
+                    published: Vec::new(),
+                    conflicts,
+                    deferred: vec![message_id.to_owned()],
+                });
+            }
+        };
 
         let request = PublishRequest {
             expected_revision: head,
             class: PublicationClass::Data,
-            objects: vec![object.clone()],
+            objects: vec![object],
         };
 
         match transport.publish(request) {

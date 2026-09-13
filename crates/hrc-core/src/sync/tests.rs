@@ -161,6 +161,163 @@ fn publishing_marks_the_record_published() {
 }
 
 #[test]
+fn an_unpreparable_message_is_deferred_without_publishing_stale_bytes() {
+    let mut database = database();
+    let mut transport = transport();
+    queue(&mut database, "msg-1");
+
+    let outcome = publish_one_prepared(
+        &mut transport,
+        &database,
+        CHANNEL,
+        "msg-1",
+        |_| Ok(PreparedPublication::Defer),
+        3,
+        NOW,
+    )
+    .unwrap();
+
+    assert!(outcome.published.is_empty());
+    assert_eq!(outcome.deferred, vec!["msg-1"]);
+    assert_eq!(database.pending_outgoing(CHANNEL).unwrap(), vec!["msg-1"]);
+    assert!(
+        transport
+            .fetch(None, 100)
+            .unwrap()
+            .publications
+            .iter()
+            .flat_map(|publication| &publication.objects)
+            .all(|object| object.class != ObjectClass::Message)
+    );
+}
+
+#[test]
+fn a_previously_published_message_is_acknowledged_without_another_publication() {
+    let mut database = database();
+    let mut transport = transport();
+    queue(&mut database, "msg-1");
+    let publications_before = transport.fetch(None, 100).unwrap().publications.len();
+
+    let outcome = publish_one_prepared(
+        &mut transport,
+        &database,
+        CHANNEL,
+        "msg-1",
+        |_| Ok(PreparedPublication::AlreadyPublished),
+        3,
+        NOW,
+    )
+    .unwrap();
+
+    assert_eq!(outcome.published, vec!["msg-1"]);
+    assert!(outcome.deferred.is_empty());
+    assert!(database.pending_outgoing(CHANNEL).unwrap().is_empty());
+    assert_eq!(
+        transport.fetch(None, 100).unwrap().publications.len(),
+        publications_before
+    );
+}
+
+#[test]
+fn a_conflict_reprepares_bytes_before_the_retry() {
+    struct AdvancingTransport {
+        inner: MemoryTransport,
+        advanced: bool,
+    }
+
+    impl Transport for AdvancingTransport {
+        fn capabilities(&self) -> &hrc_transport::AdapterCapabilities {
+            self.inner.capabilities()
+        }
+
+        fn create_group(
+            &mut self,
+            objects: Vec<PublishObject>,
+        ) -> hrc_transport::Result<Publication> {
+            self.inner.create_group(objects)
+        }
+
+        fn open_group(&self) -> hrc_transport::Result<hrc_transport::GroupState> {
+            self.inner.open_group()
+        }
+
+        fn publish(&mut self, request: PublishRequest) -> hrc_transport::Result<Publication> {
+            if !self.advanced {
+                self.advanced = true;
+                let head = self.inner.open_group()?.revision;
+                self.inner.publish(PublishRequest {
+                    expected_revision: head,
+                    class: PublicationClass::Data,
+                    objects: vec![message("epoch-change")],
+                })?;
+                return Err(TransportError::Conflict {
+                    current: self.inner.open_group()?.revision,
+                });
+            }
+            self.inner.publish(request)
+        }
+
+        fn fetch(
+            &self,
+            after: Option<&str>,
+            limit: usize,
+        ) -> hrc_transport::Result<hrc_transport::FetchPage> {
+            self.inner.fetch(after, limit)
+        }
+
+        fn get_object(&self, name: &str, expected: &str) -> hrc_transport::Result<Vec<u8>> {
+            self.inner.get_object(name, expected)
+        }
+
+        fn health(&self) -> hrc_transport::Result<()> {
+            self.inner.health()
+        }
+    }
+
+    let mut database = database();
+    queue(&mut database, "msg-1");
+    let mut transport = AdvancingTransport {
+        inner: transport(),
+        advanced: false,
+    };
+    let mut preparations = 0;
+
+    let outcome = publish_one_prepared(
+        &mut transport,
+        &database,
+        CHANNEL,
+        "msg-1",
+        |_| {
+            preparations += 1;
+            let mut object = message("msg-1");
+            object.bytes = if preparations == 1 {
+                b"stale-epoch".to_vec()
+            } else {
+                b"current-epoch".to_vec()
+            };
+            Ok(PreparedPublication::Publish(object))
+        },
+        3,
+        NOW,
+    )
+    .unwrap();
+
+    assert_eq!(outcome.conflicts, 1);
+    assert_eq!(preparations, 2);
+    let page = transport.fetch(None, 100).unwrap();
+    let object = page
+        .publications
+        .iter()
+        .flat_map(|publication| &publication.objects)
+        .find(|object| object.name.ends_with("/msg-1.age"))
+        .unwrap();
+    assert_eq!(
+        transport.get_object(&object.name, &object.sha256).unwrap(),
+        b"current-epoch"
+    );
+}
+
+#[test]
 fn a_conflict_is_resolved_by_rebuilding_on_the_new_tip() {
     // PRD section 17.3: the loser of a race rebuilds rather than failing.
     // The conflict is simulated by moving the tip out from under the caller
