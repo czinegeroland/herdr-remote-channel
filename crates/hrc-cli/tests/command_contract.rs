@@ -1152,9 +1152,9 @@ fn context_draft_cannot_authorize_a_noninteractive_preview_or_send() {
         .output()
         .expect("draft should run");
     assert!(drafted.status.success());
-    let drafted: Value = serde_json::from_slice(&drafted.stdout).expect("draft JSON");
-    assert_eq!(drafted["state"], "draft");
-    assert_eq!(drafted["sendable"], true);
+    let draft_json: Value = serde_json::from_slice(&drafted.stdout).expect("draft JSON");
+    assert_eq!(draft_json["state"], "draft");
+    assert_eq!(draft_json["sendable"], true);
     assert!(
         !String::from_utf8_lossy(&drafted.stdout).contains(context_text),
         "draft output must not quote package content"
@@ -1162,7 +1162,10 @@ fn context_draft_cannot_authorize_a_noninteractive_preview_or_send() {
 
     // Draft emits a digest as an integrity identifier only. It is not a
     // bearer authorization that an agent can copy into a later command.
-    let digest = drafted["digest"].as_str().expect("draft digest").to_owned();
+    let digest = draft_json["digest"]
+        .as_str()
+        .expect("draft digest")
+        .to_owned();
     hrc_in(home.path())
         .args(["context", "preview", "ctx-review", "--json"])
         .assert()
@@ -1351,9 +1354,9 @@ fn secret_context_is_reported_without_echoing_the_secret() {
         .output()
         .expect("draft should run");
     assert!(drafted.status.success());
-    let drafted: Value = serde_json::from_slice(&drafted.stdout).expect("draft JSON");
-    assert_eq!(drafted["sendable"], false);
-    assert_eq!(drafted["secretFindings"][0]["rule"], "github_token");
+    let draft_json: Value = serde_json::from_slice(&drafted.stdout).expect("draft JSON");
+    assert_eq!(draft_json["sendable"], false);
+    assert_eq!(draft_json["secretFindings"][0]["rule"], "github_token");
     assert!(!String::from_utf8_lossy(&drafted.stdout).contains(marker));
 
     let rejected = hrc_in(home.path())
