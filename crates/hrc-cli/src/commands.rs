@@ -5,6 +5,9 @@
 //! a command reports, and `--json` is a formatting choice rather than a
 //! separate code path.
 
+use std::time::Duration;
+
+use hrc_core::sync::{PollActivity, poll_interval};
 use hrc_crypto::{DeviceSecrets, KeyStore, PassphraseStore};
 use hrc_storage::Database;
 use hrc_transport::{ObjectClass, Transport};
@@ -257,6 +260,77 @@ pub fn sync_once(context: &Context) -> Result<Value> {
         "syncedAt": now,
         "channels": channels,
     }))
+}
+
+/// `hrc daemon`: stay resident and keep synchronizing in the background.
+pub fn daemon_tick(context: &Context) -> Result<Value> {
+    let database = Database::open(context.paths.database())?;
+    let now = database.utc_now()?;
+    let mut channels = Vec::new();
+    let mut healthy = true;
+
+    for channel in database.channels()? {
+        match sync_git_channel(&context.paths, &database, &channel, &now) {
+            Ok(value) => channels.push(value),
+            Err(error) => {
+                healthy = false;
+                channels.push(json!({
+                    "channelId": channel.channel_id,
+                    "transport": channel.transport_kind,
+                    "locator": channel.transport_locator,
+                    "status": "error",
+                    "code": error.code(),
+                    "message": error.to_string(),
+                }));
+            }
+        }
+    }
+
+    let next_poll = daemon_poll_interval(context)?;
+    Ok(json!({
+        "status": if healthy { "ok" } else { "degraded" },
+        "syncedAt": now,
+        "nextPollSeconds": next_poll.as_secs(),
+        "channels": channels,
+    }))
+}
+
+/// Runs the resident daemon loop until the process is stopped.
+pub async fn daemon(context: &Context) -> Result<()> {
+    loop {
+        let delay = daemon_poll_interval(context)?;
+        tokio::time::sleep(delay).await;
+
+        if let Err(error) = daemon_tick(context) {
+            eprintln!("error: {error}");
+        }
+    }
+}
+
+fn daemon_poll_interval(context: &Context) -> Result<Duration> {
+    let database = Database::open(context.paths.database())?;
+    let mut next = poll_interval(PollActivity::Background, Duration::ZERO);
+
+    for channel in database.channels()? {
+        if channel.transport_kind != "git" {
+            continue;
+        }
+
+        let git_dir = context.paths.channel_transport(&channel.channel_id);
+        if let Some(parent) = git_dir.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| CliError::Io {
+                action: "create the local transport directory",
+                source,
+            })?;
+        }
+
+        let transport = GitTransport::open(&git_dir, &channel.transport_locator)?;
+        let minimum =
+            Duration::from_secs(transport.capabilities().min_poll_interval_seconds as u64);
+        next = next.min(poll_interval(PollActivity::Background, minimum));
+    }
+
+    Ok(next)
 }
 
 fn sync_git_channel(

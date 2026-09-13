@@ -471,3 +471,61 @@ fn sync_once_publishes_queued_messages() {
         b"ciphertext-queued"
     );
 }
+
+#[test]
+fn daemon_tick_reports_the_next_poll_interval() {
+    let (_directory, context) = home();
+    init(&context).unwrap();
+
+    let value = daemon_tick(&context).unwrap();
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["nextPollSeconds"], 30);
+    assert!(value["channels"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn daemon_tick_degrades_one_channel_without_skipping_the_rest() {
+    let (directory, context) = home();
+    init(&context).unwrap();
+
+    let remote = directory.path().join("remote.git");
+    bare_remote(&remote);
+
+    let mut publisher = peer(directory.path(), "publisher", &remote);
+    publisher.create_group(vec![control(0)]).unwrap();
+
+    let database = Database::open(context.paths.database()).unwrap();
+    database
+        .insert_channel(
+            "ok-channel",
+            "git",
+            remote.to_str().unwrap(),
+            "OK",
+            "2026-09-13T00:00:00Z",
+        )
+        .unwrap();
+    database
+        .insert_channel(
+            "bad-channel",
+            "git",
+            directory.path().join("missing.git").to_str().unwrap(),
+            "Bad",
+            "2026-09-13T00:00:00Z",
+        )
+        .unwrap();
+
+    let value = daemon_tick(&context).unwrap();
+    assert_eq!(value["status"], "degraded");
+    let channels = value["channels"].as_array().unwrap();
+    assert_eq!(channels.len(), 2);
+    assert!(
+        channels
+            .iter()
+            .any(|channel| channel["channelId"] == "ok-channel" && channel["status"].is_null())
+    );
+    assert!(
+        channels
+            .iter()
+            .any(|channel| channel["channelId"] == "bad-channel" && channel["status"] == "error")
+    );
+}

@@ -24,6 +24,7 @@ pub fn success(as_json: bool, command: &str, value: &Value) {
         "status" => render_status(value),
         "doctor" => render_doctor(value),
         "sync" => render_sync(value),
+        "daemon" => render_daemon(value),
         "audit" => render_audit(value),
         _ => println!("{value}"),
     }
@@ -192,6 +193,50 @@ fn render_sync(value: &Value) {
         println!(
             "  recovered       {} reserved slots",
             number(channel, "recoveredReservations")
+        );
+    }
+}
+
+fn render_daemon(value: &Value) {
+    println!("daemon synchronized at {}", text(value, "syncedAt"));
+    println!("next poll in {} seconds", number(value, "nextPollSeconds"));
+
+    let channels = array(value, "channels");
+    if channels.is_empty() {
+        println!("no channels configured");
+        return;
+    }
+
+    for channel in channels {
+        println!();
+        println!("{}", text(channel, "channelId"));
+        if channel["status"] == "error" {
+            println!("  ERROR           {}", text(channel, "message"));
+            continue;
+        }
+
+        println!(
+            "  transport       {} {}",
+            text(channel, "transport"),
+            text(channel, "locator")
+        );
+        println!(
+            "  remote changed  {}",
+            if channel["remoteChanged"].as_bool().unwrap_or(false) {
+                "yes"
+            } else {
+                "no"
+            }
+        );
+        println!(
+            "  fetched         {} publications, {} control, {} messages",
+            number(channel, "fetchedPublications"),
+            number(channel, "fetchedControlObjects"),
+            number(channel, "fetchedMessageObjects")
+        );
+        println!(
+            "  published       {}",
+            array(channel, "publishedMessages").len()
         );
     }
 }

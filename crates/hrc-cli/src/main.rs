@@ -34,6 +34,10 @@ fn main() -> std::process::ExitCode {
         return code(exit::USAGE);
     }
 
+    if matches!(cli.command, Command::Daemon) {
+        return run_daemon(&cli, &path);
+    }
+
     match run(&cli, &path) {
         Ok(value) => {
             render::success(cli.json, &path, &value);
@@ -55,6 +59,62 @@ fn main() -> std::process::ExitCode {
             );
             report(cli.json, "authorization_required", &path, &message, None);
             code(exit::AUTHORIZATION_REQUIRED)
+        }
+    }
+}
+
+fn run_daemon(cli: &Cli, path: &str) -> std::process::ExitCode {
+    let context = commands::Context::from_environment(match Paths::resolve() {
+        Ok(paths) => paths,
+        Err(error) => {
+            report(cli.json, error.code(), path, &error.to_string(), None);
+            return code(error.exit_code());
+        }
+    });
+
+    match commands::daemon_tick(&context) {
+        Ok(value) => {
+            render::success(cli.json, path, &value);
+            let mut stdout = std::io::stdout();
+            if let Err(error) = std::io::Write::flush(&mut stdout) {
+                report(
+                    cli.json,
+                    "io_error",
+                    path,
+                    &format!("could not flush daemon startup output: {error}"),
+                    None,
+                );
+                return code(exit::FAILURE);
+            }
+        }
+        Err(error) => {
+            report(cli.json, error.code(), path, &error.to_string(), None);
+            return code(error.exit_code());
+        }
+    }
+
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            report(
+                cli.json,
+                "io_error",
+                path,
+                &format!("could not start the Tokio runtime: {error}"),
+                None,
+            );
+            return code(exit::FAILURE);
+        }
+    };
+
+    match runtime.block_on(commands::daemon(&context)) {
+        Ok(()) => code(exit::SUCCESS),
+        Err(error) => {
+            report(cli.json, error.code(), path, &error.to_string(), None);
+            code(error.exit_code())
         }
     }
 }

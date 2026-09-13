@@ -7,6 +7,7 @@
 
 use assert_cmd::Command;
 use serde_json::Value;
+use std::io::Read;
 
 /// Documented exit codes, mirrored from `crates/hrc-cli/src/exit.rs`. A test
 /// that reads the constant from the binary would not notice a value change,
@@ -105,6 +106,38 @@ fn sync_once_reports_a_stable_json_shape() {
     let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
     assert_eq!(value["status"], "ok");
     assert!(value["syncedAt"].is_string());
+    assert!(value["channels"].is_array());
+}
+
+#[test]
+fn daemon_reports_a_stable_startup_json_shape() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("state");
+
+    hrc_in(&home).arg("init").assert().success();
+
+    let mut child = hrc_std_in(&home)
+        .args(["daemon", "--json"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("daemon should start");
+
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    child.kill().expect("daemon should be killable in the test");
+
+    let mut stdout = String::new();
+    child
+        .stdout
+        .take()
+        .expect("stdout piped")
+        .read_to_string(&mut stdout)
+        .expect("stdout should be readable");
+    let _ = child.wait();
+
+    let value: Value = serde_json::from_str(stdout.trim()).expect("stdout should be JSON");
+    assert!(matches!(value["status"].as_str(), Some("ok" | "degraded")));
+    assert!(value["syncedAt"].is_string());
+    assert!(value["nextPollSeconds"].is_u64());
     assert!(value["channels"].is_array());
 }
 
@@ -225,6 +258,14 @@ fn an_invite_code_and_the_join_subcommands_both_parse() {
 /// environment; this test process never mutates its own.
 fn hrc_in(home: &std::path::Path) -> Command {
     let mut command = hrc();
+    command
+        .env("HRC_HOME", home)
+        .env("HRC_PASSPHRASE", "correct horse battery staple");
+    command
+}
+
+fn hrc_std_in(home: &std::path::Path) -> std::process::Command {
+    let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("hrc"));
     command
         .env("HRC_HOME", home)
         .env("HRC_PASSPHRASE", "correct horse battery staple");
