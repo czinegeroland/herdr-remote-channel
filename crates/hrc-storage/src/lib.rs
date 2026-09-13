@@ -136,6 +136,90 @@ pub struct ChannelCounts {
     pub last_error: Option<String>,
 }
 
+/// What an arriving message is, relative to what has already been accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InboundOutcome {
+    /// Accepted as the next message from this sender device.
+    Accepted {
+        /// Local arrival order, used for display instead of `created_at`.
+        arrival_sequence: u64,
+        /// Messages that were waiting on this one and are now accepted too,
+        /// in the order they were released.
+        released: Vec<String>,
+    },
+    /// Already accepted, byte for byte. At-least-once delivery is normal.
+    Duplicate,
+    /// Held: its predecessor from this sender device has not arrived.
+    Held {
+        /// The chain link being waited for.
+        waiting_for: String,
+    },
+}
+
+/// One message arriving from the transport.
+#[derive(Debug, Clone)]
+pub struct InboundMessage<'a> {
+    /// Channel it belongs to.
+    pub channel_id: &'a str,
+    /// Message identifier.
+    pub message_id: &'a str,
+    /// Verified sender principal, resolved from the roster.
+    pub sender_principal: &'a str,
+    /// Verified sender device, resolved from the roster.
+    pub sender_device: &'a str,
+    /// Position in this device's send sequence.
+    pub device_sequence: u64,
+    /// This message's chain link.
+    pub chain_id: &'a str,
+    /// The link it claims to follow, or `None` for a device's first message.
+    pub previous_chain_id: Option<&'a str>,
+    /// Enumerated kind, or `unsupported`.
+    pub kind: &'a str,
+    /// Thread it belongs to.
+    pub thread_id: Option<&'a str>,
+    /// Message it answers, if any.
+    pub in_reply_to: Option<&'a str>,
+    /// Roster epoch it was encrypted under.
+    pub roster_epoch: u64,
+    /// Validated endpoint identifier, or `None`.
+    pub endpoint: Option<&'a str>,
+    /// Size of the ciphertext.
+    pub ciphertext_bytes: u64,
+    /// Size of the decrypted content.
+    pub plaintext_bytes: u64,
+    /// Digest of the ciphertext it arrived as.
+    pub ciphertext_sha256: &'a str,
+    /// Sender-declared creation time.
+    pub created_at: &'a str,
+    /// Sender-declared expiry.
+    pub expires_at: Option<&'a str>,
+    /// The quarantined plaintext.
+    pub body: &'a [u8],
+    /// The ciphertext, kept while a message is held so it can be replayed.
+    pub ciphertext: &'a [u8],
+}
+
+/// One entry as the inbox reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboxEntry {
+    /// Message identifier.
+    pub message_id: String,
+    /// Verified sender principal.
+    pub sender_principal: String,
+    /// Verified sender device.
+    pub sender_device: String,
+    /// Enumerated kind.
+    pub kind: String,
+    /// Thread it belongs to.
+    pub thread_id: Option<String>,
+    /// Message it answers.
+    pub in_reply_to: Option<String>,
+    /// Local arrival order.
+    pub arrival_sequence: u64,
+    /// Current disposition.
+    pub disposition: String,
+}
+
 /// One recorded audit entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditEntry {
@@ -391,6 +475,253 @@ impl Database {
         })
     }
 
+    /// Records an arriving message, deciding whether it is new, a repeat, or
+    /// out of order.
+    ///
+    /// All three decisions and their consequences happen in one immediate
+    /// transaction, for the same reason allocation does: two fetches running
+    /// at once must not both conclude they hold the next message from a
+    /// device, and a release must not interleave with the accept that
+    /// triggered it.
+    ///
+    /// The rules, in the order they are checked:
+    ///
+    /// 1. A message ID already accepted with the same ciphertext digest is a
+    ///    duplicate. At-least-once delivery makes this ordinary, so it is
+    ///    reported rather than treated as an error (HRC-MSG-006).
+    /// 2. The same message ID with a *different* digest is not a repeat at
+    ///    all; it is a substitution, and it halts the channel.
+    /// 3. A sender device reusing a sequence number, or naming a predecessor
+    ///    other than the one recorded for it, has forked its own chain. That
+    ///    is the per-device equivalent of a rewritten control log, and it
+    ///    halts the channel too (HRC-MSG-007).
+    /// 4. A message whose predecessor has not arrived is held, not dropped
+    ///    and not accepted early. Lazy and partial fetching are supported, so
+    ///    the predecessor may simply still be in flight — but per-device
+    ///    order is a guarantee, so it cannot be accepted ahead of it either.
+    /// 5. Otherwise it is accepted, and anything held behind it is released
+    ///    in sequence order.
+    pub fn record_inbound(
+        &mut self,
+        message: &InboundMessage<'_>,
+        now: &str,
+    ) -> Result<InboundOutcome> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        // 1 and 2: is this one we already have?
+        let existing: Option<Option<String>> = transaction
+            .query_row(
+                "SELECT ciphertext_sha256 FROM inbox WHERE message_id = ?1 AND channel_id = ?2",
+                params![message.message_id, message.channel_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+
+        if let Some(recorded) = existing {
+            return if recorded.as_deref() == Some(message.ciphertext_sha256) {
+                transaction.commit()?;
+                Ok(InboundOutcome::Duplicate)
+            } else {
+                Err(StorageError::InboundSubstituted {
+                    message_id: message.message_id.to_owned(),
+                })
+            };
+        }
+
+        // 3: has this device already used this sequence, under a different
+        // identity? A repeat of the same chain link would have been caught
+        // above, so reaching here with the sequence taken means a fork.
+        let taken: Option<String> = transaction
+            .query_row(
+                "SELECT message_id FROM inbox
+                 WHERE channel_id = ?1 AND sender_device = ?2 AND device_sequence = ?3",
+                params![
+                    message.channel_id,
+                    message.sender_device,
+                    message.device_sequence as i64
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+
+        if let Some(other) = taken {
+            return Err(StorageError::InboundForked {
+                sender_device: message.sender_device.to_owned(),
+                device_sequence: message.device_sequence,
+                existing: other,
+                arriving: message.message_id.to_owned(),
+            });
+        }
+
+        let head: Option<(u64, String)> = transaction
+            .query_row(
+                "SELECT last_sequence, last_chain_id FROM inbound_chain
+                 WHERE channel_id = ?1 AND sender_device = ?2",
+                params![message.channel_id, message.sender_device],
+                |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+
+        match (&head, message.previous_chain_id) {
+            // The device's first message, and we have nothing recorded.
+            (None, None) => {}
+
+            // A first message that claims a predecessor: either we missed
+            // everything before it, or it is lying. Holding covers the first
+            // case and costs nothing in the second, since a liar cannot
+            // produce the predecessor it invented.
+            (None, Some(_)) => {
+                let outcome = hold(&transaction, message, now)?;
+                transaction.commit()?;
+                return Ok(outcome);
+            }
+
+            // The next link in the chain we have.
+            (Some((_, last)), Some(previous)) if last == previous => {}
+
+            // A predecessor we have not seen. Same reasoning as above.
+            (Some(_), Some(_)) => {
+                let outcome = hold(&transaction, message, now)?;
+                transaction.commit()?;
+                return Ok(outcome);
+            }
+
+            // Claiming to be a device's first message when it is not.
+            (Some(_), None) => {
+                return Err(StorageError::InboundForked {
+                    sender_device: message.sender_device.to_owned(),
+                    device_sequence: message.device_sequence,
+                    existing: head.map(|(_, chain)| chain).unwrap_or_default(),
+                    arriving: message.message_id.to_owned(),
+                });
+            }
+        }
+
+        let arrival_sequence = insert_accepted(&transaction, message, now)?;
+
+        // 5: anything that was waiting on this link can go in now, and so
+        // can anything waiting on *that*, so the release walks the chain.
+        let mut released = Vec::new();
+        let mut link = message.chain_id.to_owned();
+
+        while let Some(next) = take_held(
+            &transaction,
+            message.channel_id,
+            message.sender_device,
+            &link,
+        )? {
+            let body = next.body.clone();
+            let waiting = InboundMessage {
+                channel_id: message.channel_id,
+                message_id: &next.message_id,
+                sender_principal: &next.sender_principal,
+                sender_device: message.sender_device,
+                device_sequence: next.device_sequence,
+                chain_id: &next.chain_id,
+                previous_chain_id: next.previous_chain_id.as_deref(),
+                kind: &next.kind,
+                thread_id: next.thread_id.as_deref(),
+                in_reply_to: next.in_reply_to.as_deref(),
+                roster_epoch: next.roster_epoch,
+                endpoint: next.endpoint.as_deref(),
+                ciphertext_bytes: next.ciphertext_bytes,
+                plaintext_bytes: next.plaintext_bytes,
+                ciphertext_sha256: &next.ciphertext_sha256,
+                created_at: &next.created_at,
+                expires_at: next.expires_at.as_deref(),
+                body: &body,
+                ciphertext: &[],
+            };
+
+            insert_accepted(&transaction, &waiting, now)?;
+            released.push(next.message_id.clone());
+            link = next.chain_id;
+        }
+
+        transaction.execute(
+            "INSERT INTO inbound_chain (channel_id, sender_device, last_sequence, last_chain_id)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (channel_id, sender_device)
+             DO UPDATE SET last_sequence = excluded.last_sequence,
+                           last_chain_id = excluded.last_chain_id",
+            params![
+                message.channel_id,
+                message.sender_device,
+                last_sequence(&transaction, message, &released)? as i64,
+                link,
+            ],
+        )?;
+
+        transaction.commit()?;
+
+        Ok(InboundOutcome::Accepted {
+            arrival_sequence,
+            released,
+        })
+    }
+
+    /// Messages held because their predecessor has not arrived.
+    pub fn held_inbound(&self, channel_id: &str) -> Result<Vec<String>> {
+        let mut statement = self.connection.prepare(
+            "SELECT message_id FROM inbound_hold WHERE channel_id = ?1
+             ORDER BY sender_device, device_sequence",
+        )?;
+        let rows = statement.query_map(params![channel_id], |row| row.get::<_, String>(0))?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Accepted inbox entries in local arrival order.
+    pub fn inbox_entries(&self, channel_id: &str) -> Result<Vec<InboxEntry>> {
+        self.query_inbox(channel_id, None)
+    }
+
+    /// One thread's entries, in local arrival order.
+    ///
+    /// Ordering is by arrival rather than by the sender's `created_at`,
+    /// which is a value the sender chooses: a backdated timestamp would
+    /// otherwise let a remote peer place its message anywhere in someone
+    /// else's reading of the conversation.
+    pub fn thread_entries(&self, channel_id: &str, thread_id: &str) -> Result<Vec<InboxEntry>> {
+        self.query_inbox(channel_id, Some(thread_id))
+    }
+
+    /// Shared inbox query, optionally narrowed to one thread.
+    ///
+    /// A held message has a row — its body is stored so releasing it does not
+    /// mean decrypting again — but no arrival number, and it is not in the
+    /// inbox until it has one. Listing it earlier would present a message
+    /// whose place in its sender's history is not yet established.
+    fn query_inbox(&self, channel_id: &str, thread_id: Option<&str>) -> Result<Vec<InboxEntry>> {
+        let mut statement = self.connection.prepare(
+            "SELECT message_id, sender_principal, sender_device, kind, thread_id,
+                    in_reply_to, arrival_sequence, disposition
+             FROM inbox
+             WHERE channel_id = ?1 AND (?2 IS NULL OR thread_id = ?2)
+               AND arrival_sequence IS NOT NULL
+             ORDER BY arrival_sequence",
+        )?;
+
+        let rows = statement.query_map(params![channel_id, thread_id], |row| {
+            Ok(InboxEntry {
+                message_id: row.get(0)?,
+                sender_principal: row.get(1)?,
+                sender_device: row.get(2)?,
+                kind: row.get(3)?,
+                thread_id: row.get(4)?,
+                in_reply_to: row.get(5)?,
+                arrival_sequence: row.get::<_, Option<i64>>(6)?.unwrap_or(0) as u64,
+                disposition: row.get(7)?,
+            })
+        })?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     /// Attaches ciphertext to a reserved slot and queues it for publication.
     pub fn queue_outgoing(&self, message_id: &str, ciphertext: &[u8], now: &str) -> Result<()> {
         let updated = self.connection.execute(
@@ -639,6 +970,213 @@ impl Database {
         } else {
             Ok(())
         }
+    }
+}
+
+/// A message taken back out of the hold table.
+struct HeldMessage {
+    message_id: String,
+    sender_principal: String,
+    device_sequence: u64,
+    chain_id: String,
+    previous_chain_id: Option<String>,
+    kind: String,
+    thread_id: Option<String>,
+    in_reply_to: Option<String>,
+    roster_epoch: u64,
+    endpoint: Option<String>,
+    ciphertext_bytes: u64,
+    plaintext_bytes: u64,
+    ciphertext_sha256: String,
+    created_at: String,
+    expires_at: Option<String>,
+    body: Vec<u8>,
+}
+
+/// Parks a message whose predecessor has not arrived.
+fn hold(
+    transaction: &rusqlite::Transaction<'_>,
+    message: &InboundMessage<'_>,
+    now: &str,
+) -> Result<InboundOutcome> {
+    transaction.execute(
+        "INSERT INTO inbound_hold (
+             message_id, channel_id, sender_device, device_sequence, chain_id,
+             previous_chain_id, ciphertext_sha256, ciphertext, held_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT (message_id) DO NOTHING",
+        params![
+            message.message_id,
+            message.channel_id,
+            message.sender_device,
+            message.device_sequence as i64,
+            message.chain_id,
+            message.previous_chain_id,
+            message.ciphertext_sha256,
+            message.ciphertext,
+            now,
+        ],
+    )?;
+
+    // The held row records everything needed to reconsider it later. The
+    // decrypted body travels with it so releasing does not have to decrypt
+    // again — and it is stored in the same quarantined state, never exposed.
+    transaction.execute(
+        "INSERT INTO inbox (
+             message_id, channel_id, sender_principal, sender_device, kind, thread_id,
+             in_reply_to, roster_epoch, endpoint, ciphertext_bytes, plaintext_bytes,
+             created_at, expires_at, received_at, body, disposition,
+             device_sequence, chain_id, previous_chain_id, ciphertext_sha256, arrival_sequence
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                   'quarantined', ?16, ?17, ?18, ?19, NULL)
+         ON CONFLICT (message_id) DO NOTHING",
+        params![
+            message.message_id,
+            message.channel_id,
+            message.sender_principal,
+            message.sender_device,
+            message.kind,
+            message.thread_id,
+            message.in_reply_to,
+            message.roster_epoch as i64,
+            message.endpoint,
+            message.ciphertext_bytes as i64,
+            message.plaintext_bytes as i64,
+            message.created_at,
+            message.expires_at,
+            now,
+            message.body,
+            message.device_sequence as i64,
+            message.chain_id,
+            message.previous_chain_id,
+            message.ciphertext_sha256,
+        ],
+    )?;
+
+    Ok(InboundOutcome::Held {
+        waiting_for: message.previous_chain_id.unwrap_or_default().to_owned(),
+    })
+}
+
+/// Writes an accepted message and gives it its arrival number.
+fn insert_accepted(
+    transaction: &rusqlite::Transaction<'_>,
+    message: &InboundMessage<'_>,
+    now: &str,
+) -> Result<u64> {
+    let arrival_sequence: u64 = transaction.query_row(
+        "SELECT COALESCE(MAX(arrival_sequence), 0) + 1 FROM inbox WHERE channel_id = ?1",
+        params![message.channel_id],
+        |row| row.get::<_, i64>(0),
+    )? as u64;
+
+    // A held message already has a row; accepting it fills in the arrival
+    // number rather than inserting a second one.
+    let updated = transaction.execute(
+        "UPDATE inbox SET arrival_sequence = ?2, received_at = ?3
+         WHERE message_id = ?1 AND arrival_sequence IS NULL",
+        params![message.message_id, arrival_sequence as i64, now],
+    )?;
+
+    if updated == 0 {
+        transaction.execute(
+            "INSERT INTO inbox (
+                 message_id, channel_id, sender_principal, sender_device, kind, thread_id,
+                 in_reply_to, roster_epoch, endpoint, ciphertext_bytes, plaintext_bytes,
+                 created_at, expires_at, received_at, body, disposition,
+                 device_sequence, chain_id, previous_chain_id, ciphertext_sha256, arrival_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                       'quarantined', ?16, ?17, ?18, ?19, ?20)",
+            params![
+                message.message_id,
+                message.channel_id,
+                message.sender_principal,
+                message.sender_device,
+                message.kind,
+                message.thread_id,
+                message.in_reply_to,
+                message.roster_epoch as i64,
+                message.endpoint,
+                message.ciphertext_bytes as i64,
+                message.plaintext_bytes as i64,
+                message.created_at,
+                message.expires_at,
+                now,
+                message.body,
+                message.device_sequence as i64,
+                message.chain_id,
+                message.previous_chain_id,
+                message.ciphertext_sha256,
+                arrival_sequence as i64,
+            ],
+        )?;
+    }
+
+    transaction.execute(
+        "DELETE FROM inbound_hold WHERE message_id = ?1",
+        params![message.message_id],
+    )?;
+
+    Ok(arrival_sequence)
+}
+
+/// Takes the message waiting on `link`, if one is held.
+fn take_held(
+    transaction: &rusqlite::Transaction<'_>,
+    channel_id: &str,
+    sender_device: &str,
+    link: &str,
+) -> Result<Option<HeldMessage>> {
+    transaction
+        .query_row(
+            "SELECT hold.message_id, inbox.sender_principal, hold.device_sequence,
+                    hold.chain_id, hold.previous_chain_id, inbox.kind, inbox.thread_id,
+                    inbox.in_reply_to, inbox.roster_epoch, inbox.endpoint,
+                    inbox.ciphertext_bytes, inbox.plaintext_bytes, hold.ciphertext_sha256,
+                    inbox.created_at, inbox.expires_at, inbox.body
+             FROM inbound_hold AS hold
+             JOIN inbox ON inbox.message_id = hold.message_id
+             WHERE hold.channel_id = ?1 AND hold.sender_device = ?2
+               AND hold.previous_chain_id = ?3",
+            params![channel_id, sender_device, link],
+            |row| {
+                Ok(HeldMessage {
+                    message_id: row.get(0)?,
+                    sender_principal: row.get(1)?,
+                    device_sequence: row.get::<_, i64>(2)? as u64,
+                    chain_id: row.get(3)?,
+                    previous_chain_id: row.get(4)?,
+                    kind: row.get(5)?,
+                    thread_id: row.get(6)?,
+                    in_reply_to: row.get(7)?,
+                    roster_epoch: row.get::<_, i64>(8)? as u64,
+                    endpoint: row.get(9)?,
+                    ciphertext_bytes: row.get::<_, i64>(10)? as u64,
+                    plaintext_bytes: row.get::<_, i64>(11)? as u64,
+                    ciphertext_sha256: row.get(12)?,
+                    created_at: row.get(13)?,
+                    expires_at: row.get(14)?,
+                    body: row.get::<_, Option<Vec<u8>>>(15)?.unwrap_or_default(),
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+/// The sequence number the chain head should record after a release run.
+fn last_sequence(
+    transaction: &rusqlite::Transaction<'_>,
+    message: &InboundMessage<'_>,
+    released: &[String],
+) -> Result<u64> {
+    match released.last() {
+        None => Ok(message.device_sequence),
+        Some(message_id) => Ok(transaction.query_row(
+            "SELECT device_sequence FROM inbox WHERE message_id = ?1",
+            params![message_id],
+            |row| row.get::<_, i64>(0),
+        )? as u64),
     }
 }
 

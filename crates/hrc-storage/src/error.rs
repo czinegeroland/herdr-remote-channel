@@ -39,6 +39,37 @@ pub enum StorageError {
     /// A protocol derivation failed.
     #[error(transparent)]
     Protocol(#[from] hrc_protocol::ProtocolError),
+
+    /// The same message ID arrived carrying different ciphertext.
+    ///
+    /// Not a duplicate: a repeat of an at-least-once delivery is identical
+    /// by construction, so a differing digest means the object under that
+    /// ID was replaced.
+    #[error("message {message_id} arrived again with different ciphertext")]
+    InboundSubstituted {
+        /// The message identifier reused.
+        message_id: String,
+    },
+
+    /// A sender device's chain branched.
+    ///
+    /// Either it reused a sequence number or it named a predecessor other
+    /// than the one recorded. Both mean two different histories claim the
+    /// same position, which is the per-device form of a rewritten log.
+    #[error(
+        "device {sender_device} has two messages at sequence {device_sequence}: \
+         {existing} and {arriving}"
+    )]
+    InboundForked {
+        /// The sender device.
+        sender_device: String,
+        /// The contested position.
+        device_sequence: u64,
+        /// What was already recorded there.
+        existing: String,
+        /// What arrived claiming it.
+        arriving: String,
+    },
 }
 
 /// Convenience alias for storage results.
