@@ -68,6 +68,7 @@ impl Broker for TestBroker {
             "Team channel",
             self.body.len() as u64,
             1024,
+            "2026-01-01T00:00:05Z",
         )]
     }
 

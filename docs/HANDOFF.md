@@ -139,71 +139,51 @@ request as the work it describes, or it will lie.*
 
 ### State
 
-**78 of 94 requirement rows Implemented.** Milestones: **M0 55%, M1 100%,
-M2 99%, M3 85%, M4 85%, M5 0%.**
+**79 of 94 requirement rows Implemented.** Milestones: **M0 55%, M1 100%,
+M2 99%, M3 95%, M4 85%, M5 0%.**
 
-Thirty-three pull requests are merged. Context-package PR #34 is open from
-`claude/happy-johnson-4kqomk` at `56ffc78`; `main` remains at
-`docs: hand off the post-reencryption state (#33)` until that PR merges.
+`main` is at the Herdr plugin entry points; the development branch is level
+with it. Nothing is in flight.
 
 What works today, end to end and proven by tests against a real Git
 repository: two installations create a channel, invite, join, derive and
-compare matching safety phrases, admit a member through the trusted interface,
-exchange encrypted notes and threaded questions and answers, and have
-everything arrive quarantined behind the prompt gate. Observed history
-rewrites, deletions, and substitutions halt synchronization stickily. A
-queued message whose roster epoch becomes stale is rebuilt for the current
-recipient set without changing its logical identity; a locked daemon advances
-public state but withholds the stale ciphertext.
+compare matching safety phrases, admit a member through the trusted
+interface, exchange encrypted notes and threaded questions and answers, draft
+and send source-derived context packages behind a one-use trusted
+authorization, and have everything arrive quarantined behind the prompt gate.
+Observed history rewrites, deletions, and substitutions halt synchronization
+stickily. **And the Herdr plugin now runs**: `hrc herdr startup` returns the
+manifest and the sidebar line, `hrc herdr pane inbox` renders the inbox,
+and `hrc herdr event` reads one JSON event from standard input.
 
 ### Most recent implementation
 
-The current context-package implementation completes `HRC-CTX-005`,
-`HRC-SKILL-006`, and `HRC-SKILL-008`, and advances `HRC-CTX-004` and
-`HRC-CTX-007`; it needs Rust validation on a machine with the Windows MSVC
-linker.
+The Herdr plugin, completing `HRC-TECH-002`.
 
-- `hrc context draft <manifest> [--repository <path>]` is agent-accessible,
-  but preview and send now require the trusted interface. A copied draft
-  digest is never a confirmation. Trusted preview shows the exact canonical
-  package and issues an opaque five-minute authorization bound to digest,
-  recipient, channel, and action; trusted send consumes it once.
-- Drafting resolves and persists the canonical absolute Git worktree root and
-  replaces caller-supplied excerpt text with the exact selected source bytes.
-  Later review/send rechecks both the bytes and `.gitignore`; SHA-1 and
-  SHA-256 commit IDs are supported. Common direct and shell-wrapped
-  environment dumps, scrollback, and prompt transcripts are explicit
-  exclusions. Caller-authored patch and output items are rejected before
-  persistence until HRC controls their capture, so `HRC-CTX-004` and
-  `HRC-CTX-007` remain In progress rather than relying on falsifiable path or
-  command labels.
-- Migration 007 makes inbound context an attachment of its inbox row, without
-  an independent disposition. Valid signed context is canonical pending
-  content; malformed signed context rejects and audits that message without
-  halting channel synchronization. Out-of-order held messages remain absent
-  from trusted pending lists until their predecessor releases them.
-- Added adversarial tests cover digest-copy refusal, agent-safe refusal,
-  source derivation/change detection, ignored-source non-disclosure,
-  context/inbox lifecycle linkage, malformed-context non-halt, and secret
-  non-echoing. `cargo fmt --all` passed; `cargo check` is blocked by missing
-  `link.exe`.
-
-### Start here
-
-Finish #34 first: wait for every required check, fix any failure on the same
-branch, squash-merge it, then reset `claude/happy-johnson-4kqomk` to
-`origin/main` and force-with-lease push. After that, continue with the list
-below.
-
-The latest CI rerun was triggered by `56ffc78`. PRD traceability and
-format/clippy had already passed on the preceding revision. Linux and macOS
-compiled the full workspace and ran the command suite successfully; the only
-remaining failure was a skill-contract assertion requiring the literal
-contiguous phrase `do not run hrc context send`, which `56ffc78` fixes.
-Windows was still running when this handoff was updated. If the new run is
-green, merge immediately; otherwise read only the newly failed job logs and
-continue on this branch. The local `.vs/` directory is unrelated and must
-remain untracked.
+- `crates/hrc-herdr/` is no longer a stub. Seven modules: the generated
+  manifest, the section 23.1 sidebar, the section 23.2 inbox view, the
+  section 23.3 notification set, panes, events, and local agent selection.
+  Every function is pure — the crate opens no sockets and decrypts nothing,
+  so the plugin's behavior is testable without a daemon.
+- `AgentView` gained the fields section 23.2 requires: local arrival time, a
+  validated thread label, attachment count and total bytes, and a
+  `prompt_request` boolean. A thread ID is sender-chosen text, so it is
+  passed through only when it is a well-formed ULID and replaced with a fixed
+  label otherwise — the same treatment `endpoint_label` already gave
+  endpoints. `prompt:request` is the one capability the PRD names, so it is
+  recorded as a boolean rather than as a free-form string.
+- Migration 008 records the attachment count, attachment bytes, and prompt
+  flag on the inbox row at acceptance. Rows accepted earlier report zero,
+  which is a gap in the record rather than a claim about those messages.
+- `Database::plugin_inbox` feeds the pane. Its SELECT list does not contain
+  the `body` column at all, which is a stronger guarantee than discarding it
+  afterwards, and a contract test sends a known string and asserts it appears
+  nowhere in the rendered pane.
+- `LocalAgent` deliberately does not implement `Serialize`, so a local pane ID
+  has no path onto the wire (constraint 8, section 23.4).
+- Two defects my own tests caught before CI did: the action and the pane both
+  claimed the manifest ID `inbox`, and the first draft treated
+  `prompt_request` as a message kind when it is a requested capability.
 
 ### The remaining work, in the order that unblocks the most
 
@@ -213,14 +193,14 @@ remain untracked.
    adapter binding, push-capable adapters, and the GitHub optimization. The
    conformance suite exists and a deliberately broken adapter is already
    proven to fail it, so a new adapter has a target to hit.
-3. **`HRC-TECH-002`** — the Herdr plugin entry points, still reporting the
-   documented not-implemented code.
-4. **`HRC-TECH-011`, `HRC-TECH-012`** — `cargo-dist` release artifacts and a
+3. **`HRC-TECH-011`, `HRC-TECH-012`** — `cargo-dist` release artifacts and a
    clean-host install fixture. `OQ-012` asks whether to pin an exact toolchain
    first; answer it in that pull request.
-5. **`HRC-CH-004`** — public repositories after typed confirmation. `OQ-008`
+4. **`HRC-CH-004`** — public repositories after typed confirmation. `OQ-008`
    asks for the warning wording and is unanswered. It needs a human: implement
    the mechanism and leave the wording marked, or ask.
+5. **`HRC-CTX-004`, `HRC-CTX-007`** — patch and command-output provenance,
+   left open by the context PR pending controlled capture.
 6. **`HRC-GOV-004`** — the evidence pass. Every row claiming `Verified` must
    cite something stable. Do this last, once the rows have stopped moving.
 

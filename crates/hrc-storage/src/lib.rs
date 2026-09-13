@@ -207,6 +207,12 @@ pub struct InboundMessage<'a> {
     pub created_at: &'a str,
     /// Sender-declared expiry.
     pub expires_at: Option<&'a str>,
+    /// How many attachments the signed envelope declared.
+    pub attachment_count: u32,
+    /// Total declared ciphertext size of those attachments.
+    pub attachment_bytes: u64,
+    /// Whether the sender requested the `prompt:request` capability.
+    pub prompt_request: bool,
     /// The quarantined plaintext.
     pub body: &'a [u8],
     /// The ciphertext, kept while a message is held so it can be replayed.
@@ -256,6 +262,43 @@ pub struct InboxEntry {
     pub in_reply_to: Option<String>,
     /// Local arrival order.
     pub arrival_sequence: u64,
+    /// Current disposition.
+    pub disposition: String,
+}
+
+/// One inbox row as the Herdr plugin renders it (PRD section 23.2).
+///
+/// Every field is either locally observed or a validated identifier. There
+/// is no body field, and adding one would be the change that makes the
+/// plugin's inbox an agent-readable surface for pending content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginInboxEntry {
+    /// Message identifier.
+    pub message_id: String,
+    /// Verified sender principal, resolved from the roster.
+    pub sender_principal: String,
+    /// Enumerated kind, or `unsupported`.
+    pub kind: String,
+    /// Thread it belongs to, as recorded.
+    pub thread_id: Option<String>,
+    /// Validated endpoint identifier, or `None`.
+    pub endpoint: Option<String>,
+    /// Size of the ciphertext.
+    pub ciphertext_bytes: u64,
+    /// Size of the decrypted content.
+    pub plaintext_bytes: u64,
+    /// Sender-declared creation time.
+    pub created_at: String,
+    /// When this installation accepted it.
+    pub received_at: String,
+    /// Sender-declared expiry.
+    pub expires_at: Option<String>,
+    /// How many attachments the envelope declared.
+    pub attachment_count: u32,
+    /// Total declared ciphertext size of those attachments.
+    pub attachment_bytes: u64,
+    /// Whether the sender requested the prompt capability.
+    pub prompt_request: bool,
     /// Current disposition.
     pub disposition: String,
 }
@@ -764,6 +807,9 @@ impl Database {
                 ciphertext_sha256: &next.ciphertext_sha256,
                 created_at: &next.created_at,
                 expires_at: next.expires_at.as_deref(),
+                attachment_count: next.attachment_count,
+                attachment_bytes: next.attachment_bytes,
+                prompt_request: next.prompt_request,
                 body: &body,
                 ciphertext: &[],
                 context: None,
@@ -1049,6 +1095,48 @@ impl Database {
     /// Accepted inbox entries in local arrival order.
     pub fn inbox_entries(&self, channel_id: &str) -> Result<Vec<InboxEntry>> {
         self.query_inbox(channel_id, None)
+    }
+
+    /// Returns the metadata the Herdr plugin inbox renders.
+    ///
+    /// Deliberately separate from [`Database::pending_inbound`], which
+    /// carries bodies: the plugin's inbox surface never holds one, so the
+    /// query that feeds it does not select the column. The `body` column is
+    /// not in the SELECT list at all, which is a stronger guarantee than
+    /// discarding it afterwards.
+    ///
+    /// Ordered by local arrival rather than by the sender's timestamp. A
+    /// sender chooses `created_at`, and should not get to choose where their
+    /// message sits in someone else's inbox.
+    pub fn plugin_inbox(&self, channel_id: &str) -> Result<Vec<PluginInboxEntry>> {
+        let mut statement = self.connection.prepare(
+            "SELECT message_id, sender_principal, kind, thread_id, endpoint,
+                    ciphertext_bytes, plaintext_bytes, created_at, received_at, expires_at,
+                    attachment_count, attachment_bytes, prompt_request, disposition
+             FROM inbox
+             WHERE channel_id = ?1 AND arrival_sequence IS NOT NULL
+             ORDER BY arrival_sequence",
+        )?;
+        let rows = statement.query_map(params![channel_id], |row| {
+            Ok(PluginInboxEntry {
+                message_id: row.get(0)?,
+                sender_principal: row.get(1)?,
+                kind: row.get(2)?,
+                thread_id: row.get(3)?,
+                endpoint: row.get(4)?,
+                ciphertext_bytes: row.get::<_, i64>(5)? as u64,
+                plaintext_bytes: row.get::<_, i64>(6)? as u64,
+                created_at: row.get(7)?,
+                received_at: row.get(8)?,
+                expires_at: row.get(9)?,
+                attachment_count: row.get::<_, i64>(10)? as u32,
+                attachment_bytes: row.get::<_, i64>(11)? as u64,
+                prompt_request: row.get(12)?,
+                disposition: row.get(13)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// Returns every body still owned by the trusted prompt gate.
@@ -1540,6 +1628,9 @@ struct HeldMessage {
     ciphertext_sha256: String,
     created_at: String,
     expires_at: Option<String>,
+    attachment_count: u32,
+    attachment_bytes: u64,
+    prompt_request: bool,
     body: Vec<u8>,
 }
 
@@ -1601,9 +1692,10 @@ fn hold(
              message_id, channel_id, sender_principal, sender_device, kind, thread_id,
              in_reply_to, roster_epoch, endpoint, ciphertext_bytes, plaintext_bytes,
              created_at, expires_at, received_at, body, disposition,
-             device_sequence, chain_id, previous_chain_id, ciphertext_sha256, arrival_sequence
+             device_sequence, chain_id, previous_chain_id, ciphertext_sha256, arrival_sequence,
+             attachment_count, attachment_bytes, prompt_request
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                   'quarantined', ?16, ?17, ?18, ?19, NULL)
+                   'quarantined', ?16, ?17, ?18, ?19, NULL, ?20, ?21, ?22)
          ON CONFLICT (message_id) DO NOTHING",
         params![
             message.message_id,
@@ -1625,6 +1717,9 @@ fn hold(
             message.chain_id,
             message.previous_chain_id,
             message.ciphertext_sha256,
+            message.attachment_count,
+            message.attachment_bytes as i64,
+            message.prompt_request,
         ],
     )?;
 
@@ -1659,9 +1754,10 @@ fn insert_accepted(
                  message_id, channel_id, sender_principal, sender_device, kind, thread_id,
                  in_reply_to, roster_epoch, endpoint, ciphertext_bytes, plaintext_bytes,
                  created_at, expires_at, received_at, body, disposition,
-                 device_sequence, chain_id, previous_chain_id, ciphertext_sha256, arrival_sequence
+                 device_sequence, chain_id, previous_chain_id, ciphertext_sha256, arrival_sequence,
+                 attachment_count, attachment_bytes, prompt_request
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                       'quarantined', ?16, ?17, ?18, ?19, ?20)",
+                       'quarantined', ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
             params![
                 message.message_id,
                 message.channel_id,
@@ -1683,6 +1779,9 @@ fn insert_accepted(
                 message.previous_chain_id,
                 message.ciphertext_sha256,
                 arrival_sequence as i64,
+                message.attachment_count,
+                message.attachment_bytes as i64,
+                message.prompt_request,
             ],
         )?;
     }
@@ -1708,7 +1807,8 @@ fn take_held(
                     hold.chain_id, hold.previous_chain_id, inbox.kind, inbox.thread_id,
                     inbox.in_reply_to, inbox.roster_epoch, inbox.endpoint,
                     inbox.ciphertext_bytes, inbox.plaintext_bytes, hold.ciphertext_sha256,
-                    inbox.created_at, inbox.expires_at, inbox.body
+                    inbox.created_at, inbox.expires_at, inbox.attachment_count,
+                    inbox.attachment_bytes, inbox.prompt_request, inbox.body
              FROM inbound_hold AS hold
              JOIN inbox ON inbox.message_id = hold.message_id
              WHERE hold.channel_id = ?1 AND hold.sender_device = ?2
@@ -1731,7 +1831,10 @@ fn take_held(
                     ciphertext_sha256: row.get(12)?,
                     created_at: row.get(13)?,
                     expires_at: row.get(14)?,
-                    body: row.get::<_, Option<Vec<u8>>>(15)?.unwrap_or_default(),
+                    attachment_count: row.get::<_, i64>(15)? as u32,
+                    attachment_bytes: row.get::<_, i64>(16)? as u64,
+                    prompt_request: row.get(17)?,
+                    body: row.get::<_, Option<Vec<u8>>>(18)?.unwrap_or_default(),
                 })
             },
         )

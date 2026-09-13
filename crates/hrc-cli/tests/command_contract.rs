@@ -1757,14 +1757,167 @@ fn removing_a_member_and_revoking_a_device_stay_on_the_trusted_surface() {
 
 #[test]
 fn herdr_entry_points_are_dispatched_by_the_same_binary() {
+    // PRD requirement HRC-TECH-002: one executable serves the CLI, the
+    // daemon, and every Herdr entry point. Each mode below is reached
+    // through the same binary and does real work.
+    let (home, _remote) = channel_fixture();
+
+    let startup = hrc_in(home.path())
+        .args(["herdr", "startup", "--json"])
+        .output()
+        .expect("command should run");
+    assert!(startup.status.success());
+
+    let value: Value = serde_json::from_slice(&startup.stdout).expect("stdout should be JSON");
+    assert_eq!(value["manifest"]["executable"], "hrc");
+    assert!(
+        value["sidebar"]
+            .as_str()
+            .expect("the sidebar is a line of text")
+            .starts_with("HRC: "),
+        "startup should return the section 23.1 sidebar line"
+    );
+
     for args in [
-        vec!["herdr", "startup"],
-        vec!["herdr", "action", "inbox"],
-        vec!["herdr", "event"],
-        vec!["herdr", "pane", "inbox"],
+        vec!["herdr", "action", "inbox", "--json"],
+        vec!["herdr", "pane", "inbox", "--json"],
     ] {
-        hrc().args(&args).assert().code(UNIMPLEMENTED);
+        let output = hrc_in(home.path())
+            .args(&args)
+            .output()
+            .expect("command should run");
+        assert!(output.status.success(), "{args:?} should run");
+
+        let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+        assert_eq!(value["pane"], "inbox");
+        assert!(value["rows"].is_array());
     }
+}
+
+#[test]
+fn the_herdr_inbox_pane_never_renders_a_pending_body() {
+    // The plugin's inbox is a surface a person reads at a glance and an
+    // agent could screenshot. PRD section 19.1: no inbound body before a
+    // local human approval. The pane is fed by a query that does not select
+    // the body column, and this proves the rendered output agrees.
+    let (home, remote) = channel_fixture();
+    let principal = principal_of(home.path(), remote.path());
+
+    let secret = "the body that must not appear in a pane";
+    hrc_in(home.path())
+        .args(["send", &principal, secret])
+        .assert()
+        .success();
+    hrc_in(home.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+    hrc_in(home.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+
+    let output = hrc_in(home.path())
+        .args(["herdr", "pane", "inbox", "--json"])
+        .output()
+        .expect("command should run");
+    let rendered = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+
+    assert!(
+        !rendered.contains(secret),
+        "the inbox pane rendered a pending body"
+    );
+
+    let value: Value = serde_json::from_str(&rendered).expect("stdout should be JSON");
+    let rows = value["rows"].as_array().expect("the pane returns rows");
+    assert!(!rows.is_empty(), "the message should reach the inbox");
+
+    for row in rows {
+        let object = row.as_object().expect("a row is an object");
+        for forbidden in ["body", "text", "content", "plaintext"] {
+            assert!(
+                !object.contains_key(forbidden),
+                "an inbox row must not carry `{forbidden}`"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_unknown_herdr_action_or_pane_is_a_usage_error() {
+    // A manifest is a file a person can edit. Naming something this build
+    // does not have should say so rather than draw an empty screen.
+    let (home, _remote) = channel_fixture();
+
+    for args in [
+        vec!["herdr", "action", "teleport", "--json"],
+        vec!["herdr", "pane", "teleport", "--json"],
+    ] {
+        let output = hrc_in(home.path())
+            .args(&args)
+            .output()
+            .expect("command should run");
+
+        assert_eq!(output.status.code(), Some(USAGE), "{args:?}");
+
+        let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+        assert_eq!(value["code"], "unknown_herdr_target");
+    }
+}
+
+#[test]
+fn a_herdr_event_is_read_from_standard_input_and_answered_with_a_reaction() {
+    let (home, _remote) = channel_fixture();
+
+    let mut child = hrc_std_in(home.path())
+        .args(["herdr", "event", "--json"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("the event hook should start");
+
+    std::io::Write::write_all(
+        child.stdin.as_mut().expect("stdin is piped"),
+        br#"{"event":"pane_opened","params":{"pane":"inbox"}}"#,
+    )
+    .expect("the event should be written");
+    drop(child.stdin.take());
+
+    let output = child
+        .wait_with_output()
+        .expect("the event hook should exit");
+    assert!(output.status.success());
+
+    let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(value["reaction"]["reaction"], "refresh_pane");
+    assert_eq!(value["reaction"]["pane"], "inbox");
+}
+
+#[test]
+fn a_herdr_event_that_is_not_an_event_is_refused() {
+    let (home, _remote) = channel_fixture();
+
+    let mut child = hrc_std_in(home.path())
+        .args(["herdr", "event", "--json"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("the event hook should start");
+
+    std::io::Write::write_all(
+        child.stdin.as_mut().expect("stdin is piped"),
+        br#"{"event":"approve_everything"}"#,
+    )
+    .expect("the event should be written");
+    drop(child.stdin.take());
+
+    let output = child
+        .wait_with_output()
+        .expect("the event hook should exit");
+    assert_eq!(output.status.code(), Some(USAGE));
+
+    let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(value["code"], "malformed_event");
 }
 
 #[test]

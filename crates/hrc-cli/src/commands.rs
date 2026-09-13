@@ -1194,6 +1194,16 @@ fn receive_messages(
                                 ciphertext_sha256: &opened.ciphertext_sha256,
                                 created_at: &opened.envelope.created_at,
                                 expires_at: opened.envelope.expires_at.as_deref(),
+                                attachment_count: u32::try_from(opened.envelope.attachments.len())
+                                    .unwrap_or(u32::MAX),
+                                attachment_bytes: opened.envelope.attachments.iter().fold(
+                                    0u64,
+                                    |total, attachment| {
+                                        total.saturating_add(attachment.ciphertext_bytes)
+                                    },
+                                ),
+                                prompt_request: opened.envelope.requested_capability.as_deref()
+                                    == Some(hrc_core::gate::PROMPT_CAPABILITY),
                                 body: body.as_bytes(),
                                 ciphertext: &bytes,
                                 context,
@@ -3167,6 +3177,151 @@ fn git_version() -> Option<String> {
         .status
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// `hrc herdr startup`: what Herdr runs when it loads the plugin.
+///
+/// Returns the manifest this build advertises together with the current
+/// sidebar line, so a host that caches the manifest and a host that re-reads
+/// it on every launch both get a consistent answer.
+///
+/// It deliberately does not start the daemon. `hrc daemon` is a resident
+/// process with its own lifecycle, and a plugin hook that spawned one would
+/// give the daemon the plugin's lifetime — which is the arrangement PRD
+/// section 29 lists as a known limitation to avoid.
+pub fn herdr_startup(context: &Context) -> Result<Value> {
+    let manifest = hrc_herdr::manifest();
+    let sidebar = herdr_sidebar(context)?;
+
+    Ok(json!({
+        "status": "ok",
+        "manifest": manifest,
+        "sidebar": sidebar.render(),
+    }))
+}
+
+/// `hrc herdr action <name>`: run a named action from the manifest.
+pub fn herdr_action(context: &Context, action: &str) -> Result<Value> {
+    // Actions and panes are named separately in the manifest but the inbox
+    // action and the inbox pane show the same thing, so they share a body.
+    match action {
+        "inbox" => herdr_pane(context, "inbox"),
+        other => Err(CliError::UnknownHerdrTarget {
+            kind: "action",
+            name: other.to_owned(),
+        }),
+    }
+}
+
+/// `hrc herdr event`: handle one event Herdr wrote to standard input.
+///
+/// The reaction is returned rather than acted on. A plugin hook is a
+/// short-lived process; refreshing a pane is the host's job once it knows
+/// something changed, and the alternative — a hook that reaches into the
+/// daemon on every tick — is the repeated spawning PRD section 13.2 says to
+/// avoid.
+pub fn herdr_event(context: &Context, input: &str) -> Result<Value> {
+    let event = hrc_herdr::Event::parse(input).map_err(|reason| CliError::MalformedEvent {
+        reason: reason.lines().next().unwrap_or("unparseable").to_owned(),
+    })?;
+
+    let reaction = event.reaction();
+
+    // The sidebar is cheap and is what every refresh reaction needs, so it
+    // travels with the answer rather than costing the host a second process.
+    let sidebar = match reaction {
+        hrc_herdr::Reaction::Ignore => None,
+        _ => Some(herdr_sidebar(context)?.render()),
+    };
+
+    Ok(json!({
+        "status": "ok",
+        "reaction": reaction,
+        "sidebar": sidebar,
+    }))
+}
+
+/// `hrc herdr pane <name>`: render one pane.
+pub fn herdr_pane(context: &Context, pane: &str) -> Result<Value> {
+    let pane = hrc_herdr::Pane::parse(pane).ok_or_else(|| CliError::UnknownHerdrTarget {
+        kind: "pane",
+        name: pane.to_owned(),
+    })?;
+
+    match pane {
+        hrc_herdr::Pane::Inbox => {
+            let database = Database::open(context.paths.database())?;
+            let channel = only_channel(&database)?;
+            let now = database.utc_now()?;
+
+            let rows: Vec<hrc_herdr::InboxRow> = database
+                .plugin_inbox(&channel.channel_id)?
+                .iter()
+                .map(|entry| {
+                    // No local alias store exists yet, so the verified
+                    // principal ID stands in for the display name. It is
+                    // locally resolved either way, which is what section
+                    // 19.1 requires; what it must never become is a name the
+                    // sender chose.
+                    hrc_herdr::InboxRow::from_entry(
+                        entry,
+                        &entry.sender_principal,
+                        &channel.local_name,
+                        &now,
+                    )
+                })
+                .collect();
+
+            let notifications: Vec<Value> = rows
+                .iter()
+                .filter(|row| row.awaiting_decision())
+                .filter_map(hrc_herdr::Notification::for_message)
+                .map(|notification| {
+                    json!({
+                        "text": notification.render(),
+                        "urgent": notification.is_urgent(),
+                    })
+                })
+                .collect();
+
+            let view = hrc_herdr::InboxView { rows };
+
+            Ok(json!({
+                "status": "ok",
+                "pane": "inbox",
+                "channel": channel.local_name,
+                "pending": view.pending(),
+                "rows": view.rows,
+                "notifications": notifications,
+            }))
+        }
+    }
+}
+
+/// The sidebar line for every configured channel (PRD section 23.1).
+fn herdr_sidebar(context: &Context) -> Result<hrc_herdr::Sidebar> {
+    let database = Database::open(context.paths.database())?;
+
+    let mut statuses = Vec::new();
+    let mut unread = 0usize;
+
+    for channel in database.channels()? {
+        let counts = database.channel_counts(&channel.channel_id)?;
+        unread = unread.saturating_add(counts.unread as usize);
+
+        statuses.push(ChannelStatus {
+            local_name: channel.local_name,
+            roster_epoch: channel.roster_epoch,
+            pending: counts.pending_approval as usize,
+            halted: channel.halted_reason.is_some(),
+        });
+    }
+
+    // The age of the last fetch is not recorded as a timestamp, only as a
+    // transport revision, so the sidebar reports what it actually knows
+    // rather than inventing a duration. Wiring a real age is the work
+    // `HRC-SYNC-003` evidence will have to cite when it lands.
+    Ok(hrc_herdr::Sidebar::from_status(&statuses, unread, None))
 }
 
 #[cfg(test)]

@@ -327,7 +327,14 @@ fn the_agent_view_exposes_only_the_closed_metadata_set() {
     // PRD section 19.1. The body must not be reachable from what an agent
     // gets, and the type has no field that could carry it.
     let message = message();
-    let view = agent_view(&message, "Alice", "Team channel", 512, 1024);
+    let view = agent_view(
+        &message,
+        "Alice",
+        "Team channel",
+        512,
+        1024,
+        "2026-01-01T00:00:05Z",
+    );
 
     assert_eq!(view.sender_principal, "alice");
     assert_eq!(view.sender_local_name, "Alice");
@@ -358,7 +365,14 @@ fn an_invalid_endpoint_is_replaced_with_a_local_label() {
         "réviewer",
     ] {
         let message = quarantined("question", Some(hostile), b"ciphertext");
-        let view = agent_view(&message, "Alice", "Team channel", 1, 1);
+        let view = agent_view(
+            &message,
+            "Alice",
+            "Team channel",
+            1,
+            1,
+            "2026-01-01T00:00:05Z",
+        );
 
         assert_eq!(
             view.endpoint_label, UNKNOWN_ENDPOINT,
@@ -374,7 +388,14 @@ fn an_unknown_message_kind_is_reported_as_unsupported() {
     // triggers execution. Passing the raw string through would put
     // sender-chosen text where an agent expects an enumerated value.
     let message = quarantined("execute_shell", None, b"ciphertext");
-    let view = agent_view(&message, "Alice", "Team channel", 1, 1);
+    let view = agent_view(
+        &message,
+        "Alice",
+        "Team channel",
+        1,
+        1,
+        "2026-01-01T00:00:05Z",
+    );
 
     assert_eq!(view.kind, "unsupported");
     assert!(!format!("{view:?}").contains("execute_shell"));
@@ -384,7 +405,14 @@ fn an_unknown_message_kind_is_reported_as_unsupported() {
 fn every_documented_message_kind_survives_the_agent_view() {
     for kind in hrc_protocol::MessageKind::ALL {
         let message = quarantined(kind.as_str(), None, b"ciphertext");
-        let view = agent_view(&message, "Alice", "Team channel", 1, 1);
+        let view = agent_view(
+            &message,
+            "Alice",
+            "Team channel",
+            1,
+            1,
+            "2026-01-01T00:00:05Z",
+        );
 
         assert_eq!(view.kind, kind.as_str());
     }
@@ -393,7 +421,14 @@ fn every_documented_message_kind_survives_the_agent_view() {
 #[test]
 fn a_message_without_an_endpoint_reports_an_empty_label() {
     let message = quarantined("note", None, b"ciphertext");
-    let view = agent_view(&message, "Alice", "Team channel", 1, 1);
+    let view = agent_view(
+        &message,
+        "Alice",
+        "Team channel",
+        1,
+        1,
+        "2026-01-01T00:00:05Z",
+    );
 
     assert_eq!(view.endpoint_label, "");
 }
