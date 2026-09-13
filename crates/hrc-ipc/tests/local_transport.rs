@@ -55,13 +55,18 @@ impl Fixture {
 /// Starts a server and waits until it is accepting.
 async fn start(endpoint: &Endpoint) -> tokio::task::JoinHandle<()> {
     let endpoint = endpoint.clone();
+    let serving_endpoint = endpoint.clone();
     let handle = tokio::spawn(async move {
-        let _ = serve(&endpoint, answer as fn(Request) -> Response).await;
+        let _ = serve(&serving_endpoint, answer as fn(Request) -> Response).await;
     });
 
-    // Binding is not instantaneous, and a client that raced it would fail
-    // for a reason unrelated to what each test is checking.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Binding is not instantaneous, and on Windows a restarted named-pipe
+    // listener may need a few polls before it is reachable again. Probing it
+    // here keeps each test focused on what it actually means to prove.
+    let probe = Client::connect_with_retry(&endpoint, 20, Duration::from_millis(25))
+        .await
+        .expect("test server failed to start");
+    probe.close().await.unwrap();
     handle
 }
 
@@ -147,9 +152,9 @@ async fn a_client_reconnects_after_the_daemon_restarts() {
         .unwrap();
     let _: Response = client.call(&Request::Status).await.unwrap();
 
+    client.close().await.unwrap();
     first.abort();
     let _ = first.await;
-    drop(client);
 
     // The restarted daemon has to be able to take the endpoint back even
     // though the previous process left a socket file behind.
