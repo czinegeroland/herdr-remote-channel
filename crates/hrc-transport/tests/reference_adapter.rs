@@ -18,8 +18,7 @@ fn the_reference_adapter_conforms() {
 /// Builds a message object.
 fn message(name: &str) -> PublishObject {
     PublishObject {
-        name: name.to_owned(),
-        path: format!("messages/2026/09/{name}.age"),
+        name: format!("messages/2026/09/{name}.age"),
         class: ObjectClass::Message,
         bytes: format!("ciphertext-{name}").into_bytes(),
     }
@@ -28,8 +27,7 @@ fn message(name: &str) -> PublishObject {
 /// Builds a control object.
 fn control(name: &str) -> PublishObject {
     PublishObject {
-        name: name.to_owned(),
-        path: format!("control/log/{name}.json"),
+        name: format!("control/log/{name}.json"),
         class: ObjectClass::Control,
         bytes: format!("control-{name}").into_bytes(),
     }
@@ -56,10 +54,10 @@ fn a_substituted_object_is_detected_rather_than_returned() {
         .unwrap();
 
     let recorded_hash = published.objects[0].sha256.clone();
-    transport.corrupt_object_for_test("msg-1", b"substituted".to_vec());
+    transport.corrupt_object_for_test("messages/2026/09/msg-1.age", b"substituted".to_vec());
 
     assert!(matches!(
-        transport.get_object("msg-1", &recorded_hash),
+        transport.get_object("messages/2026/09/msg-1.age", &recorded_hash),
         Err(TransportError::ObjectHashMismatch { .. })
     ));
 }

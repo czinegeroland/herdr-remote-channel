@@ -108,10 +108,16 @@ impl ObjectClass {
 /// An object being published.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishObject {
-    /// Immutable name, unique within the channel.
+    /// The object's immutable name, which is also its location in the
+    /// channel layout (PRD section 16.2), for example
+    /// `messages/2026/09/01ARZ3.age`.
+    ///
+    /// Name and location are one field on purpose. Separating them gives an
+    /// object two identities that adapters can disagree about: a
+    /// content-addressed transport like Git has no way to store a name that
+    /// differs from the path it lives at, while an adapter with its own
+    /// index can ignore the path entirely. See decision DEC-027.
     pub name: String,
-    /// Path the object occupies in the transport's layout.
-    pub path: String,
     /// What kind of object this is.
     pub class: ObjectClass,
     /// The bytes. Opaque ciphertext as far as the adapter is concerned.
@@ -121,10 +127,8 @@ pub struct PublishObject {
 /// An object as reported back by the transport.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectRecord {
-    /// Immutable name.
+    /// The object's immutable name and layout location.
     pub name: String,
-    /// Path within the transport layout.
-    pub path: String,
     /// What kind of object this is.
     pub class: ObjectClass,
     /// Size in bytes.

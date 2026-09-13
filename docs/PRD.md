@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-13T05:12:00+02:00 |
+| Last updated | 2026-09-13T05:58:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -556,12 +556,12 @@ The Herdr plugin must expose:
 | ID | Requirement | Priority | Status | Evidence |
 |---|---|---:|---|---|
 | HRC-SYNC-001 | Persist outgoing objects before attempting publication. | Must | Implemented | `crates/hrc-storage/src/lib.rs` durable outbox |
-| HRC-SYNC-002 | Detect remote branch changes through polling. | Must | Approved | Pending |
-| HRC-SYNC-003 | Fetch only when the remote branch head changes. | Must | Approved | Pending |
+| HRC-SYNC-002 | Detect remote branch changes through polling. | Must | In progress | `crates/hrc-transport-git/src/lib.rs` `remote_head`; the daemon poll loop is pending |
+| HRC-SYNC-003 | Fetch only when the remote branch head changes. | Must | In progress | `crates/hrc-transport-git/src/lib.rs` separates `remote_head` from `sync_from_remote`; the daemon poll loop is pending |
 | HRC-SYNC-004 | Resume from a durable local commit cursor. | Must | In progress | `crates/hrc-storage/src/lib.rs` cursor column and accessors; fetch loop pending |
 | HRC-SYNC-005 | Detect observed history rewrites, conflicting successors, deletions, and changed objects. | Must | Approved | Pending |
-| HRC-SYNC-006 | Retry non-fast-forward pushes automatically. | Must | Approved | Pending |
-| HRC-SYNC-007 | Never force-push during normal operation. | Must | Approved | Pending |
+| HRC-SYNC-006 | Retry non-fast-forward pushes automatically. | Must | In progress | `crates/hrc-transport-git/src/lib.rs` reports a conflict with the new tip and rewinds; the automatic retry loop is pending |
+| HRC-SYNC-007 | Never force-push during normal operation. | Must | Implemented | `crates/hrc-transport-git/src/lib.rs`: no code path passes `--force` or a `+` refspec when pushing |
 | HRC-SYNC-008 | Re-encrypt unpublished messages after a roster-epoch change. | Must | Approved | Pending |
 | HRC-SYNC-009 | Back off with jitter after failures or inactivity. | Must | Approved | Pending |
 | HRC-SYNC-010 | Continue operating after process and Herdr restarts. | Must | Approved | Pending |
@@ -575,7 +575,7 @@ The Herdr plugin must expose:
 | HRC-TR-002 | Keep plaintext and private keys outside adapters. | Must | Implemented | `crates/hrc-transport/src/lib.rs`: the trait only ever accepts and returns opaque bytes |
 | HRC-TR-003 | Support polling and push-capable adapters. | Must | Approved | Pending |
 | HRC-TR-004 | Require adapters to declare size, ordering, durability, and metadata properties. | Must | Implemented | `crates/hrc-transport/src/lib.rs` `AdapterCapabilities`, enforced by the conformance suite |
-| HRC-TR-005 | Supply a built-in Git transport. | Must | Approved | Pending |
+| HRC-TR-005 | Supply a built-in Git transport. | Must | Implemented | `crates/hrc-transport-git/src/lib.rs`; passes the same conformance suite as the reference adapter |
 | HRC-TR-006 | Supply GitHub setup optimization without making the core GitHub-only. | Should | Approved | Pending |
 | HRC-TR-007 | Publish adapter conformance tests and validate them with an in-memory non-Git adapter. | Must | Implemented | `crates/hrc-transport/src/conformance.rs`, `crates/hrc-transport/src/memory.rs`, `crates/hrc-transport/tests/reference_adapter.rs` |
 
@@ -1605,14 +1605,19 @@ is the only publication allowed to have `parentRevision: null`.
   "objects": [
     {
       "class": "control",
-      "name": "...",
-      "path": "...",
+      "name": "messages/2026/09/01ARZ3.age",
       "size": 1234,
       "sha256": "..."
     }
   ]
 }
 ```
+
+An object's `name` is both its immutable identifier and its location in the
+channel layout of section 16.2. There is deliberately no separate `path`:
+two identifiers for one object is something adapters can disagree about, and
+a content-addressed transport such as Git cannot store a name that differs
+from the location it lives at. See decision DEC-027.
 
 It returns:
 
@@ -1941,7 +1946,7 @@ npx skills add <owner>/herdr-remote-channel `
 | HRC-SEC-012 | Observed conflicting histories, rewrites, deletions, or substitutions stop synchronization. | Approved | Pending |
 | HRC-SEC-013 | Messages from stale epochs or devices revoked before object introduction are rejected. | In progress | `crates/hrc-core/src/roster.rs` `was_authorized_in`; message-side enforcement pending |
 | HRC-SEC-014 | Pending bodies and approval capabilities are unavailable through agent-safe CLI and JSON surfaces. | Approved | Pending |
-| HRC-SEC-015 | Control entries use control-only publications, and merge or mixed control/data publications are rejected. | Approved | Pending |
+| HRC-SEC-015 | Control entries use control-only publications, and merge or mixed control/data publications are rejected. | Implemented | `crates/hrc-transport/src/lib.rs` `validate_publication`, `crates/hrc-transport-git/src/lib.rs` merge and modification rejection, covered by `crates/hrc-transport-git/tests/git_adapter.rs` |
 | HRC-SEC-016 | Every signed message commits to the canonical intended recipient-device list used by the sender's encryption builder. | In progress | `crates/hrc-protocol/src/recipients.rs`; binding into the message envelope pending |
 
 ### 25.1 Threats
@@ -2259,8 +2264,8 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 | HRC-SYNC-001 through HRC-SYNC-010 | M2 | `AC-GIT-SYNC`: offline queues recover; concurrent peers publish without manual merges; lost responses deduplicate; non-descendant history and changed objects halt processing. | Pending |
 | HRC-SYNC-011 | M2 | `AC-LOCAL-SEQUENCE`: concurrent local callers and process crashes cannot allocate duplicate device sequences or ambiguous predecessor chain IDs. | `crates/hrc-storage/src/tests.rs`: four threads on separate connections allocate 100 sequences with no duplicate, gap, or repeated predecessor link; a reservation survives reopening; an abandoned reservation is burned rather than reused. Verified on Linux, macOS, and Windows CI. |
 | HRC-TR-001 through HRC-TR-004 | M0 | `AC-ADAPTER-SPEC`: protocol schema, capability declaration, error model, and opaque-object boundary pass specification review. | Partial: `crates/hrc-transport/src/lib.rs` implements the capability declaration, error model, and opaque-object boundary as executable types. Remaining: specification review, and the JSON-RPC binding for out-of-process adapters. |
-| HRC-TR-005 and HRC-TR-006 | M2 | `AC-GIT-ADAPTER`: generic Git operation succeeds without GitHub API dependency; GitHub optimization preserves identical protocol behavior. | Pending |
-| HRC-TR-007 | M2 | `AC-ADAPTER-CONFORMANCE`: the in-memory reference adapter and Git adapter both pass the publication-revision, ordering, conflict, durability, and opaque-object conformance suite. | Partial: the reference adapter passes all fifteen checks, and a deliberately broken adapter is proven to fail the suite (`crates/hrc-transport/tests/reference_adapter.rs`). Remaining: the Git adapter. |
+| HRC-TR-005 and HRC-TR-006 | M2 | `AC-GIT-ADAPTER`: generic Git operation succeeds without GitHub API dependency; GitHub optimization preserves identical protocol behavior. | Partial: `crates/hrc-transport-git/tests/git_adapter.rs` drives create, publish, fetch, concurrent conflict and retry, merge rejection, and object substitution against a real bare repository using plain Git and no network or GitHub API. Remaining: the GitHub-specific optimization. |
+| HRC-TR-007 | M2 | `AC-ADAPTER-CONFORMANCE`: the in-memory reference adapter and Git adapter both pass the publication-revision, ordering, conflict, durability, and opaque-object conformance suite. | Both adapters pass all fifteen checks (`crates/hrc-transport/tests/reference_adapter.rs`, `crates/hrc-transport-git/tests/git_adapter.rs`), and a deliberately broken adapter is proven to fail the suite. Verified on Linux, macOS, and Windows CI. |
 | HRC-SKILL-001 through HRC-SKILL-007 | M3 | `AC-SKILL`: an agent guides setup and drafts communication while tests prove it cannot retrieve private keys/invite secrets, approve joins, or bypass the prompt gate. | Pending |
 | HRC-SKILL-008 | M4 | `AC-SKILL-CONTEXT`: an agent can draft supported context packages while preview and send remain human-controlled. | Pending |
 | HRC-SEC-001 through HRC-SEC-005, HRC-SEC-013, HRC-SEC-015, HRC-SEC-016 | M1 | `AC-KEYS-AND-ROSTER`: key isolation, signed recipient intent, signature validation, control-chain validation, control-only publication ordering, revocation, and stale-epoch rejection pass adversarial tests. | Pending |
@@ -2292,7 +2297,7 @@ Every implementation PR must update this table.
 |---|---:|---|---|---|
 | M0 Product and protocol | 55% | Adds an executable adapter contract, capability declaration, and error model to the written specification | Transport contract and reference adapter | Obtain product-owner approval and complete the JSON-RPC adapter binding |
 | M1 Secure foundation | 65% | Adds the durable local state store: WAL-backed SQLite, the atomic sequence allocation, the outbox lifecycle, the quarantined inbox schema, and the append-only audit log | Local state store | Persist principal and device keys through the OS keychain, then wire channel creation and enrollment into the CLI |
-| M2 Git messaging | 20% | Transport adapter contract, in-memory reference adapter, and a fifteen-check conformance suite proven to reject a non-conforming adapter | Transport contract and reference adapter | Implement the Git adapter against the same suite, then the daemon fetch and publish loop |
+| M2 Git messaging | 40% | Git transport publishes, fetches, and resolves concurrent publication against a real repository, and passes the same conformance suite as the reference adapter | Git transport adapter | Build the daemon fetch and publish loop with backoff, then message envelopes and receipts |
 | M3 Herdr integration | 0% | Not started | N/A | Verify Herdr long-lived plugin process capabilities |
 | M4 Context/delegation | 0% | Not started | N/A | Finalize context package schema |
 | M5 Provider ecosystem | 0% | Not started | N/A | Deferred until core protocol stabilizes |
@@ -2380,6 +2385,7 @@ recorded either directly in this PRD or in a stable linked artifact.
 | DEC-016 | RFC 8785 canonical JSON uses a pinned Rust implementation, initially `serde_jcs`, guarded by protocol vectors. | Accepted | Avoids custom canonicalization while making signed bytes interoperable. |
 | DEC-017 | Build and test run in a separate `pull_request` workflow rather than being added to the `pull_request_target` traceability workflow. | Accepted | Compiling and running pull-request code under `pull_request_target` would hand a write-capable, secret-bearing context to untrusted code; the two triggers stay separated. |
 | DEC-018 | The CLI publishes a fixed numeric exit-code contract: 0 success, 1 runtime failure, 2 usage, 3 unimplemented, 4 authorization required. | Accepted | PRD section 11.1 requires documented exit codes, and the Herdr plugin and skill must branch on stable numbers rather than parsing prose. |
+| DEC-027 | A transport object has one identifier: its `name`, which is also its path in the channel layout. | Accepted | The earlier separate `name` and `path` fields let two conforming adapters disagree about what identifies an object: the in-memory adapter keyed on the name and ignored the path, while Git can only address an object by its path. Found when the Git adapter was run against the conformance suite the reference adapter already passed. |
 | DEC-025 | The adapter conformance suite ships with a negative test: a deliberately broken adapter that must fail it. | Accepted | Otherwise the suite's own correctness is unverified. `crates/hrc-transport/tests/reference_adapter.rs` runs an adapter that ignores `expectedRevision` and asserts the suite rejects it by name. |
 | DEC-026 | The in-process transport trait is synchronous; asynchrony belongs to the daemon that drives it. | Accepted | Section 21 specifies adapters as separate JSON-RPC executables, so the process boundary is where waiting happens. Keeping the trait synchronous makes the conformance suite runnable without a runtime and keeps adapter authorship simple. |
 | DEC-023 | The local sequence-allocation transaction begins in SQLite IMMEDIATE mode. | Accepted | A deferred transaction upgrades from a read lock to a write lock, and SQLite fails that upgrade with `SQLITE_BUSY` without waiting on the busy timeout. Found by the concurrency test in `crates/hrc-storage/src/tests.rs`, which failed under four concurrent allocators before the change. |
