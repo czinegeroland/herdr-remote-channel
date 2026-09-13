@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-14T14:10:00+02:00 |
+| Last updated | 2026-09-14T14:35:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -506,7 +506,7 @@ The Herdr plugin must expose:
 | HRC-CH-004 | Support public repositories after explicit risk confirmation. | Should | Approved | Pending |
 | HRC-CH-005 | Create expiring, single-use invites. | Must | Implemented | `crates/hrc-crypto/src/enrollment.rs` generates, encodes, and validates expiring invites; `crates/hrc-core/src/roster.rs` tracks invite state from the control log so a second admission under one invite is rejected by every participant; `hrc invite create` publishes the authorizing control entry and returns the code once |
 | HRC-CH-006 | Generate separate principal and device identities. | Must | Implemented | `crates/hrc-crypto/src/store.rs` `PrincipalSecrets` is a distinct type with no encryption identity, and `hrc init` generates and stores both keys or neither |
-| HRC-CH-007 | Require explicit administrator approval for joins. | Must | Implemented | `crates/hrc-core/src/enrollment.rs`: `review_join` validates but admits nobody, and `admit` — the approval itself — refuses a signer who is not an active administrator; `hrc join pending` lists only requests that already validate, and `hrc join approve` stays on the section 22.7 boundary |
+| HRC-CH-007 | Require explicit administrator approval for joins. | Must | Implemented | `crates/hrc-core/src/enrollment.rs`: `review_join` validates but admits nobody, and `admit` — the approval itself — refuses a signer who is not an active administrator; `hrc join pending` lists only requests that already validate, `hrc join approve` stays on the section 22.7 boundary, and admission is performed only by the daemon's trusted interface, proven by a test where the identical request succeeds on the trusted socket and is refused on the agent-safe one |
 | HRC-CH-008 | Support member and device revocation. | Should | Implemented | `crates/hrc-core/src/roster.rs` evaluates the operations, and the daemon's trusted interface publishes them as control entries; `hrc member remove` and `hrc device revoke` stay on the section 22.7 boundary, and `hrc members` and `hrc device list` read the published roster |
 | HRC-CH-009 | Maintain a signed, append-only membership/control log. | Must | Implemented | `crates/hrc-protocol/src/control.rs`, `crates/hrc-core/src/roster.rs` |
 | HRC-CH-010 | Detect observed conflicting control histories, rewrites, deletions, and substitutions, then stop synchronization. | Must | Approved | Pending |
