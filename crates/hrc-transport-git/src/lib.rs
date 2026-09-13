@@ -26,6 +26,7 @@
 
 pub mod error;
 pub mod git;
+pub mod github;
 
 use std::path::Path;
 
@@ -118,6 +119,36 @@ impl GitTransport {
                 stderr,
             }),
         }
+    }
+
+    /// Reads the remote branch tip, using the GitHub optimization when the
+    /// remote is a GitHub repository and the optimization is usable.
+    ///
+    /// PRD requirement HRC-TR-006 and section 17.1. `Ok(None)` means the
+    /// branch does not exist yet, which is the pre-genesis state.
+    ///
+    /// The fallback is unconditional: any reason the optimization cannot
+    /// answer — `gh` absent, unauthenticated, rate limited, offline, or a
+    /// response this build does not understand — ends in exactly the same
+    /// `ls-remote` a non-GitHub remote would have used. That is what keeps
+    /// the core from becoming GitHub-only (PRD section 28).
+    pub fn remote_head_optimized(
+        &self,
+        watcher: Option<&mut github::HeadWatcher<impl github::GhRunner>>,
+    ) -> Result<Option<String>, GitError> {
+        if let Some(watcher) = watcher {
+            match watcher.poll() {
+                // The head has not moved, so the last one this adapter
+                // fetched is still current. Reading it locally costs no
+                // network round trip, which is the saving.
+                github::Probe::Unchanged => return self.local_head(),
+                github::Probe::Changed { head, .. } => return Ok(Some(head)),
+                // Deliberately falls through rather than reporting an error.
+                github::Probe::Unavailable(_) => {}
+            }
+        }
+
+        self.remote_head()
     }
 
     /// Reads the remote branch tip without fetching objects.
