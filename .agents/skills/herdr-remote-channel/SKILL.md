@@ -157,10 +157,10 @@ hrc context draft context.json --repository .
 
 You may run `hrc context draft`; **do not run `hrc context preview`.
 Do not run `hrc context send` yourself.** Both commands refuse ordinary and agent-safe
-callers, including callers that copy a draft digest. The trusted human
-interface previews the source-derived package and issues a short-lived,
-one-use authorization bound to its digest, recipient, channel, and send
-action. Do not provide, guess, or replay any confirmation or authorization.
+callers, including callers that copy a draft digest. Preview and send are
+human-controlled: the trusted human interface previews the source-derived
+package and issues a short-lived, one-use authorization bound to its digest,
+recipient, channel, and send action. Do not provide, guess, or replay any confirmation or authorization.
 
 Every file excerpt needs a repository path. HRC checks Git's ignored-path
 rules as well as `.env`, keys, credentials, and other excluded paths. If the
