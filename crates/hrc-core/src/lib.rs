@@ -9,6 +9,7 @@
 //! See PRD sections 13.1 and 19.
 
 pub mod context;
+pub mod delegation;
 pub mod enrollment;
 pub mod error;
 pub mod gate;
@@ -19,6 +20,7 @@ pub mod rpc;
 pub mod sync;
 
 pub use context::{ContextItem, ContextPackage, ContextPreview};
+pub use delegation::{Delegation, Party};
 pub use enrollment::{PendingJoin, admit, request_join, review_join};
 pub use error::{CoreError, Result};
 pub use gate::{AgentView, Authorization, AuthorizationLedger, Decision};

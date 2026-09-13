@@ -8,6 +8,7 @@
 
 pub mod canonical;
 pub mod control;
+pub mod delegation;
 pub mod error;
 pub mod identity;
 pub mod join;
@@ -17,6 +18,7 @@ pub mod recipients;
 pub mod signed;
 
 pub use control::{ControlEntryPayload, ControlOperation, GenesisPayload};
+pub use delegation::{DelegationState, ProgressBody, ResultBody, TaskBody};
 pub use error::{ProtocolError, Result};
 pub use identity::{DeviceCertificatePayload, DeviceDescriptor};
 pub use message::{Addressing, MessageEnvelope};

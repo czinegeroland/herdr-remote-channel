@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-13T21:40:00+02:00 |
+| Last updated | 2026-09-13T22:55:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -522,8 +522,8 @@ The Herdr plugin must expose:
 | HRC-MSG-005 | Support message expiration. | Must | In progress | `crates/hrc-core/src/message.rs` refuses expired messages on open; expiry display and sweeping are pending |
 | HRC-MSG-006 | Deduplicate at-least-once deliveries. | Must | Implemented | `crates/hrc-storage/src/lib.rs` `record_inbound` treats a repeat of the same message ID and ciphertext digest as ordinary traffic, and the same ID with a different digest as a substitution rather than a repeat |
 | HRC-MSG-007 | Preserve per-device message ordering. | Must | Implemented | `crates/hrc-storage/src/lib.rs` accepts a message only when it follows the last chain link recorded for its sender device, holds one whose predecessor has not arrived, releases held messages in sequence when the gap fills, and rejects a device that forks its own chain |
-| HRC-MSG-008 | Support structured task/delegation messages without execution. | Should | Approved | Pending |
-| HRC-MSG-009 | Support progress and result messages. | Should | Approved | Pending |
+| HRC-MSG-008 | Support structured task/delegation messages without execution. | Should | Implemented | `crates/hrc-protocol/src/delegation.rs` `TaskBody` carries a title, description, acceptance criteria, and a reference to context already shared, and a test asserts the shape exposes no command, script, argument, or environment field |
+| HRC-MSG-009 | Support progress and result messages. | Should | Implemented | `crates/hrc-protocol/src/delegation.rs` `ProgressBody` and `ResultBody`, with the lifecycle of section 18.4 in `DelegationState::may_precede` and party rules in `crates/hrc-core/src/delegation.rs` |
 | HRC-MSG-010 | Retain a local audit record of communication decisions. | Must | In progress | `crates/hrc-storage/src/lib.rs` keeps an append-only audit table and `crates/hrc-cli/src/commands.rs` / `src/main.rs` surface it through `hrc audit`; recording prompt and messaging decisions is still pending |
 
 ### 12.3 Prompt gate
@@ -1505,7 +1505,24 @@ requested
   -> completed | failed | cancelled | expired
 ```
 
-HRC communicates these states but does not execute the delegated work.
+HRC communicates these states but does not execute the delegated work. The
+task body reflects that: it carries a title, a description, acceptance
+criteria, and a reference to context the sender already chose to share, and
+nothing that looks like a command, script, argument list, working directory,
+or environment. The absence is a safety property rather than an oversight, so
+a test asserts it.
+
+A transition must be legal in the lifecycle above *and* reported by the party
+it is actually about. Taking a task on, working it, and reporting an outcome
+are the assignee's to say; withdrawing the request and judging a result
+complete are the requester's. `completed` in particular is the requester's
+verdict after review, not something an assignee can declare about its own
+work. Expiry belongs to neither side and is not reportable by a peer at all,
+since it is what happens when nobody says anything.
+
+Terminal states accept no further transitions. Without that, a peer could
+revive a task the other side had closed, and the record of what happened
+would depend on who spoke last. See decision DEC-044.
 
 ---
 
@@ -2397,7 +2414,7 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 | HRC-CH-008 | M1 | `AC-REVOCATION`: a device is revoked, the epoch advances, and messages introduced afterward cannot be accepted from or decrypted by the revoked device. | Partial: `crates/hrc-core/src/roster/tests.rs` proves the epoch advances, the revoked device loses authority from that epoch, and it cannot sign later entries; `crates/hrc-crypto/src/encryption.rs` proves it cannot decrypt later ciphertext. Remaining: end-to-end over a published channel. |
 | HRC-CH-010 | M1 | `AC-CONTROL-INTEGRITY`: observed same-parent successors, broken previous hashes, rewrites, deletions, and substitutions stop synchronization with a sticky alert. | Partial: `crates/hrc-core/src/roster/tests.rs` rejects same-sequence successors, broken predecessor hashes, skipped sequences, wrong epochs, and foreign-channel entries, and proves a rejected entry leaves state unchanged. Remaining: synchronization halt and the sticky alert. |
 | HRC-MSG-001 through HRC-MSG-007, HRC-MSG-010 | M2 | `AC-MESSAGING`: two devices exchange offline notes and threaded questions/answers with receipts, expiry, deduplication, ordering, and local audit evidence. | Partial: `crates/hrc-core/src/message/tests.rs` covers seal and open between two devices, broadcast addressing, and expiry. `crates/hrc-storage/src/tests.rs` covers deduplication, a substituted ciphertext under a reused message ID, out-of-order arrival held and then released in sequence, a gap that survives a restart, a sender forking its own chain by reusing a sequence or restarting it, a fabricated predecessor that never gets in, independent chains per sender device, and a backdated message that cannot reorder a thread. `crates/hrc-core/src/receipt/tests.rs` covers receipts from a non-recipient, about a message never sent, a batch refused for one bad reference, every receipt state, and answer correlation across an absent, unknown, wrong-kind, and wrong-thread reference; `crates/hrc-storage/src/tests.rs` covers per-device receipt state, repeated reports, and a closed state set. Remaining: exchanging these over a published channel and the CLI surface. |
-| HRC-MSG-008 and HRC-MSG-009 | M4 | `AC-DELEGATION-MESSAGES`: task, accept/decline, progress, and result states are exchanged without local execution. | Pending |
+| HRC-MSG-008 and HRC-MSG-009 | M4 | `AC-DELEGATION-MESSAGES`: task, accept/decline, progress, and result states are exchanged without local execution. | Partial: `crates/hrc-protocol/src/delegation.rs` covers the wire shapes, the full section 18.4 lifecycle, a task body proven to expose no executable field, progress that cannot announce a conclusion, and a result that cannot declare itself complete; `crates/hrc-core/src/delegation/tests.rs` covers an outsider reporting, a requester accepting on the assignee's behalf, an assignee completing its own work, expiry claimed by a peer, work starting before acceptance, declined and completed tasks that cannot be reopened by either side, and a rejected transition leaving state untouched. Remaining: exchanging these over a published channel and the CLI surface. |
 | HRC-GATE-001 through HRC-GATE-008 | M3 | `AC-PROMPT-GATE`: pending bodies are unavailable through agent-safe interfaces; trusted UI issues a one-use digest-bound authorization; reuse, modification, and wrong-target delivery fail. | Partial: `crates/hrc-core/src/gate/tests.rs` proves reuse, wrong-message use, ciphertext substitution under an approval, expiry, and edited-content mismatch all fail, and that hostile endpoint and kind strings never reach the agent view; `crates/hrc-core/src/rpc/tests.rs` proves the daemon boundary; `crates/hrc-cli/tests/command_contract.rs` proves the resident daemon binds separate agent-safe and trusted listeners and still refuses trusted methods on the agent-safe endpoint. Remaining: the trusted UI and the audit record of approvals. |
 | HRC-CTX-001 through HRC-CTX-007 | M4 | `AC-CONTEXT`: supported context items round-trip with previews and verified hashes; excluded paths, detected secrets, oversized objects, and malformed archives are blocked. | Partial: `crates/hrc-core/src/context/tests.rs` covers all six item kinds, digest verification, seven token shapes, credential assignments, twelve excluded paths, and false-positive resistance on placeholders and ordinary code. Remaining: git-ignored path checking, attachment size limits, and archive handling. |
 | HRC-SYNC-001 through HRC-SYNC-010 | M2 | `AC-GIT-SYNC`: offline queues recover; concurrent peers publish without manual merges; lost responses deduplicate; non-descendant history and changed objects halt processing. | Partial: `crates/hrc-core/src/sync/tests.rs` covers cursor resumption, conflict retry, security-conflict halting, history-rewrite halting, sticky halts, and adapter-reported anomalies; `crates/hrc-transport-git/tests/git_adapter.rs` covers concurrent peers publishing without manual merges; `crates/hrc-cli/src/commands/tests.rs` proves `hrc sync --once` gates fetches on the remote head and publishes queued messages to a real Git remote, and that `daemon_tick` keeps good channels running while surfacing per-channel failures. Remaining: deduplication on replay and end-to-end restart coverage. |
@@ -2438,7 +2455,7 @@ Every implementation PR must update this table.
 | M1 Secure foundation | 99% | Adds the framed local IPC layer, verified against a Unix socket and a Windows named pipe on CI, closing the compatibility spike | Local IPC | Persist the principal key, then integrate an OS keychain backend |
 | M2 Git messaging | 90% | Adds the synchronization engine plus real `hrc sync --once`, `hrc daemon`, `hrc audit`, and live daemon IPC hosting over the local store and Git transport | Daemon IPC hosting | Add receipts, threading, deduplication, end-to-end restart coverage, and audit decision recording |
 | M3 Herdr integration | 55% | Adds the daemon's two local interfaces as two request and response types, and now hosts them from the resident daemon so agent-safe callers still cannot name a pending body | Live daemon boundary | Build the trusted approval TUI, then the Herdr inbox UI |
-| M4 Context/delegation | 30% | Context packages with previews, digest verification, default path exclusions, and blocking secret scanning | Context packages | Add git-ignored path checking and attachment limits, then structured delegation messages |
+| M4 Context/delegation | 50% | Adds structured delegation: the section 18.4 lifecycle, party rules for who may report what, and a task shape with nothing executable in it | Delegation messages | Add git-ignored path checking and attachment limits, then wire delegation to the CLI |
 | M5 Provider ecosystem | 0% | Not started | N/A | Deferred until core protocol stabilizes |
 
 ### Requirement completion summary
@@ -2524,6 +2541,7 @@ recorded either directly in this PRD or in a stable linked artifact.
 | DEC-016 | RFC 8785 canonical JSON uses a pinned Rust implementation, initially `serde_jcs`, guarded by protocol vectors. | Accepted | Avoids custom canonicalization while making signed bytes interoperable. |
 | DEC-017 | Build and test run in a separate `pull_request` workflow rather than being added to the `pull_request_target` traceability workflow. | Accepted | Compiling and running pull-request code under `pull_request_target` would hand a write-capable, secret-bearing context to untrusted code; the two triggers stay separated. |
 | DEC-018 | The CLI publishes a fixed numeric exit-code contract: 0 success, 1 runtime failure, 2 usage, 3 unimplemented, 4 authorization required. | Accepted | PRD section 11.1 requires documented exit codes, and the Herdr plugin and skill must branch on stable numbers rather than parsing prose. |
+| DEC-044 | Delegation state changes are checked against both the lifecycle and the party reporting them, and terminal states are final. | Accepted | A lifecycle check alone would let an assignee accept a task on its own behalf and then declare its own work reviewed and complete, which is the judgement the requester is supposed to make. Making terminal states final stops a closed task from being reopened by whoever speaks last. |
 | DEC-043 | A receipt is accepted only from a device that was an intended recipient of every message it names, and receipt state is per device rather than per message. | Accepted | A signature proves who sent a receipt, not that they were ever entitled to report on the message it names; without the recipient check any channel member could tell a sender their message landed. Per-device state keeps the sender's picture honest, since one device reporting delivery says nothing about the other devices the message was addressed to. |
 | DEC-042 | Inbound messages are ordered by local arrival, and a message whose predecessor is missing is held rather than dropped or accepted early. | Accepted | `createdAt` is sender-chosen, so a backdated message could otherwise be placed anywhere in a recipient's view of a thread. Holding rather than dropping keeps lazy and partial fetching workable; holding rather than accepting keeps per-device order a guarantee. A fabricated predecessor and a genuinely missing one are indistinguishable at the receiver, and holding is the correct answer to both: whoever invented a link cannot produce it. |
 | DEC-041 | Local IPC lives in its own `hrc-ipc` crate, and a connection's authority comes from the endpoint that accepted it. | Accepted | Both the daemon and the trusted UI need the transport, and `hrc-core` is the only crate they share — putting it there would pull Tokio and `interprocess` into the pure-logic crates. Keeping authority in the endpoint rather than in a field of the request means a caller cannot name its own surface. |
