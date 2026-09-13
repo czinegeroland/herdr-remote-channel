@@ -153,6 +153,70 @@ impl PrincipalSecrets {
     }
 }
 
+/// An invite secret held by the administrator who issued it.
+///
+/// Retained deliberately. The secret's whole purpose is to be checked later
+/// by its issuer: a join request proves possession of it, and verifying that
+/// proof needs the same value. What must never happen is publishing it to the
+/// channel or emitting it in machine-readable output — not holding it at all.
+///
+/// It lives in the key store rather than in the database so it gets the same
+/// passphrase protection at rest as a signing key, and it is deleted once the
+/// invite is spent or withdrawn.
+pub struct InviteSecret {
+    code: SecretString,
+}
+
+impl std::fmt::Debug for InviteSecret {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("InviteSecret(<redacted>)")
+    }
+}
+
+impl InviteSecret {
+    /// Wraps an invite code for storage.
+    pub fn new(code: impl Into<String>) -> Self {
+        Self {
+            code: SecretString::from(code.into()),
+        }
+    }
+
+    /// The stored invite code.
+    pub fn code(&self) -> &str {
+        self.code.expose_secret()
+    }
+}
+
+impl ProtectedSecret for InviteSecret {
+    fn to_protected_bytes(&self) -> Zeroizing<Vec<u8>> {
+        let document = serde_json::json!({
+            "version": 1,
+            "kind": "invite",
+            "code": self.code.expose_secret(),
+        });
+
+        Zeroizing::new(document.to_string().into_bytes())
+    }
+
+    fn from_protected_bytes(bytes: &[u8]) -> Result<Self> {
+        let document: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|_| CryptoError::CorruptKeyStore)?;
+
+        if document.get("version").and_then(serde_json::Value::as_u64) != Some(1)
+            || document.get("kind").and_then(serde_json::Value::as_str) != Some("invite")
+        {
+            return Err(CryptoError::CorruptKeyStore);
+        }
+
+        let code = document
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(CryptoError::CorruptKeyStore)?;
+
+        Ok(Self::new(code))
+    }
+}
+
 /// Something that can be protected at rest by a key store.
 ///
 /// The store encrypts bytes; what those bytes mean is the secret's business.
