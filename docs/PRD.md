@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-14T09:20:00+02:00 |
+| Last updated | 2026-09-14T11:40:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -515,9 +515,9 @@ The Herdr plugin must expose:
 
 | ID | Requirement | Priority | Status | Evidence |
 |---|---|---:|---|---|
-| HRC-MSG-001 | Send encrypted notes. | Must | In progress | `crates/hrc-core/src/message.rs` seals and opens notes; the CLI and transport wiring are pending |
-| HRC-MSG-002 | Send questions and correlated answers. | Must | In progress | `crates/hrc-core/src/receipt.rs` `correlate_answer` ties an answer to a question this installation actually asked, in the thread it was asked in; the CLI surface for asking and answering is pending |
-| HRC-MSG-003 | Maintain threaded conversations. | Must | In progress | `crates/hrc-storage/src/lib.rs` `thread_entries` reads a thread in local arrival order rather than sender-declared order; composing replies into a thread from the CLI is pending |
+| HRC-MSG-001 | Send encrypted notes. | Must | Implemented | `hrc send` seals against the roster-derived recipient set and publishes to the transport; `hrc sync --once` fetches, decrypts, and quarantines, proven end to end with the plaintext absent from the published repository |
+| HRC-MSG-002 | Send questions and correlated answers. | Must | Implemented | `crates/hrc-core/src/receipt.rs` `correlate_answer` ties an answer to a question this installation asked, and `hrc ask` and `hrc reply` carry it, with the reply's thread read from local state rather than chosen by the sender |
+| HRC-MSG-003 | Maintain threaded conversations. | Must | Implemented | `crates/hrc-storage/src/lib.rs` `thread_entries` reads a thread in local arrival order, and `hrc thread` renders it with quarantined bodies redacted |
 | HRC-MSG-004 | Produce delivery and optional read receipts. | Must | Implemented | `crates/hrc-protocol/src/receipt.rs` defines the body, `crates/hrc-core/src/receipt.rs` builds receipts and refuses one from a device that was never an intended recipient, and `crates/hrc-storage/src/lib.rs` records state per reporting device |
 | HRC-MSG-005 | Support message expiration. | Must | In progress | `crates/hrc-core/src/message.rs` refuses expired messages on open; expiry display and sweeping are pending |
 | HRC-MSG-006 | Deduplicate at-least-once deliveries. | Must | Implemented | `crates/hrc-storage/src/lib.rs` `record_inbound` treats a repeat of the same message ID and ciphertext digest as ordinary traffic, and the same ID with a different digest as a substitution rather than a repeat |
@@ -564,7 +564,7 @@ The Herdr plugin must expose:
 | HRC-SYNC-007 | Never force-push during normal operation. | Must | Implemented | `crates/hrc-transport-git/src/lib.rs`: no code path passes `--force` or a `+` refspec when pushing |
 | HRC-SYNC-008 | Re-encrypt unpublished messages after a roster-epoch change. | Must | Approved | Pending |
 | HRC-SYNC-009 | Back off with jitter after failures or inactivity. | Must | Implemented | `crates/hrc-core/src/sync.rs` `Backoff` and `poll_interval` |
-| HRC-SYNC-010 | Continue operating after process and Herdr restarts. | Must | In progress | `crates/hrc-storage/src/lib.rs` persists the cursor and abandoned reservations, and `crates/hrc-cli/src/commands.rs` recovers them in `sync_once` and the resident daemon loop; end-to-end restart coverage is still pending |
+| HRC-SYNC-010 | Continue operating after process and Herdr restarts. | Must | Implemented | `crates/hrc-storage/src/lib.rs` persists the cursor, held messages, and abandoned reservations across reopen; `crates/hrc-cli/tests/command_contract.rs` proves repeated synchronization neither duplicates nor loses what already arrived |
 | HRC-SYNC-011 | Allocate message ID, device sequence, predecessor chain ID, payload, and outbox record atomically. | Must | Implemented | `crates/hrc-storage/src/lib.rs` `allocate_outgoing`, proven by a 100-allocation four-thread concurrency test |
 
 ### 12.6 Transport extensibility
@@ -1407,6 +1407,11 @@ without discarding any.
 
 This envelope is the `payload` of an `hrc/v1/message` signed object. The signed
 object is then age-encrypted to the intended active recipient devices.
+
+Message identifiers are ULIDs, so identifiers generated later sort later as
+plain strings. A store can therefore order by identifier without parsing a
+timestamp out of it and without trusting a separate field that a sender
+controls.
 
 For per-device ordering, each logical message has a stable chain ID:
 
@@ -2513,7 +2518,7 @@ Every implementation PR must update this table.
 |---|---:|---|---|---|
 | M0 Product and protocol | 55% | Adds an executable adapter contract, capability declaration, and error model to the written specification | Transport contract and reference adapter | Obtain product-owner approval and complete the JSON-RPC adapter binding |
 | M1 Secure foundation | 100% | Adds real channel creation: separate principal and device keys, a self-verified genesis, and publication to a Git remote | Channel creation | Integrate an OS keychain backend |
-| M2 Git messaging | 98% | Adds the synchronization engine plus real `hrc sync --once`, `hrc daemon`, `hrc audit`, and live daemon IPC hosting over the local store and Git transport | Daemon IPC hosting | Add receipts, threading, deduplication, end-to-end restart coverage, and audit decision recording |
+| M2 Git messaging | 99% | Adds the synchronization engine plus real `hrc sync --once`, `hrc daemon`, `hrc audit`, and live daemon IPC hosting over the local store and Git transport | Daemon IPC hosting | Add receipts, threading, deduplication, end-to-end restart coverage, and audit decision recording |
 | M3 Herdr integration | 75% | Adds the daemon's two local interfaces as two request and response types, and now hosts them from the resident daemon so agent-safe callers still cannot name a pending body | Live daemon boundary | Build the trusted approval TUI, then the Herdr inbox UI |
 | M4 Context/delegation | 65% | Adds attachment limits checked before any fetch and again on arrival, and sender-chosen file names treated as hostile text | Attachment limits | Add git-ignored path checking, then wire context and delegation to the CLI |
 | M5 Provider ecosystem | 0% | Not started | N/A | Deferred until core protocol stabilizes |

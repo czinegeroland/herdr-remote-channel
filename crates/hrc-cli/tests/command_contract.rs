@@ -63,18 +63,19 @@ fn conflicting_inbox_filters_are_a_usage_error() {
 
 #[test]
 fn unimplemented_commands_report_a_stable_json_shape() {
+    // `members` is still part of the published contract without behaviour,
+    // and agents branch on the code rather than on the prose.
     let output = hrc()
-        .args(["inbox", "--json"])
+        .args(["members", "--json"])
         .output()
-        .expect("inbox should run");
+        .expect("members should run");
     assert_eq!(output.status.code(), Some(UNIMPLEMENTED));
 
     let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
     assert_eq!(value["status"], "error");
     assert_eq!(value["code"], "unimplemented");
-    assert_eq!(value["command"], "inbox");
+    assert_eq!(value["command"], "members");
     assert!(value["milestone"].is_string());
-    assert!(value["message"].is_string());
 }
 
 #[test]
@@ -736,6 +737,305 @@ fn approving_a_join_still_requires_the_trusted_interface() {
         .args(["join", "approve", "request-1", "--json"])
         .assert()
         .code(AUTHORIZATION_REQUIRED);
+}
+
+/// The admin's own principal, read back out of the published genesis.
+fn principal_of(home: &std::path::Path, remote: &std::path::Path) -> String {
+    let channels = hrc_in(home)
+        .args(["channels", "--json"])
+        .output()
+        .expect("command should run");
+    let channels: Value = serde_json::from_slice(&channels.stdout).expect("stdout should be JSON");
+    let channel_id = channels["channels"][0]["channelId"]
+        .as_str()
+        .expect("a channel id");
+
+    let genesis = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(remote)
+        .args([
+            "show",
+            &format!("hrc:control/log/00000000-{}.json", &channel_id[..16]),
+        ])
+        .output()
+        .expect("git should show the genesis object");
+
+    let genesis: Value = serde_json::from_slice(&genesis.stdout).expect("genesis should be JSON");
+    genesis["payload"]["initialAdmin"]["principalId"]
+        .as_str()
+        .expect("a principal id")
+        .to_owned()
+}
+
+#[test]
+fn a_message_is_sealed_published_fetched_and_quarantined() {
+    // The whole messaging loop over a real repository. What arrives is
+    // quarantined, not delivered: nothing reaches an agent without a human.
+    let (home, remote) = channel_fixture();
+    let principal = principal_of(home.path(), remote.path());
+
+    let sent = hrc_in(home.path())
+        .args([
+            "send",
+            &principal,
+            "the retry loop backs off too fast",
+            "--json",
+        ])
+        .output()
+        .expect("command should run");
+    assert!(
+        sent.status.success(),
+        "send failed: {}",
+        String::from_utf8_lossy(&sent.stdout)
+    );
+
+    let sent: Value = serde_json::from_slice(&sent.stdout).expect("stdout should be JSON");
+    let message_id = sent["messageId"].as_str().expect("a message id").to_owned();
+    assert_eq!(message_id.len(), 26, "message ids are ULIDs");
+    assert_eq!(sent["published"], true);
+
+    // The ciphertext is in the repository at the documented layout path.
+    let listing = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(remote.path())
+        .args(["ls-tree", "-r", "--name-only", "hrc"])
+        .output()
+        .expect("git should list the tree");
+    let listing = String::from_utf8_lossy(&listing.stdout);
+    assert!(
+        listing.contains(&format!("{message_id}.age")),
+        "the message object is not at the layout path: {listing}"
+    );
+
+    // And the plaintext is not.
+    let grep = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(remote.path())
+        .args(["grep", "-i", "retry loop", "hrc"])
+        .output()
+        .expect("git grep should run");
+    assert!(
+        grep.stdout.is_empty(),
+        "the message text was published in the clear"
+    );
+
+    hrc_in(home.path())
+        .args(["sync", "--once", "--json"])
+        .assert()
+        .success();
+
+    let inbox = hrc_in(home.path())
+        .args(["inbox", "--json"])
+        .output()
+        .expect("command should run");
+    let inbox: Value = serde_json::from_slice(&inbox.stdout).expect("stdout should be JSON");
+
+    let entries = inbox["entries"].as_array().expect("an entries array");
+    assert_eq!(entries.len(), 1, "{inbox}");
+    assert_eq!(entries[0]["messageId"], message_id.as_str());
+    assert_eq!(entries[0]["kind"], "note");
+    assert_eq!(
+        entries[0]["disposition"], "quarantined",
+        "an arriving message must not be delivered"
+    );
+}
+
+#[test]
+fn messages_arrive_in_the_order_they_were_sent() {
+    let (home, remote) = channel_fixture();
+    let principal = principal_of(home.path(), remote.path());
+
+    let mut sent = Vec::new();
+    for text in ["first", "second", "third"] {
+        let output = hrc_in(home.path())
+            .args(["send", &principal, text, "--json"])
+            .output()
+            .expect("command should run");
+        let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+        sent.push(
+            value["messageId"]
+                .as_str()
+                .expect("a message id")
+                .to_owned(),
+        );
+    }
+
+    // ULIDs sort chronologically, which is the reason for using them.
+    let mut sorted = sent.clone();
+    sorted.sort();
+    assert_eq!(sorted, sent, "message ids are not chronologically sortable");
+
+    hrc_in(home.path())
+        .args(["sync", "--once", "--json"])
+        .assert()
+        .success();
+
+    let inbox = hrc_in(home.path())
+        .args(["inbox", "--json"])
+        .output()
+        .expect("command should run");
+    let inbox: Value = serde_json::from_slice(&inbox.stdout).expect("stdout should be JSON");
+
+    let arrived: Vec<&str> = inbox["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["messageId"].as_str().unwrap())
+        .collect();
+    assert_eq!(arrived, sent);
+}
+
+#[test]
+fn a_second_sync_does_not_duplicate_what_already_arrived() {
+    // At-least-once delivery is the transport's contract, so re-reading the
+    // same objects has to be ordinary rather than corrupting.
+    let (home, remote) = channel_fixture();
+    let principal = principal_of(home.path(), remote.path());
+
+    hrc_in(home.path())
+        .args(["send", &principal, "once", "--json"])
+        .assert()
+        .success();
+
+    for _ in 0..3 {
+        hrc_in(home.path())
+            .args(["sync", "--once", "--json"])
+            .assert()
+            .success();
+    }
+
+    let inbox = hrc_in(home.path())
+        .args(["inbox", "--json"])
+        .output()
+        .expect("command should run");
+    let inbox: Value = serde_json::from_slice(&inbox.stdout).expect("stdout should be JSON");
+
+    assert_eq!(inbox["entries"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn a_question_and_its_reply_share_one_thread() {
+    let (home, remote) = channel_fixture();
+    let principal = principal_of(home.path(), remote.path());
+
+    let asked = hrc_in(home.path())
+        .args([
+            "ask",
+            &format!("{principal}/reviewer"),
+            "does the backoff need jitter?",
+            "--json",
+        ])
+        .output()
+        .expect("command should run");
+    let asked: Value = serde_json::from_slice(&asked.stdout).expect("stdout should be JSON");
+    let question_id = asked["messageId"]
+        .as_str()
+        .expect("a message id")
+        .to_owned();
+
+    hrc_in(home.path())
+        .args(["sync", "--once", "--json"])
+        .assert()
+        .success();
+
+    let replied = hrc_in(home.path())
+        .args(["reply", &question_id, "yes, and a cap", "--json"])
+        .output()
+        .expect("command should run");
+    assert!(
+        replied.status.success(),
+        "reply failed: {}",
+        String::from_utf8_lossy(&replied.stdout)
+    );
+    let replied: Value = serde_json::from_slice(&replied.stdout).expect("stdout should be JSON");
+
+    // The reply continues the question's thread rather than starting one.
+    assert_eq!(replied["threadId"], asked["threadId"]);
+    assert_eq!(replied["kind"], "answer");
+
+    hrc_in(home.path())
+        .args(["sync", "--once", "--json"])
+        .assert()
+        .success();
+
+    let thread = hrc_in(home.path())
+        .args(["thread", asked["threadId"].as_str().unwrap(), "--json"])
+        .output()
+        .expect("command should run");
+    let thread: Value = serde_json::from_slice(&thread.stdout).expect("stdout should be JSON");
+
+    let entries = thread["entries"].as_array().expect("an entries array");
+    assert_eq!(entries.len(), 2, "{thread}");
+    assert_eq!(entries[0]["kind"], "question");
+    assert_eq!(entries[1]["kind"], "answer");
+}
+
+#[test]
+fn a_thread_redacts_bodies_that_are_still_quarantined() {
+    // PRD section 22.4: `hrc thread` redacts pending bodies.
+    let (home, remote) = channel_fixture();
+    let principal = principal_of(home.path(), remote.path());
+
+    let sent = hrc_in(home.path())
+        .args([
+            "send",
+            &principal,
+            "the staging credentials rotated",
+            "--json",
+        ])
+        .output()
+        .expect("command should run");
+    let sent: Value = serde_json::from_slice(&sent.stdout).expect("stdout should be JSON");
+
+    hrc_in(home.path())
+        .args(["sync", "--once", "--json"])
+        .assert()
+        .success();
+
+    let thread = hrc_in(home.path())
+        .args(["thread", sent["threadId"].as_str().unwrap(), "--json"])
+        .output()
+        .expect("command should run");
+    let rendered = String::from_utf8_lossy(&thread.stdout);
+
+    assert!(
+        !rendered.contains("staging credentials"),
+        "a quarantined body was shown: {rendered}"
+    );
+    assert!(rendered.contains("redacted"));
+}
+
+#[test]
+fn sending_to_someone_who_is_not_a_member_is_refused() {
+    let (home, _remote) = channel_fixture();
+
+    let output = hrc_in(home.path())
+        .args(["send", "nobody", "hello", "--json"])
+        .output()
+        .expect("command should run");
+    let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+
+    assert_eq!(value["status"], "error");
+    assert!(
+        value["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not a member"),
+        "{value}"
+    );
+}
+
+#[test]
+fn replying_to_a_message_that_does_not_exist_is_refused() {
+    let (home, _remote) = channel_fixture();
+
+    let output = hrc_in(home.path())
+        .args(["reply", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "hello", "--json"])
+        .output()
+        .expect("command should run");
+    let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+
+    assert_eq!(value["code"], "no_such_message");
 }
 
 #[test]

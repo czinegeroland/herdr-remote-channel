@@ -162,6 +162,20 @@ fn run(cli: &Cli, _path: &str) -> std::result::Result<Value, Failure> {
             // boundary, so anything reaching here is a private channel.
             commands::create(&context, &args.repo, None).map_err(Failure::from)
         }
+        Command::Send(args) => {
+            commands::send(&context, &args.recipient, &args.message).map_err(Failure::from)
+        }
+        Command::Ask(args) => {
+            commands::ask(&context, &args.recipient, &args.question).map_err(Failure::from)
+        }
+        Command::Reply(args) => commands::reply(
+            &context,
+            &args.message_id,
+            args.message.as_deref().unwrap_or_default(),
+        )
+        .map_err(Failure::from),
+        Command::Inbox(args) => commands::inbox(&context, args.pending).map_err(Failure::from),
+        Command::Thread(args) => commands::thread(&context, &args.thread_id).map_err(Failure::from),
         Command::Join(join) => match (&join.invite_code, &join.action) {
             (Some(code), _) => commands::join(&context, code).map_err(Failure::from),
             (None, Some(cli::JoinAction::Pending)) => {
