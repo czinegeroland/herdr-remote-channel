@@ -294,6 +294,15 @@ pub enum CoreError {
         expires_at: String,
     },
 
+    /// Protected outbox material disagreed with its durable allocation.
+    #[error("protected outbox material for message {message_id} changed {field}")]
+    OutboxMessageMismatch {
+        /// The affected message.
+        message_id: String,
+        /// Stable field that did not match.
+        field: &'static str,
+    },
+
     /// A channel is not registered in local state.
     #[error("channel {channel_id} has no local state")]
     UnknownChannelState {

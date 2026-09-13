@@ -58,6 +58,53 @@ fn migration_is_idempotent_across_reopen() {
 }
 
 #[test]
+fn version_five_outbox_rows_migrate_without_becoming_publishable_at_a_new_epoch() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite");
+    let connection = Connection::open(&path).unwrap();
+    for migration in [
+        include_str!("migrations/001_initial.sql"),
+        include_str!("migrations/002_inbound_order.sql"),
+        include_str!("migrations/003_receipts.sql"),
+        include_str!("migrations/004_decision_audit.sql"),
+        include_str!("migrations/005_invites.sql"),
+    ] {
+        connection.execute_batch(migration).unwrap();
+    }
+    connection.pragma_update(None, "user_version", 5).unwrap();
+    connection
+        .execute(
+            "INSERT INTO channel (
+                 channel_id, transport_kind, transport_locator, local_name, created_at
+             ) VALUES (?1, 'git', 'owner/channel', 'Test channel', ?2)",
+            params![CHANNEL, NOW],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO outbox (
+                 message_id, channel_id, device_id, device_sequence, chain_id,
+                 roster_epoch, payload_hash, ciphertext, state, created_at, updated_at
+             ) VALUES (
+                 'msg-1', ?1, ?2, 1, 'chain-1', 1, 'hash-1',
+                 X'63697068657274657874', 'queued', ?3, ?3
+             )",
+            params![CHANNEL, DEVICE, NOW],
+        )
+        .unwrap();
+    drop(connection);
+
+    let migrated = Database::open(&path).unwrap();
+    let record = migrated
+        .pending_outgoing_records(CHANNEL)
+        .unwrap()
+        .remove(0);
+    assert_eq!(record.ciphertext, b"ciphertext");
+    assert_eq!(record.roster_epoch, 1);
+    assert_eq!(record.reseal_material, None);
+}
+
+#[test]
 fn a_database_from_a_newer_build_is_refused() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.sqlite");
@@ -366,18 +413,61 @@ fn recovery_leaves_queued_messages_alone() {
 #[test]
 fn pending_outgoing_records_include_ciphertext_and_created_at() {
     let mut database = database();
-    database
+    let reservation = database
         .allocate_outgoing(CHANNEL, DEVICE, "msg-1", 1, "hash", NOW)
         .unwrap();
     database
-        .queue_outgoing("msg-1", b"ciphertext", NOW)
+        .queue_outgoing_resealable("msg-1", b"ciphertext", Some(b"protected-envelope"), NOW)
         .unwrap();
 
     let records = database.pending_outgoing_records(CHANNEL).unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].message_id, "msg-1");
+    assert_eq!(records[0].device_id, DEVICE);
+    assert_eq!(records[0].device_sequence, reservation.device_sequence);
+    assert_eq!(records[0].chain_id, reservation.chain_id);
+    assert_eq!(records[0].previous_chain_id, reservation.previous_chain_id);
+    assert_eq!(records[0].roster_epoch, 1);
+    assert_eq!(records[0].payload_hash, "hash");
     assert_eq!(records[0].created_at, NOW);
     assert_eq!(records[0].ciphertext, b"ciphertext");
+    assert_eq!(
+        records[0].reseal_material.as_deref(),
+        Some(b"protected-envelope".as_slice())
+    );
+}
+
+#[test]
+fn replacing_stale_ciphertext_preserves_the_logical_allocation() {
+    let mut database = database();
+    let reservation = database
+        .allocate_outgoing(CHANNEL, DEVICE, "msg-1", 1, "payload-hash", NOW)
+        .unwrap();
+    database
+        .queue_outgoing_resealable("msg-1", b"old", Some(b"protected-envelope"), NOW)
+        .unwrap();
+
+    database
+        .replace_outgoing_ciphertext("msg-1", 1, 2, b"new", "2026-09-13T00:01:00Z")
+        .unwrap();
+
+    let record = database
+        .pending_outgoing_records(CHANNEL)
+        .unwrap()
+        .remove(0);
+    assert_eq!(record.message_id, "msg-1");
+    assert_eq!(record.device_id, DEVICE);
+    assert_eq!(record.device_sequence, reservation.device_sequence);
+    assert_eq!(record.chain_id, reservation.chain_id);
+    assert_eq!(record.previous_chain_id, reservation.previous_chain_id);
+    assert_eq!(record.roster_epoch, 2);
+    assert_eq!(record.payload_hash, "payload-hash");
+    assert_eq!(record.created_at, NOW);
+    assert_eq!(record.ciphertext, b"new");
+    assert_eq!(
+        record.reseal_material.as_deref(),
+        Some(b"protected-envelope".as_slice())
+    );
 }
 
 #[test]

@@ -19,6 +19,7 @@ use hrc_protocol::canonical;
 use hrc_protocol::domain;
 use hrc_protocol::message::MessageEnvelope;
 use hrc_protocol::signed::{SignedObject, Signer};
+use hrc_storage::PendingOutgoing;
 
 use crate::error::{CoreError, Result};
 use crate::roster::Roster;
@@ -102,6 +103,106 @@ pub fn seal(
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
     Ok(encrypt_to(&age_recipients, &plaintext)?)
+}
+
+/// Rebuilds queued ciphertext for the roster that will introduce it.
+///
+/// The protected material contains the original logical envelope. Every
+/// identity-bearing field is checked against the durable outbox allocation
+/// before only the roster epoch, recipient commitment, and padding are
+/// refreshed.
+pub fn reseal_outgoing(
+    roster: &Roster,
+    identity: &DeviceIdentity,
+    signing_key: &SigningKey,
+    outgoing: &PendingOutgoing,
+) -> Result<Vec<u8>> {
+    let material =
+        outgoing
+            .reseal_material
+            .as_deref()
+            .ok_or_else(|| CoreError::OutboxMessageMismatch {
+                message_id: outgoing.message_id.clone(),
+                field: "re-encryption material",
+            })?;
+    let plaintext = identity.decrypt(material)?;
+    let text = std::str::from_utf8(&plaintext).map_err(|_| CoreError::MalformedMessage {
+        reason: "protected outbox material is not UTF-8".into(),
+    })?;
+    let mut envelope: MessageEnvelope = canonical::from_json_str(text)?;
+
+    check_outbox_field(
+        &outgoing.message_id,
+        envelope.channel_id == *roster.channel_id(),
+        "channel ID",
+    )?;
+    check_outbox_field(
+        &outgoing.message_id,
+        envelope.message_id == outgoing.message_id,
+        "message ID",
+    )?;
+    check_outbox_field(
+        &outgoing.message_id,
+        envelope.device_sequence == outgoing.device_sequence,
+        "device sequence",
+    )?;
+    check_outbox_field(
+        &outgoing.message_id,
+        envelope.previous_chain_id == outgoing.previous_chain_id,
+        "previous chain ID",
+    )?;
+    check_outbox_field(
+        &outgoing.message_id,
+        envelope.created_at == outgoing.created_at,
+        "creation time",
+    )?;
+    check_outbox_field(
+        &outgoing.message_id,
+        canonical::canonical_sha256_hex(&envelope.body)? == outgoing.payload_hash,
+        "payload hash",
+    )?;
+    check_outbox_field(
+        &outgoing.message_id,
+        hrc_storage::chain_id_for(
+            roster.channel_id(),
+            &outgoing.device_id,
+            outgoing.device_sequence,
+            &outgoing.message_id,
+        )? == outgoing.chain_id,
+        "chain ID",
+    )?;
+
+    let sender = roster
+        .device(&outgoing.device_id)
+        .ok_or_else(|| CoreError::UnknownDevice {
+            device_id: outgoing.device_id.clone(),
+        })?;
+    check_outbox_field(
+        &outgoing.message_id,
+        signing_key.verifying_key().to_base64url() == sender.signing_key,
+        "signing key",
+    )?;
+    envelope.roster_epoch = roster.epoch();
+
+    seal(
+        roster,
+        signing_key,
+        Signer {
+            principal_id: sender.principal_id.clone(),
+            device_id: outgoing.device_id.clone(),
+        },
+        envelope,
+    )
+}
+
+fn check_outbox_field(message_id: &str, matches: bool, field: &'static str) -> Result<()> {
+    if !matches {
+        return Err(CoreError::OutboxMessageMismatch {
+            message_id: message_id.to_owned(),
+            field,
+        });
+    }
+    Ok(())
 }
 
 /// Resolves the devices a message should be encrypted to.

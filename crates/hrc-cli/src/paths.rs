@@ -71,19 +71,6 @@ impl Paths {
     }
 
     /// Creates the state directory if it does not exist.
-    /// The key store passphrase, when the environment supplies one.
-    ///
-    /// Read here rather than threaded through every call site, because the
-    /// synchronization pass runs in contexts that may or may not be able to
-    /// unlock the store, and a locked installation should keep its queue
-    /// moving rather than fail.
-    pub fn stored_passphrase(&self) -> Option<secrecy::SecretString> {
-        std::env::var(crate::commands::PASSPHRASE_VARIABLE)
-            .ok()
-            .filter(|value| !value.is_empty())
-            .map(secrecy::SecretString::from)
-    }
-
     pub fn ensure(&self) -> Result<()> {
         std::fs::create_dir_all(&self.home).map_err(|source| CliError::Io {
             action: "create the state directory",

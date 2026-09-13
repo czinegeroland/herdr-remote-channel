@@ -51,10 +51,24 @@ pub struct OutgoingReservation {
 pub struct PendingOutgoing {
     /// Sortable message identifier.
     pub message_id: String,
+    /// Sending device whose sequence and chain this message occupies.
+    pub device_id: String,
+    /// Position in the sending device's chain.
+    pub device_sequence: u64,
+    /// Chain ID derived from the stable message identity fields.
+    pub chain_id: String,
+    /// Chain ID of the preceding message from this device, if any.
+    pub previous_chain_id: Option<String>,
+    /// Roster epoch the current ciphertext was sealed for.
+    pub roster_epoch: u64,
+    /// Hash of the logical body, stable across re-encryption.
+    pub payload_hash: String,
     /// RFC 3339 UTC creation time used for the message object path.
     pub created_at: String,
     /// Stored ciphertext bytes.
     pub ciphertext: Vec<u8>,
+    /// Locally encrypted logical envelope used only when re-encryption is required.
+    pub reseal_material: Option<Vec<u8>>,
 }
 
 /// State of an outbox record.
@@ -976,10 +990,57 @@ impl Database {
 
     /// Attaches ciphertext to a reserved slot and queues it for publication.
     pub fn queue_outgoing(&self, message_id: &str, ciphertext: &[u8], now: &str) -> Result<()> {
+        self.queue_outgoing_resealable(message_id, ciphertext, None, now)
+    }
+
+    /// Attaches ciphertext and protected re-encryption material to a reserved slot.
+    pub fn queue_outgoing_resealable(
+        &self,
+        message_id: &str,
+        ciphertext: &[u8],
+        reseal_material: Option<&[u8]>,
+        now: &str,
+    ) -> Result<()> {
         let updated = self.connection.execute(
-            "UPDATE outbox SET ciphertext = ?2, state = 'queued', updated_at = ?3
+            "UPDATE outbox
+             SET ciphertext = ?2, reseal_material = COALESCE(?3, reseal_material),
+                 state = 'queued', updated_at = ?4
              WHERE message_id = ?1 AND state IN ('reserved', 'queued')",
-            params![message_id, ciphertext, now],
+            params![message_id, ciphertext, reseal_material, now],
+        )?;
+
+        if updated == 0 {
+            return Err(StorageError::UnknownMessage {
+                message_id: message_id.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Atomically replaces stale ciphertext with bytes sealed for a newer roster.
+    ///
+    /// Only the epoch and ciphertext change. Message identity, chain position,
+    /// thread data (inside the protected envelope), and payload hash remain
+    /// untouched.
+    pub fn replace_outgoing_ciphertext(
+        &self,
+        message_id: &str,
+        expected_epoch: u64,
+        roster_epoch: u64,
+        ciphertext: &[u8],
+        now: &str,
+    ) -> Result<()> {
+        let updated = self.connection.execute(
+            "UPDATE outbox SET roster_epoch = ?3, ciphertext = ?4, updated_at = ?5
+             WHERE message_id = ?1 AND roster_epoch = ?2
+               AND state IN ('queued', 'publishing')",
+            params![
+                message_id,
+                expected_epoch as i64,
+                roster_epoch as i64,
+                ciphertext,
+                now
+            ],
         )?;
 
         if updated == 0 {
@@ -1039,15 +1100,25 @@ impl Database {
     /// Queued outbox records with the bytes needed for publication, in send order.
     pub fn pending_outgoing_records(&self, channel_id: &str) -> Result<Vec<PendingOutgoing>> {
         let mut statement = self.connection.prepare(
-            "SELECT message_id, created_at, ciphertext FROM outbox
+            "SELECT message_id, device_id, device_sequence, chain_id,
+                    previous_chain_id, roster_epoch, payload_hash, created_at,
+                    ciphertext, reseal_material
+             FROM outbox
              WHERE channel_id = ?1 AND state IN ('queued', 'publishing')
              ORDER BY device_sequence",
         )?;
         let rows = statement.query_map(params![channel_id], |row| {
             Ok(PendingOutgoing {
                 message_id: row.get(0)?,
-                created_at: row.get(1)?,
-                ciphertext: row.get(2)?,
+                device_id: row.get(1)?,
+                device_sequence: row.get::<_, i64>(2)? as u64,
+                chain_id: row.get(3)?,
+                previous_chain_id: row.get(4)?,
+                roster_epoch: row.get::<_, i64>(5)? as u64,
+                payload_hash: row.get(6)?,
+                created_at: row.get(7)?,
+                ciphertext: row.get(8)?,
+                reseal_material: row.get(9)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
