@@ -10,16 +10,7 @@ permissions:
 jobs:
   validate-prd:
     name: PRD traceability
-    # Self-hosted, like the rest of CI. The validator is PowerShell, which is
-    # native here, and it only ever reads: it checks out the trusted base
-    # revision and fetches the pull request's objects without building or
-    # running any of them (decision DEC-014).
-    runs-on: [self-hosted, windows]
-    defaults:
-      run:
-        # `cmd`, for the reasons recorded in the build workflow. The
-        # validator itself is PowerShell and is invoked explicitly below.
-        shell: cmd
+    runs-on: ubuntu-latest
 
     steps:
       - name: Check out trusted base revision
@@ -29,19 +20,15 @@ jobs:
           fetch-depth: 0
 
       - name: Fetch untrusted pull request objects
+        shell: pwsh
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: git fetch --no-tags origin "pull/%PR_NUMBER%/head"
+        run: git fetch --no-tags origin "pull/$env:PR_NUMBER/head"
 
       - name: Validate living PRD
-        # Invoked through `-File` with an explicit policy for this process
-        # only: the default execution policy on a Windows machine refuses to
-        # run script files, and changing the machine's policy to suit CI
-        # would be a wider grant than one job needs. The validator uses no
-        # syntax newer than Windows PowerShell 5.1.
+        shell: pwsh
         run: >
-          powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass
-          -File .github/scripts/check-prd-traceability.ps1
+          .github/scripts/check-prd-traceability.ps1
           -BaseSha '${{ github.event.pull_request.base.sha }}'
           -HeadSha '${{ github.event.pull_request.head.sha }}'
           -EventPath '${{ github.event_path }}'

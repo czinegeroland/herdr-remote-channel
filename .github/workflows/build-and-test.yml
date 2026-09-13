@@ -4,29 +4,17 @@ name: Build and test
 # execute trusted base-branch code (PRD decision DEC-014). This workflow
 # compiles and runs pull-request code, so it deliberately uses the untrusted
 # `pull_request` trigger with a read-only token instead.
-#
-# Routine verification runs on a self-hosted runner. The GitHub-hosted
-# three-platform matrix still exists and is still what PRD acceptance suite
-# AC-RUST-FOUNDATION requires, but it is now triggered on demand rather than
-# on every push: see decision DEC-048.
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
-    inputs:
-      hosted_matrix:
-        description: Also run the GitHub-hosted Linux, macOS, and Windows matrix
-        type: boolean
-        default: true
 
 permissions:
   contents: read
 
 concurrency:
   group: build-and-test-${{ github.workflow }}-${{ github.ref }}
-  # A self-hosted runner is one machine. Superseded runs are cancelled so a
-  # queue cannot build up behind a branch that has already moved on.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -36,42 +24,30 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
-  verify:
-    name: Format, lint, build, and test
-    # One job rather than two, because a self-hosted runner is a single
-    # machine: splitting them would serialize anyway and pay the checkout and
-    # dependency-resolution cost twice.
-    runs-on: [self-hosted, windows]
-    defaults:
-      run:
-        # `cmd`, because it is the one shell a Windows machine is guaranteed
-        # to have and the one that needs no resolution. The alternatives each
-        # failed on a real runner: `pwsh` is a separate install; `powershell`
-        # is blocked by the default execution policy from running the script
-        # files Actions generates; and `bash` resolved to WSL's bash, which
-        # cannot read the `C:\...` path it was handed.
-        #
-        # `cmd` only propagates the exit code of the last command in a step,
-        # so multi-command steps chain with `&&` and a failure short-circuits
-        # to the end.
-        shell: cmd
+  lint:
+    name: Format and lint
+    runs-on: ubuntu-latest
     steps:
       - name: Check out the pull request
         uses: actions/checkout@v4
 
-      - name: Report the toolchain
-        # Reported before anything else runs, so a runner missing `rustup`
-        # says so here rather than through a confusing failure later.
-        run: >
+      - name: Install the pinned toolchain
+        run: |
           rustup toolchain install stable --profile minimal --component rustfmt,clippy
-          && rustup default stable
-          && rustc --version
-          && cargo --version
+          rustup default stable
+          rustc --version
+          cargo --version
 
-      # No dependency cache step here on purpose. A self-hosted runner keeps
-      # its own `target` directory and cargo registry between runs, so
-      # restoring an archive over the top of them is slower than the
-      # incremental build it replaces.
+      - name: Cache cargo registry and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-lint-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-lint-${{ runner.os }}-
 
       - name: Check formatting
         run: cargo fmt --all --check
@@ -79,24 +55,10 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      - name: Build the workspace
-        run: cargo build --workspace --all-targets --locked
-
-      - name: Run the test suite
-        run: cargo test --workspace --locked
-
-      - name: Smoke-test the hrc executable
-        run: >
-          cargo run --locked --quiet --bin hrc -- --version
-          && cargo run --locked --quiet --bin hrc -- --help > nul
-
-  hosted-matrix:
+  test:
     name: Build and test (${{ matrix.os }})
     # PRD acceptance suite AC-RUST-FOUNDATION requires the workspace to build
-    # and the CLI contract tests to pass on Windows, macOS, and Linux. That
-    # is still the standard; this job is how it is met, run deliberately
-    # rather than on every push while hosted minutes are scarce.
-    if: github.event_name == 'workflow_dispatch' && inputs.hosted_matrix
+    # and the CLI contract tests to pass on Windows, macOS, and Linux.
     strategy:
       fail-fast: false
       matrix:
