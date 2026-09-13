@@ -57,3 +57,48 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
+
+# Release artifacts (PRD requirements HRC-TECH-011 and HRC-TECH-012,
+# section 13.2).
+#
+# `cargo dist` reads this. The four targets are the ones section 13.2
+# requires; Linux ARM64 is added when CI and dependency support are verified,
+# which `rusqlite`'s bundled SQLite makes a cross-compilation question rather
+# than a configuration one.
+#
+# Installing must not compile Rust on the user's machine, so the artifacts are
+# prebuilt executables rather than a source package, and the installers below
+# fetch and verify one rather than invoking cargo.
+[workspace.metadata.dist]
+cargo-dist-version = "0.28.0"
+ci = "github"
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+# Section 13.2: installation verifies a checksum before it trusts an artifact.
+checksum = "sha256"
+# `.github/workflows/release.yml` is written and reviewed by hand rather than
+# generated, and `scripts/install.sh` is this project's installer rather than
+# a generated one, so `cargo dist` is told not to expect to own either. That
+# is a deliberate difference from the usual cargo-dist setup: an installer
+# that refuses a bad checksum and a workflow that refuses to publish a
+# partial matrix are behavior this project tests, and generated files would
+# be replaced without review. See requirement HRC-TECH-011.
+allow-dirty = ["ci"]
+
+# Release builds are optimized for a single self-contained executable that
+# starts fast (PRD section 28): one codegen unit and fat LTO.
+#
+# Panics deliberately still unwind. Aborting would save a little size, but
+# `hrc daemon` is resident and serves both local interfaces from Tokio tasks,
+# where an unwinding panic takes down one task and an aborting one takes down
+# the daemon. A single malformed local request should not stop a channel
+# synchronizing.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+strip = true
