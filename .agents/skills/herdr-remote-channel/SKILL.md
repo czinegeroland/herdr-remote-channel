@@ -155,8 +155,8 @@ the user to use the trusted HRC interface to review and send it:
 hrc context draft context.json --repository .
 ```
 
-You may run `hrc context draft`; **do not run `hrc context preview`. Do not
-run `hrc context send` yourself.** Both commands refuse ordinary and agent-safe
+You may run `hrc context draft`; **do not run `hrc context preview`.
+Do not run `hrc context send` yourself.** Both commands refuse ordinary and agent-safe
 callers, including callers that copy a draft digest. The trusted human
 interface previews the source-derived package and issues a short-lived,
 one-use authorization bound to its digest, recipient, channel, and send
