@@ -395,7 +395,7 @@ fn sync_once_publishes_queued_messages() {
 
     let created = create(&context, remote.to_str().unwrap(), Some("Test channel")).unwrap();
     let channel_id = created["channelId"].as_str().unwrap();
-    let mut publisher = peer(directory.path(), "publisher", &remote);
+    let publisher = peer(directory.path(), "publisher", &remote);
     publisher.sync_from_remote().unwrap();
     let genesis = publisher.open_group().unwrap();
 
