@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-13T07:58:00+02:00 |
+| Last updated | 2026-09-13T08:41:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -505,7 +505,7 @@ The Herdr plugin must expose:
 | HRC-CH-003 | Support private repositories by default. | Must | Approved | Pending |
 | HRC-CH-004 | Support public repositories after explicit risk confirmation. | Should | Approved | Pending |
 | HRC-CH-005 | Create expiring, single-use invites. | Must | Approved | Pending |
-| HRC-CH-006 | Generate separate principal and device identities. | Must | In progress | `crates/hrc-crypto/src/store.rs` generates and persists device keys; principal key handling and the enrollment flow are pending |
+| HRC-CH-006 | Generate separate principal and device identities. | Must | In progress | `crates/hrc-cli/src/commands.rs` `hrc init` generates and persists device keys; principal key handling and the enrollment flow are pending |
 | HRC-CH-007 | Require explicit administrator approval for joins. | Must | Approved | Pending |
 | HRC-CH-008 | Support member and device revocation. | Should | In progress | `crates/hrc-core/src/roster.rs`; publication and CLI surface pending |
 | HRC-CH-009 | Maintain a signed, append-only membership/control log. | Must | Implemented | `crates/hrc-protocol/src/control.rs`, `crates/hrc-core/src/roster.rs` |
@@ -607,9 +607,9 @@ The Herdr plugin must expose:
 | ID | Requirement | Priority | Status | Evidence |
 |---|---|---:|---|---|
 | HRC-TECH-001 | Implement the production CLI, daemon, protocol, crypto, transport core, and Herdr integration in Rust 2024 edition. | Must | In progress | `Cargo.toml`, `crates/`, `.github/workflows/build-and-test.yml` |
-| HRC-TECH-002 | Ship one self-contained `hrc` executable with subcommands for CLI, daemon, Herdr actions, events, panes, and startup. | Must | In progress | `crates/hrc-cli/src/main.rs`, `crates/hrc-cli/tests/command_contract.rs` |
+| HRC-TECH-002 | Ship one self-contained `hrc` executable with subcommands for CLI, daemon, Herdr actions, events, panes, and startup. | Must | In progress | `crates/hrc-cli/src/main.rs`; `init`, `whoami`, `channels`, `status`, and `doctor` perform real work, the rest report the documented not-implemented code |
 | HRC-TECH-003 | Use Tokio for asynchronous scheduling, process management, polling, and cancellation. | Must | Approved | Decision DEC-015 |
-| HRC-TECH-004 | Use Clap for the public CLI and stable machine-readable command contracts. | Must | In progress | `crates/hrc-cli/src/cli.rs`, `crates/hrc-cli/src/exit.rs`, `crates/hrc-cli/tests/command_contract.rs` |
+| HRC-TECH-004 | Use Clap for the public CLI and stable machine-readable command contracts. | Must | Implemented | `crates/hrc-cli/src/cli.rs`, `crates/hrc-cli/src/render.rs`: both output modes render one value, so JSON and human output cannot diverge |
 | HRC-TECH-005 | Use Serde/serde_json and a pinned RFC 8785 implementation with protocol test vectors. | Must | In progress | `crates/hrc-protocol/src/canonical.rs`, `crates/hrc-protocol/tests/rfc8785_vectors.rs` |
 | HRC-TECH-006 | Use maintained Rust cryptography crates, including `age` and `ed25519-dalek`, without custom cryptographic primitives. | Must | Implemented | `crates/hrc-crypto/src/lib.rs` (Ed25519), `crates/hrc-crypto/src/encryption.rs` (age X25519) |
 | HRC-TECH-007 | Store durable local state in SQLite using `rusqlite` with WAL mode and transactional allocation. | Must | Implemented | `crates/hrc-storage/src/lib.rs`, `crates/hrc-storage/src/migrations/001_initial.sql` |
@@ -2157,6 +2157,18 @@ npx skills add <owner>/herdr-remote-channel `
 - Last transport error
 - Current backoff
 
+The state directory is `HRC_HOME` when set, and otherwise the platform
+convention: `%APPDATA%\hrc` on Windows, `$XDG_DATA_HOME/hrc` or
+`~/.local/share/hrc` on Linux, and `~/Library/Application Support/hrc` on
+macOS.
+
+A command that needs the key store reads its passphrase from
+`HRC_PASSPHRASE`. That variable is visible to other processes running as the
+same user, so it is an explicit opt-in for automation rather than the
+recommended path for a person at a terminal. When it is absent, the command
+fails with a usage error naming the variable; it never prompts, because the
+daemon and CI have no terminal to prompt on.
+
 `hrc doctor` must verify:
 
 - CLI and protocol versions
@@ -2306,7 +2318,7 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 | HRC-TECH-009 | M1 | `AC-RUST-IPC`: the selected IPC implementation exchanges framed requests over Unix-domain sockets and Windows named pipes with reconnect and permission tests. | Pending |
 | HRC-TECH-003, HRC-TECH-007, HRC-TECH-010 | M2 | `AC-RUST-DAEMON`: Tokio daemon, WAL-backed SQLite state, transactional allocation, and system-Git synchronization pass crash/retry integration tests. | Pending |
 | HRC-TECH-008 | M3 | `AC-RUST-TUI`: ratatui/crossterm inbox and approval flows pass terminal interaction tests on supported platforms. | Pending |
-| HRC-TECH-002 | M3 | `AC-SINGLE-BINARY`: one `hrc` executable successfully dispatches CLI, daemon, Herdr startup/action/event, and pane modes. | Partial: the single binary parses and dispatches every mode (`crates/hrc-cli/tests/command_contract.rs`). Remaining: the modes must perform their work. |
+| HRC-TECH-002 | M3 | `AC-SINGLE-BINARY`: one `hrc` executable successfully dispatches CLI, daemon, Herdr startup/action/event, and pane modes. | Partial: the binary parses and dispatches every mode, and five commands perform real work end to end (`crates/hrc-cli/tests/command_contract.rs`). Remaining: daemon, Herdr, and channel modes. |
 | HRC-TECH-011, HRC-TECH-012 | M3 | `AC-RELEASE-ARTIFACTS`: cargo-dist publishes supported-platform binaries and checksums; clean-host tests download, verify, install, and smoke-test CLI and daemon modes without a Rust, .NET, Node.js, or Python runtime. | Pending |
 
 The requirement completion summary below is derived from requirement statuses
@@ -2322,7 +2334,7 @@ Every implementation PR must update this table.
 | Milestone | Completion | Current state | Last PR | Evidence / next step |
 |---|---:|---|---|---|
 | M0 Product and protocol | 55% | Adds an executable adapter contract, capability declaration, and error model to the written specification | Transport contract and reference adapter | Obtain product-owner approval and complete the JSON-RPC adapter binding |
-| M1 Secure foundation | 85% | Adds protected key storage at rest, closing OQ-001 with a no-silent-downgrade rule | Passphrase key store | Integrate an OS keychain backend behind the same trait, then wire channel creation and enrollment into the CLI |
+| M1 Secure foundation | 90% | `hrc init`, `whoami`, `status`, `channels`, and `doctor` run against real local state and protected keys | CLI wiring for local commands | Integrate an OS keychain backend behind the same trait, then wire channel creation and enrollment |
 | M2 Git messaging | 70% | Adds the synchronization engine: cursor-resuming fetch, conflict-retrying publish, backoff policy, and fail-closed halting on observed tampering | Synchronization engine | Wire the resident daemon and the CLI, then receipts, threading, and deduplication |
 | M3 Herdr integration | 0% | Not started | N/A | Verify Herdr long-lived plugin process capabilities |
 | M4 Context/delegation | 0% | Not started | N/A | Finalize context package schema |
@@ -2411,6 +2423,8 @@ recorded either directly in this PRD or in a stable linked artifact.
 | DEC-016 | RFC 8785 canonical JSON uses a pinned Rust implementation, initially `serde_jcs`, guarded by protocol vectors. | Accepted | Avoids custom canonicalization while making signed bytes interoperable. |
 | DEC-017 | Build and test run in a separate `pull_request` workflow rather than being added to the `pull_request_target` traceability workflow. | Accepted | Compiling and running pull-request code under `pull_request_target` would hand a write-capable, secret-bearing context to untrusted code; the two triggers stay separated. |
 | DEC-018 | The CLI publishes a fixed numeric exit-code contract: 0 success, 1 runtime failure, 2 usage, 3 unimplemented, 4 authorization required. | Accepted | PRD section 11.1 requires documented exit codes, and the Herdr plugin and skill must branch on stable numbers rather than parsing prose. |
+| DEC-033 | `hrc doctor` reports every check rather than stopping at the first failure. | Accepted | Someone diagnosing a broken installation needs the whole picture. Stopping at the first symptom turns one diagnosis into several runs. |
+| DEC-034 | Human and machine output are rendered from the same value. | Accepted | A separate human code path can report something different from `--json`, and the difference is invisible until someone is debugging from the wrong one. |
 | DEC-031 | When no OS keychain is available, HRC stores keys in a passphrase-encrypted file using age's scrypt recipient, and never falls back to unprotected storage. | Accepted | Closes OQ-001. A silent downgrade would leave the documented security property believed but absent. The passphrase store works on headless hosts and in CI, and introduces no new cryptographic primitive. |
 | DEC-032 | A wrong passphrase and a tampered key file report the same error. | Accepted | Distinguishing them would tell an attacker which of the two they achieved, and neither outcome permits a different response from the user. |
 | DEC-029 | Synchronization timing is expressed as pure policy functions; nothing in the core sleeps or reads a clock. | Accepted | Retry, backoff, and poll pacing are the parts most likely to be wrong and the hardest to test against real time. Returning durations for the daemon to wait on makes them ordinary unit tests, and leaves the choice of async runtime to the daemon rather than to the core. |

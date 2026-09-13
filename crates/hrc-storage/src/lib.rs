@@ -112,6 +112,19 @@ pub struct ChannelRecord {
     pub halted_reason: Option<String>,
 }
 
+/// Counts reported by `hrc status` for one channel.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ChannelCounts {
+    /// Messages awaiting publication.
+    pub outbox_pending: u64,
+    /// Inbox entries not yet read.
+    pub unread: u64,
+    /// Inbox entries awaiting a local approval decision.
+    pub pending_approval: u64,
+    /// The most recent transport error recorded against this channel.
+    pub last_error: Option<String>,
+}
+
 /// The local state database.
 ///
 /// `Debug` prints the schema version only. The connection handle would
@@ -442,6 +455,80 @@ impl Database {
             .optional()?;
 
         Ok(stored.as_deref().and_then(OutboxState::parse))
+    }
+
+    /// Every registered channel, in insertion order.
+    pub fn channels(&self) -> Result<Vec<ChannelRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT channel_id, transport_kind, transport_locator, local_name,
+                    roster_epoch, control_sequence, sync_cursor, halted_reason
+             FROM channel ORDER BY created_at, channel_id",
+        )?;
+
+        let rows = statement.query_map([], |row| {
+            Ok(ChannelRecord {
+                channel_id: row.get(0)?,
+                transport_kind: row.get(1)?,
+                transport_locator: row.get(2)?,
+                local_name: row.get(3)?,
+                roster_epoch: row.get::<_, i64>(4)? as u64,
+                control_sequence: row.get::<_, i64>(5)? as u64,
+                sync_cursor: row.get(6)?,
+                halted_reason: row.get(7)?,
+            })
+        })?;
+
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Counts that `hrc status` reports for one channel (PRD section 29).
+    pub fn channel_counts(&self, channel_id: &str) -> Result<ChannelCounts> {
+        let outbox_pending = self.connection.query_row(
+            "SELECT COUNT(*) FROM outbox
+             WHERE channel_id = ?1 AND state IN ('reserved', 'queued', 'publishing')",
+            params![channel_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+
+        let unread = self.connection.query_row(
+            "SELECT COUNT(*) FROM inbox WHERE channel_id = ?1 AND read_at IS NULL",
+            params![channel_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+
+        let pending_approval = self.connection.query_row(
+            "SELECT COUNT(*) FROM inbox WHERE channel_id = ?1 AND disposition = 'quarantined'",
+            params![channel_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+
+        let last_error = self
+            .connection
+            .query_row(
+                "SELECT last_error FROM outbox
+                 WHERE channel_id = ?1 AND last_error IS NOT NULL
+                 ORDER BY updated_at DESC LIMIT 1",
+                params![channel_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+
+        Ok(ChannelCounts {
+            outbox_pending: outbox_pending as u64,
+            unread: unread as u64,
+            pending_approval: pending_approval as u64,
+            last_error,
+        })
+    }
+
+    /// Runs SQLite's own integrity check, for `hrc doctor`.
+    pub fn integrity_check(&self) -> Result<bool> {
+        let result: String = self
+            .connection
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+
+        Ok(result == "ok")
     }
 
     /// Appends an audit record. There is no update or delete counterpart.

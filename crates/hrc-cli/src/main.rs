@@ -1,19 +1,25 @@
 //! The single self-contained `hrc` executable.
 //!
 //! One binary serves the CLI, the daemon, and every Herdr entry point (PRD
-//! requirement HRC-TECH-002). This milestone ships the published command
-//! contract and the human authorization boundary; the behavior behind each
-//! command arrives with its roadmap milestone.
+//! requirement HRC-TECH-002). Commands that have shipped run here; the rest
+//! report the documented not-implemented code and name the milestone that
+//! delivers them.
 
 mod cli;
+mod commands;
 mod dispatch;
+mod error;
 mod exit;
+mod paths;
+mod render;
 
 use clap::Parser;
-use serde_json::json;
+use serde_json::{Value, json};
 
-use crate::cli::Cli;
+use crate::cli::{Cli, Command};
 use crate::dispatch::Outcome;
+use crate::error::CliError;
+use crate::paths::Paths;
 
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
@@ -28,8 +34,21 @@ fn main() -> std::process::ExitCode {
         return code(exit::USAGE);
     }
 
-    match dispatch::classify(&cli.command) {
-        Outcome::AuthorizationRequired => {
+    match run(&cli, &path) {
+        Ok(value) => {
+            render::success(cli.json, &path, &value);
+            code(exit::SUCCESS)
+        }
+        Err(Failure::Cli(error)) => {
+            report(cli.json, error.code(), &path, &error.to_string(), None);
+            code(error.exit_code())
+        }
+        Err(Failure::NotShipped { milestone }) => {
+            let message = format!("`hrc {path}` is not implemented yet; it ships in {milestone}");
+            report(cli.json, "unimplemented", &path, &message, Some(milestone));
+            code(exit::UNIMPLEMENTED)
+        }
+        Err(Failure::AuthorizationRequired) => {
             let message = format!(
                 "`hrc {path}` crosses the human authorization boundary and must be completed \
                  in the trusted local interface"
@@ -37,11 +56,49 @@ fn main() -> std::process::ExitCode {
             report(cli.json, "authorization_required", &path, &message, None);
             code(exit::AUTHORIZATION_REQUIRED)
         }
-        Outcome::Unimplemented { milestone } => {
-            let message = format!("`hrc {path}` is not implemented yet; it ships in {milestone}");
-            report(cli.json, "unimplemented", &path, &message, Some(milestone));
-            code(exit::UNIMPLEMENTED)
-        }
+    }
+}
+
+/// Why a command did not produce a result.
+enum Failure {
+    /// The command ran and failed.
+    Cli(CliError),
+    /// The command has no behavior yet.
+    NotShipped {
+        /// Milestone that delivers it.
+        milestone: &'static str,
+    },
+    /// The command needs the trusted human interface.
+    AuthorizationRequired,
+}
+
+impl From<CliError> for Failure {
+    fn from(error: CliError) -> Self {
+        Failure::Cli(error)
+    }
+}
+
+/// Runs a parsed command.
+fn run(cli: &Cli, _path: &str) -> std::result::Result<Value, Failure> {
+    // The authorization boundary is checked before anything runs, so a
+    // boundary command cannot do work and then be refused.
+    if dispatch::requires_trusted_human(&cli.command) {
+        return Err(Failure::AuthorizationRequired);
+    }
+
+    let context = commands::Context::from_environment(Paths::resolve().map_err(Failure::from)?);
+
+    match &cli.command {
+        Command::Init => commands::init(&context).map_err(Failure::from),
+        Command::Whoami => commands::whoami(&context).map_err(Failure::from),
+        Command::Channels => commands::channels(&context).map_err(Failure::from),
+        Command::Status => commands::status(&context).map_err(Failure::from),
+        Command::Doctor => commands::doctor(&context).map_err(Failure::from),
+
+        other => match dispatch::classify(other) {
+            Outcome::Unimplemented { milestone } => Err(Failure::NotShipped { milestone }),
+            Outcome::AuthorizationRequired => Err(Failure::AuthorizationRequired),
+        },
     }
 }
 
