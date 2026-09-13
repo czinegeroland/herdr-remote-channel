@@ -584,6 +584,10 @@ fn assert_sync_halts(home: &std::path::Path) {
         .assert()
         .failure();
 
+    assert_channel_is_halted(home);
+}
+
+fn assert_channel_is_halted(home: &std::path::Path) {
     let status = hrc_in(home)
         .args(["status", "--json"])
         .output()
@@ -629,7 +633,13 @@ fn a_remote_history_rewrite_halts_synchronization() {
     let prior = git_in_bare(remote.path(), &["rev-parse", "hrc^"]);
     git_in_bare(remote.path(), &["update-ref", "refs/heads/hrc", &prior]);
 
-    assert_sync_halts(home.path());
+    hrc()
+        .env("HRC_HOME", home.path())
+        .env_remove("HRC_PASSPHRASE")
+        .args(["sync", "--once", "--json"])
+        .assert()
+        .failure();
+    assert_channel_is_halted(home.path());
 }
 
 #[test]
@@ -695,7 +705,13 @@ fn a_conflicting_control_successor_halts_synchronization() {
         Some(&bytes.stdout),
     );
 
-    assert_sync_halts(home.path());
+    hrc()
+        .env("HRC_HOME", home.path())
+        .env_remove("HRC_PASSPHRASE")
+        .args(["sync", "--once", "--json"])
+        .assert()
+        .failure();
+    assert_channel_is_halted(home.path());
 }
 
 #[test]

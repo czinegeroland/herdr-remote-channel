@@ -1033,29 +1033,26 @@ fn receive_for(
     channel: &hrc_storage::ChannelRecord,
     now: &str,
 ) -> Result<Vec<String>> {
-    let Some(passphrase) = paths.stored_passphrase() else {
-        return Ok(Vec::new());
+    let identity = match paths.stored_passphrase() {
+        Some(passphrase) => {
+            let store = PassphraseStore::open(paths.keys(), passphrase)?;
+            if store.contains(DEVICE_KEY_NAME)? {
+                let device: DeviceSecrets = store.load::<DeviceSecrets>(DEVICE_KEY_NAME)?;
+                Some(device.device_identity()?)
+            } else {
+                None
+            }
+        }
+        None => None,
     };
 
-    let store = PassphraseStore::open(paths.keys(), passphrase)?;
-    if !store.contains(DEVICE_KEY_NAME)? {
-        return Ok(Vec::new());
-    }
-
-    let device: DeviceSecrets = store.load::<DeviceSecrets>(DEVICE_KEY_NAME)?;
     let transport = GitTransport::open(
         paths.channel_transport(&channel.channel_id),
         &channel.transport_locator,
     )?;
 
     let mut database = Database::open(paths.database())?;
-    receive_messages(
-        &transport,
-        &mut database,
-        channel,
-        &device.device_identity()?,
-        now,
-    )
+    receive_messages(&transport, &mut database, channel, identity.as_ref(), now)
 }
 
 /// Decrypts and records every message published since the last receive pass.
@@ -1071,7 +1068,7 @@ fn receive_messages(
     transport: &GitTransport,
     database: &mut Database,
     channel: &hrc_storage::ChannelRecord,
-    identity: &hrc_crypto::DeviceIdentity,
+    identity: Option<&hrc_crypto::DeviceIdentity>,
     now: &str,
 ) -> Result<Vec<String>> {
     let mut roster: Option<Roster> = None;
@@ -1088,8 +1085,8 @@ fn receive_messages(
                 match object.class {
                     ObjectClass::Control => {
                         let text = std::str::from_utf8(&bytes).map_err(|_| {
-                            CliError::ChannelNotPublished {
-                                channel_id: channel.channel_id.clone(),
+                            hrc_transport::TransportError::InvalidPublication {
+                                reason: format!("control object {} is not UTF-8", object.name),
                             }
                         })?;
 
@@ -1108,6 +1105,9 @@ fn receive_messages(
                     }
 
                     ObjectClass::Message => {
+                        let Some(identity) = identity else {
+                            continue;
+                        };
                         let Some(roster) = roster.as_ref() else {
                             continue;
                         };
@@ -1181,6 +1181,10 @@ fn receive_messages(
             break;
         }
         cursor = page.cursor;
+    }
+
+    if let Some(roster) = roster {
+        database.set_roster_progress(&channel.channel_id, roster.epoch(), roster.sequence())?;
     }
 
     Ok(received)
@@ -2230,6 +2234,10 @@ fn sync_git_channel(
         transport.sync_from_remote()?;
     }
 
+    if remote_changed {
+        validate_trusted_cursor(&transport, database, channel, now)?;
+    }
+
     let received = if remote_changed || local_missing {
         receive_for(paths, channel, now).map_err(|error| {
             halt_if_received_history_is_invalid(database, &channel.channel_id, error, now)
@@ -2295,6 +2303,25 @@ fn sync_git_channel(
         "receivedMessages": received,
         "cursor": fetch.and_then(|outcome| outcome.cursor),
     }))
+}
+
+fn validate_trusted_cursor(
+    transport: &GitTransport,
+    database: &Database,
+    channel: &hrc_storage::ChannelRecord,
+    now: &str,
+) -> Result<()> {
+    let Some(cursor) = channel.sync_cursor.as_deref() else {
+        return Ok(());
+    };
+
+    transport
+        .fetch(Some(cursor), 1)
+        .map(|_| ())
+        .map_err(|error| {
+            let error = hrc_core::CoreError::Transport(error.to_string());
+            hrc_core::sync::halt_synchronization(database, &channel.channel_id, error, now).into()
+        })
 }
 
 fn halt_if_received_history_is_invalid(
