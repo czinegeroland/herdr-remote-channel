@@ -50,6 +50,26 @@ pub enum ProtocolError {
         expected: u32,
     },
 
+    /// An endpoint identifier did not match the closed pattern.
+    ///
+    /// PRD section 19.1 lets a validated endpoint appear on the agent-safe
+    /// surface before approval. Anything else is sender-controlled text and
+    /// must stay quarantined with the body.
+    #[error("`{endpoint}` is not a valid endpoint identifier")]
+    InvalidEndpoint {
+        /// The rejected value.
+        endpoint: String,
+    },
+
+    /// A message exceeded the plaintext size limit.
+    #[error("message of {size} bytes exceeds the {limit} byte limit")]
+    MessageTooLarge {
+        /// Size of the rejected message.
+        size: usize,
+        /// The configured limit.
+        limit: usize,
+    },
+
     /// A control entry claimed a sequence number it may not use.
     #[error("control sequence {sequence} is not valid for a control entry")]
     InvalidControlSequence {

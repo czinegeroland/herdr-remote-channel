@@ -10,12 +10,14 @@ pub mod canonical;
 pub mod control;
 pub mod error;
 pub mod identity;
+pub mod message;
 pub mod recipients;
 pub mod signed;
 
 pub use control::{ControlEntryPayload, ControlOperation, GenesisPayload};
 pub use error::{ProtocolError, Result};
 pub use identity::{DeviceCertificatePayload, DeviceDescriptor};
+pub use message::{Addressing, MessageEnvelope};
 pub use recipients::RecipientDevices;
 pub use signed::{SignedObject, Signer, signature_input};
 
