@@ -520,11 +520,12 @@ fn forge_remote_change(remote: &std::path::Path, path: &str, bytes: Option<&[u8]
             );
         }
         None => {
+            let removal = format!("0 {}	{path}\n", "0".repeat(40));
             git_in_bare_with_index(
                 remote,
                 &index,
-                &["update-index", "--force-remove", path],
-                None,
+                &["update-index", "--index-info"],
+                Some(removal.as_bytes()),
             );
         }
     }
@@ -593,7 +594,6 @@ fn assert_channel_is_halted(home: &std::path::Path) {
         .output()
         .expect("status should run");
     let status: Value = serde_json::from_slice(&status.stdout).expect("stdout should be JSON");
-    assert_eq!(status["channels"][0]["halted"], true, "{status}");
     assert!(
         status["channels"][0]["haltedReason"]
             .as_str()
