@@ -6,4 +6,10 @@
 //! metadata surface separately from the trusted human content surface;
 //! pending plaintext is never returned by the agent-safe surface.
 //!
-//! See PRD sections 13.1 and 19. Implementation lands in milestone M1.
+//! See PRD sections 13.1 and 19.
+
+pub mod error;
+pub mod roster;
+
+pub use error::{CoreError, Result};
+pub use roster::{DeviceStatus, Roster, RosterDevice, RosterMember};

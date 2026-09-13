@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-13T03:24:00+02:00 |
+| Last updated | 2026-09-13T03:58:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -507,8 +507,8 @@ The Herdr plugin must expose:
 | HRC-CH-005 | Create expiring, single-use invites. | Must | Approved | Pending |
 | HRC-CH-006 | Generate separate principal and device identities. | Must | Approved | Pending |
 | HRC-CH-007 | Require explicit administrator approval for joins. | Must | Approved | Pending |
-| HRC-CH-008 | Support member and device revocation. | Should | Approved | Pending |
-| HRC-CH-009 | Maintain a signed, append-only membership/control log. | Must | In progress | `crates/hrc-protocol/src/control.rs` (entry shapes and hash chaining); roster evaluation pending |
+| HRC-CH-008 | Support member and device revocation. | Should | In progress | `crates/hrc-core/src/roster.rs`; publication and CLI surface pending |
+| HRC-CH-009 | Maintain a signed, append-only membership/control log. | Must | Implemented | `crates/hrc-protocol/src/control.rs`, `crates/hrc-core/src/roster.rs` |
 | HRC-CH-010 | Detect observed conflicting control histories, rewrites, deletions, and substitutions, then stop synchronization. | Must | Approved | Pending |
 
 ### 12.2 Messaging
@@ -1174,6 +1174,16 @@ Validation order is normative:
 
 The channel ID is the lowercase SHA-256 hash of the canonical genesis payload.
 The genesis signed object is stored as control sequence zero.
+
+Genesis is signed by an administrator device, not by the principal key
+directly, so its envelope has the same signer shape as every other signed
+object. Verification order is: check each device certificate against the
+principal key genesis declares, locate the signing device among those
+certified devices, then verify the genesis signature with that device's
+signing key. Genesis therefore vouches for itself, which is why the channel
+ID commits to the whole payload. The first control entry names the channel ID
+as its `previousHash`, so entry one chains to genesis exactly as later
+entries chain to their predecessors. See decision DEC-022.
 
 A device key descriptor is:
 
@@ -1902,9 +1912,9 @@ npx skills add <owner>/herdr-remote-channel `
 |---|---|---|---|
 | HRC-SEC-001 | Private keys never leave their device. | Approved | Pending |
 | HRC-SEC-002 | Messages are encrypted to explicit active recipient devices. | In progress | `crates/hrc-crypto/src/encryption.rs`; roster-derived recipient selection pending |
-| HRC-SEC-003 | Every message is authenticated by a valid sender-device signature. | Approved | Pending |
-| HRC-SEC-004 | Roster changes are signed and hash chained. | In progress | `crates/hrc-protocol/src/control.rs`; chain evaluation across a fetched history pending |
-| HRC-SEC-005 | Removed devices cannot receive future-epoch messages. | Approved | Pending |
+| HRC-SEC-003 | Every message is authenticated by a valid sender-device signature. | In progress | `crates/hrc-core/src/roster.rs` authenticates control entries; message envelopes pending |
+| HRC-SEC-004 | Roster changes are signed and hash chained. | Implemented | `crates/hrc-core/src/roster.rs`; chain, sequence, epoch, and authority all enforced on apply |
+| HRC-SEC-005 | Removed devices cannot receive future-epoch messages. | In progress | `crates/hrc-core/src/roster.rs` excludes revoked devices from the active set; recipient selection at send time pending |
 | HRC-SEC-006 | Received attachments are size checked before decryption. | Approved | Pending |
 | HRC-SEC-007 | Decompressed data has strict size limits. | Approved | Pending |
 | HRC-SEC-008 | Outgoing context is previewed and secret scanned. | Approved | Pending |
@@ -1912,7 +1922,7 @@ npx skills add <owner>/herdr-remote-channel `
 | HRC-SEC-010 | Security-sensitive commands require trusted human authorization and reject agent-safe/non-interactive invocation. | Approved | Pending |
 | HRC-SEC-011 | Audit logs record approvals and local actions. | Approved | Pending |
 | HRC-SEC-012 | Observed conflicting histories, rewrites, deletions, or substitutions stop synchronization. | Approved | Pending |
-| HRC-SEC-013 | Messages from stale epochs or devices revoked before object introduction are rejected. | Approved | Pending |
+| HRC-SEC-013 | Messages from stale epochs or devices revoked before object introduction are rejected. | In progress | `crates/hrc-core/src/roster.rs` `was_authorized_in`; message-side enforcement pending |
 | HRC-SEC-014 | Pending bodies and approval capabilities are unavailable through agent-safe CLI and JSON surfaces. | Approved | Pending |
 | HRC-SEC-015 | Control entries use control-only publications, and merge or mixed control/data publications are rejected. | Approved | Pending |
 | HRC-SEC-016 | Every signed message commits to the canonical intended recipient-device list used by the sender's encryption builder. | In progress | `crates/hrc-protocol/src/recipients.rs`; binding into the message envelope pending |
@@ -2223,8 +2233,8 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 | Requirements | Milestone | Acceptance criteria | Evidence |
 |---|---|---|---|
 | HRC-CH-001 through HRC-CH-007, HRC-CH-009 | M1 | `AC-ENROLL`: two clean devices create, invite, join, verify, and approve a channel using no shared private material. Invalid genesis, invite, proof, or signature is rejected. | Partial: `crates/hrc-protocol/src/control.rs` covers genesis identity derivation, control-entry shapes, operation round trips, and hash chaining. Remaining: enrollment flow, invite proof, safety phrase, and approval. |
-| HRC-CH-008 | M1 | `AC-REVOCATION`: a device is revoked, the epoch advances, and messages introduced afterward cannot be accepted from or decrypted by the revoked device. | Pending |
-| HRC-CH-010 | M1 | `AC-CONTROL-INTEGRITY`: observed same-parent successors, broken previous hashes, rewrites, deletions, and substitutions stop synchronization with a sticky alert. | Pending |
+| HRC-CH-008 | M1 | `AC-REVOCATION`: a device is revoked, the epoch advances, and messages introduced afterward cannot be accepted from or decrypted by the revoked device. | Partial: `crates/hrc-core/src/roster/tests.rs` proves the epoch advances, the revoked device loses authority from that epoch, and it cannot sign later entries; `crates/hrc-crypto/src/encryption.rs` proves it cannot decrypt later ciphertext. Remaining: end-to-end over a published channel. |
+| HRC-CH-010 | M1 | `AC-CONTROL-INTEGRITY`: observed same-parent successors, broken previous hashes, rewrites, deletions, and substitutions stop synchronization with a sticky alert. | Partial: `crates/hrc-core/src/roster/tests.rs` rejects same-sequence successors, broken predecessor hashes, skipped sequences, wrong epochs, and foreign-channel entries, and proves a rejected entry leaves state unchanged. Remaining: synchronization halt and the sticky alert. |
 | HRC-MSG-001 through HRC-MSG-007, HRC-MSG-010 | M2 | `AC-MESSAGING`: two devices exchange offline notes and threaded questions/answers with receipts, expiry, deduplication, ordering, and local audit evidence. | Pending |
 | HRC-MSG-008 and HRC-MSG-009 | M4 | `AC-DELEGATION-MESSAGES`: task, accept/decline, progress, and result states are exchanged without local execution. | Pending |
 | HRC-GATE-001 through HRC-GATE-008 | M3 | `AC-PROMPT-GATE`: pending bodies are unavailable through agent-safe interfaces; trusted UI issues a one-use digest-bound authorization; reuse, modification, and wrong-target delivery fail. | Pending |
@@ -2264,7 +2274,7 @@ Every implementation PR must update this table.
 | Milestone | Completion | Current state | Last PR | Evidence / next step |
 |---|---:|---|---|---|
 | M0 Product and protocol | 40% | Detailed PRD, Rust stack, and traceability enforcement validated | Initial branch | Obtain product-owner approval and complete dependency spikes |
-| M1 Secure foundation | 40% | Cryptographic layer complete; genesis identity, the ten control operations, and control-log hash chaining are defined and tested | Genesis and control-log object model | Evaluate a control chain into roster state with epochs and authority, then persist keys through the OS keychain |
+| M1 Secure foundation | 55% | Roster evaluation replays a signed control chain into membership state with epochs, authority, and revocation, on top of the complete cryptographic layer | Roster evaluation | Persist principal and device keys through the OS keychain, then wire channel creation and enrollment into the CLI |
 | M2 Git messaging | 0% | Not started | N/A | Define adapter fixtures and concurrent-push tests |
 | M3 Herdr integration | 0% | Not started | N/A | Verify Herdr long-lived plugin process capabilities |
 | M4 Context/delegation | 0% | Not started | N/A | Finalize context package schema |
@@ -2353,6 +2363,7 @@ recorded either directly in this PRD or in a stable linked artifact.
 | DEC-016 | RFC 8785 canonical JSON uses a pinned Rust implementation, initially `serde_jcs`, guarded by protocol vectors. | Accepted | Avoids custom canonicalization while making signed bytes interoperable. |
 | DEC-017 | Build and test run in a separate `pull_request` workflow rather than being added to the `pull_request_target` traceability workflow. | Accepted | Compiling and running pull-request code under `pull_request_target` would hand a write-capable, secret-bearing context to untrusted code; the two triggers stay separated. |
 | DEC-018 | The CLI publishes a fixed numeric exit-code contract: 0 success, 1 runtime failure, 2 usage, 3 unimplemented, 4 authorization required. | Accepted | PRD section 11.1 requires documented exit codes, and the Herdr plugin and skill must branch on stable numbers rather than parsing prose. |
+| DEC-022 | Genesis is signed by an administrator device, and the first control entry names the channel ID as its predecessor hash. | Accepted | Keeps one signer shape and one verification path for every signed object, and makes the control chain unbroken from genesis onward without a special case. |
 | DEC-020 | Genesis and control entries carry devices as the signed `hrc/v1/device-certificate` envelope, not as a flattened device object. | Accepted | One verification path for device authorization instead of two, and the device ID stays bound to the descriptor it was derived from. |
 | DEC-021 | An unrecognized control operation is a parse failure, not an ignorable field. | Accepted | PRD section 27 allows ignoring unknown fields when safe, but a roster change a client cannot interpret is never safe to skip: it would keep operating on a membership view it knows is incomplete. Unknown *message kinds* remain non-fatal per section 18.2. |
 | DEC-019 | Protocol integers that must round-trip exactly and can exceed 2^53 - 1 are carried as JSON strings. | Accepted | RFC 8785 canonicalizes numbers as ECMAScript doubles, so a larger integer is silently rounded and the signed bytes change. Confirmed by `integers_beyond_the_double_safe_range_lose_precision` in `crates/hrc-protocol/tests/rfc8785_vectors.rs`. |
