@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-13T15:40:00+02:00 |
+| Last updated | 2026-09-13T17:10:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -614,7 +614,7 @@ The Herdr plugin must expose:
 | HRC-TECH-006 | Use maintained Rust cryptography crates, including `age` and `ed25519-dalek`, without custom cryptographic primitives. | Must | Implemented | `crates/hrc-crypto/src/lib.rs` (Ed25519), `crates/hrc-crypto/src/encryption.rs` (age X25519) |
 | HRC-TECH-007 | Store durable local state in SQLite using `rusqlite` with WAL mode and transactional allocation. | Must | Implemented | `crates/hrc-storage/src/lib.rs`, `crates/hrc-storage/src/migrations/001_initial.sql` |
 | HRC-TECH-008 | Use `ratatui` and `crossterm` for the trusted inbox and approval TUI. | Must | Approved | Decision DEC-015 |
-| HRC-TECH-009 | Use a cross-platform local IPC abstraction supporting Unix-domain sockets and Windows named pipes. | Must | Approved | Pending compatibility spike |
+| HRC-TECH-009 | Use a cross-platform local IPC abstraction supporting Unix-domain sockets and Windows named pipes. | Must | Implemented | `crates/hrc-ipc/`: `interprocess` 2 over Tokio, with length-prefixed JSON framing; `crates/hrc-ipc/tests/local_transport.rs` runs the same suite against a Unix socket and a Windows named pipe |
 | HRC-TECH-010 | Invoke the system Git executable rather than embedding a Git implementation. | Must | Approved | Decision DEC-015 |
 | HRC-TECH-011 | Publish prebuilt Windows, macOS, and Linux binaries with checksums using `cargo-dist`. | Must | Approved | Decision DEC-015 |
 | HRC-TECH-012 | Require no Rust toolchain or .NET/Node/Python runtime on end-user machines. | Must | Approved | Pending release fixture |
@@ -742,12 +742,17 @@ crates/
   hrc-crypto/
   hrc-core/
   hrc-storage/
+  hrc-ipc/
   hrc-transport/
   hrc-transport-git/
   hrc-herdr/
   hrc-tui/
   hrc-cli/
 ```
+
+`hrc-ipc` holds the framed local transport. It is separate so that Tokio and
+the IPC crate stay out of the pure-logic crates, and so the framing can be
+tested without a daemon. See decision DEC-041.
 
 The final executable dispatches subcommands internally:
 
@@ -2369,7 +2374,7 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 | HRC-GOV-004 | All | `AC-EVIDENCE`: every status transition to `Verified` includes a stable evidence reference in this registry or the primary requirement table. | Pending |
 | HRC-TECH-001, HRC-TECH-004 | M1 | `AC-RUST-FOUNDATION`: the Rust 2024 Cargo workspace builds and its Clap CLI passes command-contract tests on Windows, macOS, and Linux CI. | Partial: `.github/workflows/build-and-test.yml` builds, lints, and tests the workspace on all three platforms; `crates/hrc-cli/tests/command_contract.rs` covers the command surface and the section 22.7 boundary. Remaining: command behavior beyond the contract. |
 | HRC-TECH-005, HRC-TECH-006 | M1 | `AC-RUST-PROTOCOL`: RFC 8785 vectors, signatures, age encryption, malformed-input cases, and cross-platform deterministic fixtures pass. | `crates/hrc-protocol/tests/rfc8785_vectors.rs` (canonicalization), `crates/hrc-crypto/src/lib.rs` (OpenSSL-derived Ed25519 vector, malformed-key, malformed-signature, wrong-domain, tampered-payload), `crates/hrc-crypto/src/encryption.rs` (age round trip, non-recipient, tampered, truncated, oversized). Verified on Linux, macOS, and Windows CI. |
-| HRC-TECH-009 | M1 | `AC-RUST-IPC`: the selected IPC implementation exchanges framed requests over Unix-domain sockets and Windows named pipes with reconnect and permission tests. | Pending |
+| HRC-TECH-009 | M1 | `AC-RUST-IPC`: the selected IPC implementation exchanges framed requests over Unix-domain sockets and Windows named pipes with reconnect and permission tests. | `crates/hrc-ipc/tests/local_transport.rs`: request and answer over the platform transport, twenty-five framed exchanges on one connection, eight concurrent clients, reconnection after the daemon restarts and leaves a stale socket behind, a missing daemon failing rather than hanging, the two interfaces proven to be separate listeners, an oversized frame dropping only its own connection, and Unix socket and directory modes asserted owner-only. `crates/hrc-ipc/src/frame.rs` covers framing, truncation, and the pre-allocation size check. Verified on Linux, macOS, and Windows CI. |
 | HRC-TECH-003, HRC-TECH-007, HRC-TECH-010 | M2 | `AC-RUST-DAEMON`: Tokio daemon, WAL-backed SQLite state, transactional allocation, and system-Git synchronization pass crash/retry integration tests. | Pending |
 | HRC-TECH-008 | M3 | `AC-RUST-TUI`: ratatui/crossterm inbox and approval flows pass terminal interaction tests on supported platforms. | Pending |
 | HRC-TECH-002 | M3 | `AC-SINGLE-BINARY`: one `hrc` executable successfully dispatches CLI, daemon, Herdr startup/action/event, and pane modes. | Partial: the binary parses and dispatches every mode, and five commands perform real work end to end (`crates/hrc-cli/tests/command_contract.rs`). Remaining: daemon, Herdr, and channel modes. |
@@ -2388,7 +2393,7 @@ Every implementation PR must update this table.
 | Milestone | Completion | Current state | Last PR | Evidence / next step |
 |---|---:|---|---|---|
 | M0 Product and protocol | 55% | Adds an executable adapter contract, capability declaration, and error model to the written specification | Transport contract and reference adapter | Obtain product-owner approval and complete the JSON-RPC adapter binding |
-| M1 Secure foundation | 98% | Adds the join request, administrator review, and admission flow, with invite single use enforced by control-log replay | Join and approval flow | Persist the principal key, then integrate an OS keychain backend |
+| M1 Secure foundation | 99% | Adds the framed local IPC layer, verified against a Unix socket and a Windows named pipe on CI, closing the compatibility spike | Local IPC | Persist the principal key, then integrate an OS keychain backend |
 | M2 Git messaging | 70% | Adds the synchronization engine: cursor-resuming fetch, conflict-retrying publish, backoff policy, and fail-closed halting on observed tampering | Synchronization engine | Wire the resident daemon and the CLI, then receipts, threading, and deduplication |
 | M3 Herdr integration | 50% | Adds the daemon's two local interfaces as two request and response types, so an agent-safe caller has no request that means "a pending body" and no response that could hold one | Daemon surface split | Build the trusted approval TUI, then the Herdr inbox UI |
 | M4 Context/delegation | 30% | Context packages with previews, digest verification, default path exclusions, and blocking secret scanning | Context packages | Add git-ignored path checking and attachment limits, then structured delegation messages |
@@ -2477,6 +2482,7 @@ recorded either directly in this PRD or in a stable linked artifact.
 | DEC-016 | RFC 8785 canonical JSON uses a pinned Rust implementation, initially `serde_jcs`, guarded by protocol vectors. | Accepted | Avoids custom canonicalization while making signed bytes interoperable. |
 | DEC-017 | Build and test run in a separate `pull_request` workflow rather than being added to the `pull_request_target` traceability workflow. | Accepted | Compiling and running pull-request code under `pull_request_target` would hand a write-capable, secret-bearing context to untrusted code; the two triggers stay separated. |
 | DEC-018 | The CLI publishes a fixed numeric exit-code contract: 0 success, 1 runtime failure, 2 usage, 3 unimplemented, 4 authorization required. | Accepted | PRD section 11.1 requires documented exit codes, and the Herdr plugin and skill must branch on stable numbers rather than parsing prose. |
+| DEC-041 | Local IPC lives in its own `hrc-ipc` crate, and a connection's authority comes from the endpoint that accepted it. | Accepted | Both the daemon and the trusted UI need the transport, and `hrc-core` is the only crate they share — putting it there would pull Tokio and `interprocess` into the pure-logic crates. Keeping authority in the endpoint rather than in a field of the request means a caller cannot name its own surface. |
 | DEC-040 | The approval authorization never leaves the daemon: one trusted call issues it, consumes it, and returns the framed content. | Accepted | Section 19.5 requires it to be unavailable to agent-facing methods, but an authorization returned to *any* caller is a value that can be stored and presented later, and the one-use ledger then becomes the only thing standing between a leaked value and a replay. Keeping it inside a single call removes the window instead of guarding it. |
 | DEC-039 | The `add_member` control entry names the invite it consumes, and invite state is part of replayed roster state. | Accepted | Single use (section 15.1) was otherwise unenforceable by anyone but the administrator who happened to remember: nothing in the published record said which authorization a member was admitted under, so a replayed join request could be admitted twice and no reader of the control log could tell. Making it part of replay means a second admission fails for every participant. |
 | DEC-038 | The agent skill is held to the CLI and to PRD section 24 by tests in the build rather than by review. | Accepted | A skill file ships instructions to an agent, and nothing else in the build notices when it drifts from the exit codes, the command surface, or the prohibitions. The tests assert the substance of each rule rather than its wording, so the prose can improve without becoming a transcription exercise. |
@@ -2510,7 +2516,7 @@ OQ-001 was closed by decision DEC-031 and the passphrase key store.
 
 | ID | Question | Owner | Target milestone |
 |---|---|---|---|
-| OQ-003 | Does the selected local IPC crate behave consistently for Unix sockets and Windows named pipes under Tokio? | TBD | M1 |
+| OQ-003 | Does the selected local IPC crate behave consistently for Unix sockets and Windows named pipes under Tokio? | Closed: yes, with one caveat. `interprocess` 2 needs different name types per platform — `GenericFilePath` for a Unix socket path, `GenericNamespaced` for a bare Windows pipe name, which the crate prefixes itself — so endpoint naming is resolved in one function rather than at each call site. Everything above that behaves identically, and the same test suite passes on all three platforms. | M1 |
 | OQ-004 | Can a Herdr plugin host a long-running process, or must the daemon be external? | TBD | M0 |
 | OQ-005 | Which GitHub ruleset features are available on supported account plans? | TBD | M1 |
 | OQ-006 | What secret-scanning implementation is suitable for the first context release? | TBD | M4 |

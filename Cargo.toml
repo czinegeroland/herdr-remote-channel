@@ -7,6 +7,7 @@ members = [
     "crates/hrc-transport",
     "crates/hrc-transport-git",
     "crates/hrc-core",
+    "crates/hrc-ipc",
     "crates/hrc-herdr",
     "crates/hrc-tui",
     "crates/hrc-cli",
@@ -26,6 +27,7 @@ hrc-storage = { path = "crates/hrc-storage" }
 hrc-transport = { path = "crates/hrc-transport" }
 hrc-transport-git = { path = "crates/hrc-transport-git" }
 hrc-core = { path = "crates/hrc-core" }
+hrc-ipc = { path = "crates/hrc-ipc" }
 hrc-herdr = { path = "crates/hrc-herdr" }
 hrc-tui = { path = "crates/hrc-tui" }
 
@@ -41,6 +43,8 @@ age = "0.12"
 ed25519-dalek = { version = "3", features = ["zeroize"] }
 getrandom = "0.4"
 hmac = "0.13"
+interprocess = { version = "2", features = ["tokio"] }
+tokio = { version = "1", features = ["io-util", "net", "rt", "sync", "time", "macros"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 secrecy = "0.10"
 tempfile = "3"
