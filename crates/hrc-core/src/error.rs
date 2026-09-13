@@ -114,6 +114,36 @@ pub enum CoreError {
         found: String,
     },
 
+    /// A message addressed no active device.
+    #[error("no active recipient device matches this message's addressing")]
+    NoRecipients,
+
+    /// The message plaintext was not well formed.
+    #[error("malformed message: {reason}")]
+    MalformedMessage {
+        /// What was wrong.
+        reason: String,
+    },
+
+    /// The signed recipient set does not match what the roster implies.
+    ///
+    /// Either the sender addressed a different audience than the channel's
+    /// membership defines, or this device is not among the recipients it
+    /// decrypted. Both are HRC-SEC-016 violations.
+    #[error("the signed recipient device set does not match the roster")]
+    RecipientSetMismatch,
+
+    /// This installation's device is not in the roster.
+    #[error("the local device is not a member of this channel")]
+    LocalDeviceNotInRoster,
+
+    /// The message expired before it was opened.
+    #[error("message expired at {expires_at}")]
+    MessageExpired {
+        /// The expiry the message declared.
+        expires_at: String,
+    },
+
     /// A protocol object was malformed.
     #[error(transparent)]
     Protocol(#[from] hrc_protocol::ProtocolError),

@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-13T05:58:00+02:00 |
+| Last updated | 2026-09-13T06:44:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -515,11 +515,11 @@ The Herdr plugin must expose:
 
 | ID | Requirement | Priority | Status | Evidence |
 |---|---|---:|---|---|
-| HRC-MSG-001 | Send encrypted notes. | Must | Approved | Pending |
+| HRC-MSG-001 | Send encrypted notes. | Must | In progress | `crates/hrc-core/src/message.rs` seals and opens notes; the CLI and transport wiring are pending |
 | HRC-MSG-002 | Send questions and correlated answers. | Must | Approved | Pending |
 | HRC-MSG-003 | Maintain threaded conversations. | Must | Approved | Pending |
 | HRC-MSG-004 | Produce delivery and optional read receipts. | Must | Approved | Pending |
-| HRC-MSG-005 | Support message expiration. | Must | Approved | Pending |
+| HRC-MSG-005 | Support message expiration. | Must | In progress | `crates/hrc-core/src/message.rs` refuses expired messages on open; expiry display and sweeping are pending |
 | HRC-MSG-006 | Deduplicate at-least-once deliveries. | Must | Approved | Pending |
 | HRC-MSG-007 | Preserve per-device message ordering. | Must | Approved | Pending |
 | HRC-MSG-008 | Support structured task/delegation messages without execution. | Should | Approved | Pending |
@@ -827,6 +827,14 @@ For each message:
 4. Optionally include the sender's other devices for sent-message recovery.
 5. Pad the plaintext into a configured size bucket before encryption.
 6. Store only ciphertext in the transport.
+
+Padding bounds what object size reveals; it does not make size constant.
+Padding applies to the plaintext, and the `age` implementation adds a random
+amount of header material, so two messages in the same bucket produce
+ciphertexts whose lengths differ by a few dozen bytes. That variation is
+independent of the message, so it adds noise rather than signal, but an
+observer can still distinguish size buckets. Section 16.4 discloses this as
+approximate padded object sizes. See decision DEC-028.
 
 ### 14.4 Security limitation
 
@@ -1933,10 +1941,10 @@ npx skills add <owner>/herdr-remote-channel `
 | ID | Requirement | Status | Evidence |
 |---|---|---|---|
 | HRC-SEC-001 | Private keys never leave their device. | Approved | Pending |
-| HRC-SEC-002 | Messages are encrypted to explicit active recipient devices. | In progress | `crates/hrc-crypto/src/encryption.rs`; roster-derived recipient selection pending |
-| HRC-SEC-003 | Every message is authenticated by a valid sender-device signature. | In progress | `crates/hrc-core/src/roster.rs` authenticates control entries; message envelopes pending |
+| HRC-SEC-002 | Messages are encrypted to explicit active recipient devices. | Implemented | `crates/hrc-core/src/message.rs` selects recipients from the roster's active device set |
+| HRC-SEC-003 | Every message is authenticated by a valid sender-device signature. | Implemented | `crates/hrc-core/src/message.rs`: the signer is resolved from the roster and the signature verified before any field is trusted |
 | HRC-SEC-004 | Roster changes are signed and hash chained. | Implemented | `crates/hrc-core/src/roster.rs`; chain, sequence, epoch, and authority all enforced on apply |
-| HRC-SEC-005 | Removed devices cannot receive future-epoch messages. | In progress | `crates/hrc-core/src/roster.rs` excludes revoked devices from the active set; recipient selection at send time pending |
+| HRC-SEC-005 | Removed devices cannot receive future-epoch messages. | Implemented | `crates/hrc-core/src/message.rs` addresses only active devices, proven end to end in `crates/hrc-core/src/message/tests.rs` |
 | HRC-SEC-006 | Received attachments are size checked before decryption. | Approved | Pending |
 | HRC-SEC-007 | Decompressed data has strict size limits. | Approved | Pending |
 | HRC-SEC-008 | Outgoing context is previewed and secret scanned. | Approved | Pending |
@@ -1944,10 +1952,10 @@ npx skills add <owner>/herdr-remote-channel `
 | HRC-SEC-010 | Security-sensitive commands require trusted human authorization and reject agent-safe/non-interactive invocation. | Approved | Pending |
 | HRC-SEC-011 | Audit logs record approvals and local actions. | Approved | Pending |
 | HRC-SEC-012 | Observed conflicting histories, rewrites, deletions, or substitutions stop synchronization. | Approved | Pending |
-| HRC-SEC-013 | Messages from stale epochs or devices revoked before object introduction are rejected. | In progress | `crates/hrc-core/src/roster.rs` `was_authorized_in`; message-side enforcement pending |
+| HRC-SEC-013 | Messages from stale epochs or devices revoked before object introduction are rejected. | Implemented | `crates/hrc-core/src/message.rs` checks both the claimed epoch and the epoch the object was introduced under |
 | HRC-SEC-014 | Pending bodies and approval capabilities are unavailable through agent-safe CLI and JSON surfaces. | Approved | Pending |
 | HRC-SEC-015 | Control entries use control-only publications, and merge or mixed control/data publications are rejected. | Implemented | `crates/hrc-transport/src/lib.rs` `validate_publication`, `crates/hrc-transport-git/src/lib.rs` merge and modification rejection, covered by `crates/hrc-transport-git/tests/git_adapter.rs` |
-| HRC-SEC-016 | Every signed message commits to the canonical intended recipient-device list used by the sender's encryption builder. | In progress | `crates/hrc-protocol/src/recipients.rs`; binding into the message envelope pending |
+| HRC-SEC-016 | Every signed message commits to the canonical intended recipient-device list used by the sender's encryption builder. | Implemented | `crates/hrc-core/src/message.rs` derives the recipient set from the roster and encrypts to exactly that set; a caller-supplied list is discarded |
 
 ### 25.1 Threats
 
@@ -2257,7 +2265,7 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 | HRC-CH-001 through HRC-CH-007, HRC-CH-009 | M1 | `AC-ENROLL`: two clean devices create, invite, join, verify, and approve a channel using no shared private material. Invalid genesis, invite, proof, or signature is rejected. | Partial: `crates/hrc-protocol/src/control.rs` covers genesis identity derivation, control-entry shapes, operation round trips, and hash chaining. Remaining: enrollment flow, invite proof, safety phrase, and approval. |
 | HRC-CH-008 | M1 | `AC-REVOCATION`: a device is revoked, the epoch advances, and messages introduced afterward cannot be accepted from or decrypted by the revoked device. | Partial: `crates/hrc-core/src/roster/tests.rs` proves the epoch advances, the revoked device loses authority from that epoch, and it cannot sign later entries; `crates/hrc-crypto/src/encryption.rs` proves it cannot decrypt later ciphertext. Remaining: end-to-end over a published channel. |
 | HRC-CH-010 | M1 | `AC-CONTROL-INTEGRITY`: observed same-parent successors, broken previous hashes, rewrites, deletions, and substitutions stop synchronization with a sticky alert. | Partial: `crates/hrc-core/src/roster/tests.rs` rejects same-sequence successors, broken predecessor hashes, skipped sequences, wrong epochs, and foreign-channel entries, and proves a rejected entry leaves state unchanged. Remaining: synchronization halt and the sticky alert. |
-| HRC-MSG-001 through HRC-MSG-007, HRC-MSG-010 | M2 | `AC-MESSAGING`: two devices exchange offline notes and threaded questions/answers with receipts, expiry, deduplication, ordering, and local audit evidence. | Pending |
+| HRC-MSG-001 through HRC-MSG-007, HRC-MSG-010 | M2 | `AC-MESSAGING`: two devices exchange offline notes and threaded questions/answers with receipts, expiry, deduplication, ordering, and local audit evidence. | Partial: `crates/hrc-core/src/message/tests.rs` covers seal and open between two devices, broadcast addressing, and expiry. Remaining: receipts, threading over a published channel, deduplication, and ordering. |
 | HRC-MSG-008 and HRC-MSG-009 | M4 | `AC-DELEGATION-MESSAGES`: task, accept/decline, progress, and result states are exchanged without local execution. | Pending |
 | HRC-GATE-001 through HRC-GATE-008 | M3 | `AC-PROMPT-GATE`: pending bodies are unavailable through agent-safe interfaces; trusted UI issues a one-use digest-bound authorization; reuse, modification, and wrong-target delivery fail. | Pending |
 | HRC-CTX-001 through HRC-CTX-007 | M4 | `AC-CONTEXT`: supported context items round-trip with previews and verified hashes; excluded paths, detected secrets, oversized objects, and malformed archives are blocked. | Pending |
@@ -2268,7 +2276,7 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 | HRC-TR-007 | M2 | `AC-ADAPTER-CONFORMANCE`: the in-memory reference adapter and Git adapter both pass the publication-revision, ordering, conflict, durability, and opaque-object conformance suite. | Both adapters pass all fifteen checks (`crates/hrc-transport/tests/reference_adapter.rs`, `crates/hrc-transport-git/tests/git_adapter.rs`), and a deliberately broken adapter is proven to fail the suite. Verified on Linux, macOS, and Windows CI. |
 | HRC-SKILL-001 through HRC-SKILL-007 | M3 | `AC-SKILL`: an agent guides setup and drafts communication while tests prove it cannot retrieve private keys/invite secrets, approve joins, or bypass the prompt gate. | Pending |
 | HRC-SKILL-008 | M4 | `AC-SKILL-CONTEXT`: an agent can draft supported context packages while preview and send remain human-controlled. | Pending |
-| HRC-SEC-001 through HRC-SEC-005, HRC-SEC-013, HRC-SEC-015, HRC-SEC-016 | M1 | `AC-KEYS-AND-ROSTER`: key isolation, signed recipient intent, signature validation, control-chain validation, control-only publication ordering, revocation, and stale-epoch rejection pass adversarial tests. | Pending |
+| HRC-SEC-001 through HRC-SEC-005, HRC-SEC-013, HRC-SEC-015, HRC-SEC-016 | M1 | `AC-KEYS-AND-ROSTER`: key isolation, signed recipient intent, signature validation, control-chain validation, control-only publication ordering, revocation, and stale-epoch rejection pass adversarial tests. | Partial: `crates/hrc-core/src/message/tests.rs` and `crates/hrc-core/src/roster/tests.rs` cover forged signatures, unknown signing devices, foreign channels, stale epochs, a revoked device's message reintroduced after revocation, and a recipient set that disagrees with the roster. Remaining: key isolation once keys are persisted. |
 | HRC-SEC-006 through HRC-SEC-008 | M4 | `AC-CONTENT-SECURITY`: ciphertext/decompression limits, secret scanning, and preview reject malicious fixtures. | Pending |
 | HRC-SEC-009 | M3 | `AC-QUARANTINE`: every inbound body is quarantined and framed as untrusted before any approved disclosure. | Pending |
 | HRC-SEC-010, HRC-SEC-014 | M3 | `AC-HUMAN-AUTH`: agent-safe and non-interactive callers cannot read pending bodies, authorize actions, or reuse an authorization. | Pending |
@@ -2296,8 +2304,8 @@ Every implementation PR must update this table.
 | Milestone | Completion | Current state | Last PR | Evidence / next step |
 |---|---:|---|---|---|
 | M0 Product and protocol | 55% | Adds an executable adapter contract, capability declaration, and error model to the written specification | Transport contract and reference adapter | Obtain product-owner approval and complete the JSON-RPC adapter binding |
-| M1 Secure foundation | 65% | Adds the durable local state store: WAL-backed SQLite, the atomic sequence allocation, the outbox lifecycle, the quarantined inbox schema, and the append-only audit log | Local state store | Persist principal and device keys through the OS keychain, then wire channel creation and enrollment into the CLI |
-| M2 Git messaging | 40% | Git transport publishes, fetches, and resolves concurrent publication against a real repository, and passes the same conformance suite as the reference adapter | Git transport adapter | Build the daemon fetch and publish loop with backoff, then message envelopes and receipts |
+| M1 Secure foundation | 75% | Messages seal and open end to end against a real roster, with recipient commitment, revocation ordering, and expiry enforced | Message envelope and validation pipeline | Persist principal and device keys through the OS keychain, then wire channel creation and enrollment into the CLI |
+| M2 Git messaging | 55% | Git transport plus the message envelope and its normative validation pipeline | Message envelope and validation pipeline | Build the daemon fetch and publish loop with backoff, then receipts, threading, and deduplication |
 | M3 Herdr integration | 0% | Not started | N/A | Verify Herdr long-lived plugin process capabilities |
 | M4 Context/delegation | 0% | Not started | N/A | Finalize context package schema |
 | M5 Provider ecosystem | 0% | Not started | N/A | Deferred until core protocol stabilizes |
@@ -2385,6 +2393,7 @@ recorded either directly in this PRD or in a stable linked artifact.
 | DEC-016 | RFC 8785 canonical JSON uses a pinned Rust implementation, initially `serde_jcs`, guarded by protocol vectors. | Accepted | Avoids custom canonicalization while making signed bytes interoperable. |
 | DEC-017 | Build and test run in a separate `pull_request` workflow rather than being added to the `pull_request_target` traceability workflow. | Accepted | Compiling and running pull-request code under `pull_request_target` would hand a write-capable, secret-bearing context to untrusted code; the two triggers stay separated. |
 | DEC-018 | The CLI publishes a fixed numeric exit-code contract: 0 success, 1 runtime failure, 2 usage, 3 unimplemented, 4 authorization required. | Accepted | PRD section 11.1 requires documented exit codes, and the Herdr plugin and skill must branch on stable numbers rather than parsing prose. |
+| DEC-028 | The recipient device set is derived from the roster inside the sealing operation, never accepted from the caller. | Accepted | HRC-SEC-016 requires the signed commitment to describe the set the encryption builder actually used. A caller that could pass the list separately could commit to one audience and encrypt to another, which is precisely the divergence the requirement exists to prevent. |
 | DEC-027 | A transport object has one identifier: its `name`, which is also its path in the channel layout. | Accepted | The earlier separate `name` and `path` fields let two conforming adapters disagree about what identifies an object: the in-memory adapter keyed on the name and ignored the path, while Git can only address an object by its path. Found when the Git adapter was run against the conformance suite the reference adapter already passed. |
 | DEC-025 | The adapter conformance suite ships with a negative test: a deliberately broken adapter that must fail it. | Accepted | Otherwise the suite's own correctness is unverified. `crates/hrc-transport/tests/reference_adapter.rs` runs an adapter that ignores `expectedRevision` and asserts the suite rejects it by name. |
 | DEC-026 | The in-process transport trait is synchronous; asynchrony belongs to the daemon that drives it. | Accepted | Section 21 specifies adapters as separate JSON-RPC executables, so the process boundary is where waiting happens. Keeping the trait synchronous makes the conformance suite runnable without a runtime and keeps adapter authorship simple. |
