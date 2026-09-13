@@ -359,7 +359,7 @@ fn sync_once_fetches_only_when_the_remote_head_changed() {
     let genesis = publisher.open_group().unwrap();
     let message = publisher
         .publish(PublishRequest {
-            expected_revision: Some(genesis.revision.clone()),
+            expected_revision: genesis.revision.clone(),
             class: PublicationClass::Data,
             objects: vec![message("msg-1")],
         })
@@ -437,7 +437,7 @@ fn sync_once_publishes_queued_messages() {
 
     let reader = peer(directory.path(), "reader", &remote);
     reader.sync_from_remote().unwrap();
-    let page = reader.fetch(Some(&genesis.revision), 100).unwrap();
+    let page = reader.fetch(genesis.revision.as_deref(), 100).unwrap();
     assert_eq!(page.publications.len(), 1);
     let object = &page.publications[0].objects[0];
     assert_eq!(
