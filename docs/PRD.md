@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-13T14:05:00+02:00 |
+| Last updated | 2026-09-13T18:30:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -753,6 +753,14 @@ crates/
 `hrc-ipc` holds the framed local transport. It is separate so that Tokio and
 the IPC crate stay out of the pure-logic crates, and so the framing can be
 tested without a daemon. See decision DEC-041.
+
+Taking an endpoint follows one rule: never displace a daemon that is still
+answering. A name in use is not proof that anyone is behind it, so on Unix a
+second bind probes the socket and only removes it when nothing answers. On
+Windows a pipe name cannot be removed at all and tells us nothing about its
+owner, so a bind waits briefly for a predecessor to finish shutting down and
+then fails. The result is the same either way: a restart succeeds, and a
+running daemon is never displaced.
 
 The final executable dispatches subcommands internally:
 
@@ -2374,7 +2382,7 @@ column identifies a stable test, scenario report, or other reviewable artifact.
 | HRC-GOV-004 | All | `AC-EVIDENCE`: every status transition to `Verified` includes a stable evidence reference in this registry or the primary requirement table. | Pending |
 | HRC-TECH-001, HRC-TECH-004 | M1 | `AC-RUST-FOUNDATION`: the Rust 2024 Cargo workspace builds and its Clap CLI passes command-contract tests on Windows, macOS, and Linux CI. | Partial: `.github/workflows/build-and-test.yml` builds, lints, and tests the workspace on all three platforms; `crates/hrc-cli/tests/command_contract.rs` covers the command surface and the section 22.7 boundary. Remaining: command behavior beyond the contract. |
 | HRC-TECH-005, HRC-TECH-006 | M1 | `AC-RUST-PROTOCOL`: RFC 8785 vectors, signatures, age encryption, malformed-input cases, and cross-platform deterministic fixtures pass. | `crates/hrc-protocol/tests/rfc8785_vectors.rs` (canonicalization), `crates/hrc-crypto/src/lib.rs` (OpenSSL-derived Ed25519 vector, malformed-key, malformed-signature, wrong-domain, tampered-payload), `crates/hrc-crypto/src/encryption.rs` (age round trip, non-recipient, tampered, truncated, oversized). Verified on Linux, macOS, and Windows CI. |
-| HRC-TECH-009 | M1 | `AC-RUST-IPC`: the selected IPC implementation exchanges framed requests over Unix-domain sockets and Windows named pipes with reconnect and permission tests. | `crates/hrc-ipc/tests/local_transport.rs`: request and answer over the platform transport, twenty-five framed exchanges on one connection, eight concurrent clients, reconnection after the daemon restarts and leaves a stale socket behind, a missing daemon failing rather than hanging, the two interfaces proven to be separate listeners, a client refusing to send an oversized frame without desynchronizing its stream, an unparseable frame dropping only its own connection, and Unix socket and directory modes asserted owner-only. On Windows the pipe name folds in the runtime directory, since pipe names are machine-global and a collision would mean one daemon answering for another's endpoint. `crates/hrc-ipc/src/frame.rs` covers framing, truncation, and the pre-allocation size check. Verified on Linux, macOS, and Windows CI. |
+| HRC-TECH-009 | M1 | `AC-RUST-IPC`: the selected IPC implementation exchanges framed requests over Unix-domain sockets and Windows named pipes with reconnect and permission tests. | `crates/hrc-ipc/tests/local_transport.rs`: request and answer over the platform transport, twenty-five framed exchanges on one connection, eight concurrent clients, reconnection after the daemon restarts and leaves a stale socket behind, a missing daemon failing rather than hanging, the two interfaces proven to be separate listeners, a client refusing to send an oversized frame without desynchronizing its stream, an unparseable frame dropping only its own connection, and Unix socket and directory modes asserted owner-only. On Windows the pipe name folds in the runtime directory, since pipe names are machine-global and a collision would mean one daemon answering for another's endpoint. A live daemon keeps its endpoint: a second bind probes before removing a socket file, because unlinking a live daemon's socket and binding a new one at the same path succeeds and leaves that daemon listening where no client can reach it. `crates/hrc-ipc/src/frame.rs` covers framing, truncation, and the pre-allocation size check. Verified on Linux, macOS, and Windows CI. |
 | HRC-TECH-003, HRC-TECH-007, HRC-TECH-010 | M2 | `AC-RUST-DAEMON`: Tokio daemon, WAL-backed SQLite state, transactional allocation, and system-Git synchronization pass crash/retry integration tests. | Partial: `crates/hrc-cli/src/main.rs` runs `hrc daemon` on a Tokio runtime, `crates/hrc-cli/src/commands.rs` drives the resident synchronization loop over the WAL-backed SQLite store and system Git transport while binding both local IPC listeners, and `crates/hrc-cli/src/commands/tests.rs` plus `tests/command_contract.rs` cover daemon tick behavior, the startup contract, the live agent-safe status call, the trusted-listener bind, and live refusal of trusted methods on the agent-safe endpoint. Remaining: crash/restart integration tests and the real trusted-operation implementations. |
 | HRC-TECH-008 | M3 | `AC-RUST-TUI`: ratatui/crossterm inbox and approval flows pass terminal interaction tests on supported platforms. | Pending |
 | HRC-TECH-002 | M3 | `AC-SINGLE-BINARY`: one `hrc` executable successfully dispatches CLI, daemon, Herdr startup/action/event, and pane modes. | Partial: the binary parses and dispatches every mode, eight commands now perform real work, and `crates/hrc-cli/tests/command_contract.rs` covers the daemon startup contract plus live daemon IPC requests on both local interfaces. Remaining: the Herdr modes and channel-management flows. |
