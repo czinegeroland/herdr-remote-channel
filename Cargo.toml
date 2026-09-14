@@ -87,7 +87,7 @@ all = { level = "deny", priority = -1 }
 # prebuilt executables rather than a source package, and the installers below
 # fetch and verify one rather than invoking cargo.
 [workspace.metadata.dist]
-cargo-dist-version = "0.28.0"
+cargo-dist-version = "0.32.0"
 ci = "github"
 targets = [
     "x86_64-pc-windows-msvc",
@@ -97,13 +97,16 @@ targets = [
 ]
 # Section 13.2: installation verifies a checksum before it trusts an artifact.
 checksum = "sha256"
-# `.github/workflows/release.yml` is written and reviewed by hand rather than
-# generated, and `scripts/install.sh` is this project's installer rather than
-# a generated one, so `cargo dist` is told not to expect to own either. That
-# is a deliberate difference from the usual cargo-dist setup: an installer
-# that refuses a bad checksum and a workflow that refuses to publish a
-# partial matrix are behavior this project tests, and generated files would
-# be replaced without review. See requirement HRC-TECH-011.
+# `scripts/install.sh` and `scripts/install.ps1` are this project's installers
+# and are covered by `crates/hrc-cli/tests/release_fixture.rs`, so no
+# generated installer competes with them; `installers` is deliberately unset.
+#
+# `cargo dist` owns `.github/workflows/release.yml`, which is regenerated with
+# `dist generate`. One line of it is then changed by hand every time: the
+# generated trigger includes `pull_request`, and this repository is private
+# with billed Actions minutes (decision DEC-049), so release machinery runs on
+# tags and on demand only. `allow-dirty` records that the file is not
+# byte-identical to generated output.
 allow-dirty = ["ci"]
 
 # Release builds are optimized for a single self-contained executable that
