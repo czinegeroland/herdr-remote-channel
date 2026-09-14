@@ -321,3 +321,67 @@ fn the_body_pane_says_the_message_is_not_approved() {
 
     assert!(screen(&app).contains("not yet approved"));
 }
+
+fn release(code: KeyCode) -> KeyEvent {
+    KeyEvent {
+        code,
+        modifiers: KeyModifiers::NONE,
+        kind: KeyEventKind::Release,
+        state: KeyEventState::NONE,
+    }
+}
+
+#[test]
+fn a_key_release_is_not_a_second_press() {
+    // Windows reports a press and a release for the same physical key; Unix
+    // terminals report only the press. Counting both would halve every
+    // interaction on this screen, and the one that matters is the two-press
+    // approval: the press would propose the delivery and the release would
+    // confirm it, so a single keystroke would disclose a quarantined body to
+    // an agent. The whole screen exists to make that impossible.
+    let mut app = app();
+
+    app.on_key(key(KeyCode::Enter));
+    app.on_key(release(KeyCode::Enter));
+    assert!(
+        app.is_revealed(),
+        "the release should not have hidden the body again"
+    );
+
+    assert!(app.on_key(key(KeyCode::Char('a'))).is_none());
+    assert_eq!(app.focus(), Focus::Confirm);
+
+    assert!(
+        app.on_key(release(KeyCode::Char('a'))).is_none(),
+        "releasing the proposing key must not confirm the decision"
+    );
+    assert_eq!(
+        app.focus(),
+        Focus::Confirm,
+        "the screen should still be waiting for a deliberate confirmation"
+    );
+}
+
+#[test]
+fn a_release_cannot_confirm_a_proposed_decision() {
+    // The same hazard reached from the other side: once a decision is
+    // proposed, any key that is not `y` cancels it. A release arriving as a
+    // key press would therefore cancel the proposal rather than confirm it —
+    // harmless here, but it would make the screen unusable on Windows, where
+    // every proposal would be cancelled by letting go of the key.
+    let mut app = app();
+    app.on_key(key(KeyCode::Enter));
+    app.on_key(key(KeyCode::Char('d')));
+    assert_eq!(app.focus(), Focus::Confirm);
+
+    app.on_key(release(KeyCode::Char('d')));
+
+    let outcome = app.on_key(key(KeyCode::Char('y')));
+    assert_eq!(
+        outcome,
+        Some(Outcome::Decline {
+            message_id: "msg-1".into()
+        }),
+        "the proposal should have survived the release"
+    );
+}

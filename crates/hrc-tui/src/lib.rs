@@ -20,7 +20,9 @@
 #![warn(missing_docs)]
 
 pub mod app;
+pub mod run;
 pub mod view;
 
 pub use app::{App, Focus, Outcome, PendingItem};
+pub use run::run;
 pub use view::render;

@@ -55,9 +55,24 @@ Confirm the install:
 herdr plugin list
 ```
 
-The plugin registers a startup hook, a `workspace.focused` event hook, and an
-inbox action and pane. The pane is read-only: it shows what is waiting and
-who sent it, never an unapproved body.
+The plugin registers a startup hook, a `workspace.focused` event hook, an
+inbox action, and two panes:
+
+- **Remote channel inbox** — a split pane showing what has arrived, who sent
+  it, and what is waiting on you. It never shows an unapproved body.
+- **Remote channel review** — the trusted approval screen, opened as a modal
+  popup. This is the one surface where a quarantined body is displayed, and
+  the only place a decision about one is made.
+
+The review pane needs the daemon running (`hrc daemon`). Revealing a body
+takes a deliberate key, every decision takes a second confirming key, and the
+confirmation names what is about to happen — so no key press can approve
+anything by accident.
+
+`hrc review` opens the same screen in a terminal. Both refuse with
+`authorization_required` unless a human is actually there: standard input and
+standard output must both be a terminal, which a pipe, a captured subprocess,
+and an agent's tool call are not.
 
 ### For local development
 

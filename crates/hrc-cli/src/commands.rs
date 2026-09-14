@@ -2157,7 +2157,7 @@ fn time_from_rfc3339(value: &str) -> Option<i64> {
 }
 
 /// Renders seconds since the Unix epoch as an RFC 3339 UTC timestamp.
-fn rfc3339_from(seconds: i64) -> String {
+pub(crate) fn rfc3339_from(seconds: i64) -> String {
     let days = seconds.div_euclid(86_400);
     let remainder = seconds.rem_euclid(86_400);
     let (year, month, day) = civil_from_days(days);
@@ -3599,6 +3599,7 @@ pub fn herdr_action(context: &Context, action: &str) -> Result<Value> {
     // action and the inbox pane show the same thing, so they share a body.
     match action {
         "inbox" => herdr_pane(context, "inbox"),
+        "review" => herdr_pane(context, "review"),
         other => Err(CliError::UnknownHerdrTarget {
             kind: "action",
             name: other.to_owned(),
@@ -3656,6 +3657,11 @@ pub fn herdr_pane(context: &Context, pane: &str) -> Result<Value> {
     })?;
 
     match pane {
+        // The trusted approval screen. Herdr opens this as a session-modal
+        // popup, which is a real terminal, so the screen runs here rather
+        // than rendering rows for the host to print.
+        hrc_herdr::Pane::Review => review::review(context, None, &review::local_agent()),
+
         hrc_herdr::Pane::Inbox => {
             let database = Database::open(context.paths.database())?;
             let channel = only_channel(&database)?;
@@ -3802,6 +3808,8 @@ fn make_repository_public(
 
     Ok(())
 }
+
+pub mod review;
 
 #[cfg(test)]
 mod tests;

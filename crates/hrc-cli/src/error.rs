@@ -77,6 +77,28 @@ pub enum CliError {
     #[error("no channel is configured; run `hrc create` or `hrc join` first")]
     NoChannel,
 
+    /// The trusted approval screen was asked for without a human present.
+    ///
+    /// PRD section 22.7 refuses *non-interactive* invocation, which is the
+    /// distinction that matters: the boundary is not that a human may never
+    /// approve from a terminal, it is that a program may not. A pipe, a
+    /// captured subprocess, and an agent's tool call are all indistinguishable
+    /// from each other here, and none of them is a person.
+    #[error(
+        "the trusted approval screen needs an interactive terminal; \
+         open the Herdr `Remote channel review` pane, or run `hrc review` \
+         directly in a terminal"
+    )]
+    NotInteractive,
+
+    /// The daemon's trusted interface did not answer.
+    ///
+    /// Every disclosure of a quarantined body goes through the daemon, so
+    /// there is no degraded mode to fall back to here: without it the screen
+    /// would have nothing to show.
+    #[error("the hrc daemon is not running; start it with `hrc daemon`")]
+    DaemonUnavailable,
+
     /// The confirmation was recorded but the visibility change could not be
     /// made from here.
     #[error("{reason}")]
@@ -172,6 +194,15 @@ impl CliError {
             CliError::ChannelExists { .. } => "channel_exists",
             CliError::Entropy => "entropy_unavailable",
             CliError::NoChannel => "no_channel",
+            // Deliberately the same stable code as the boundary refusal.
+            // PRD section 22.7 requires non-interactive invocation of a
+            // trusted operation to fail with *the* authorization-required
+            // error, and a caller scripting `hrc review` must not be able to
+            // tell "no human here" apart from "not allowed" — both mean the
+            // same thing to a program, and a second code would invite
+            // retrying against the first.
+            CliError::NotInteractive => "authorization_required",
+            CliError::DaemonUnavailable => "daemon_unavailable",
             CliError::AmbiguousChannel => "ambiguous_channel",
             CliError::PublicationUnavailable { .. } => "publication_unavailable",
             CliError::UnknownHerdrTarget { .. } => "unknown_herdr_target",
@@ -216,7 +247,12 @@ impl CliError {
             | CliError::ChannelNotPublished { .. }
             | CliError::LocalDeviceNotInChannel
             | CliError::InviteChannelMismatch { .. }
+            | CliError::DaemonUnavailable
             | CliError::PublicationUnavailable { .. } => exit::FAILURE,
+
+            // Same reasoning as the code above: to a program this is the
+            // authorization boundary refusing, and it must exit like one.
+            CliError::NotInteractive => exit::AUTHORIZATION_REQUIRED,
         }
     }
 }

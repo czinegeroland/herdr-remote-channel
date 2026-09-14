@@ -39,3 +39,11 @@ id = "inbox"
 title = "Remote channel inbox"
 placement = "split"
 command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "pane", "inbox"]
+
+[[panes]]
+id = "review"
+title = "Remote channel review"
+placement = "popup"
+width = "80%"
+height = "80%"
+command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "pane", "review"]

@@ -20,6 +20,7 @@ hrc-herdr = { workspace = true }
 hrc-ipc = { workspace = true }
 hrc-protocol = { workspace = true }
 hrc-storage = { workspace = true }
+hrc-tui = { workspace = true }
 hrc-transport = { workspace = true }
 hrc-transport-git = { workspace = true }
 secrecy = { workspace = true }

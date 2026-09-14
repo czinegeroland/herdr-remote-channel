@@ -4,7 +4,7 @@
 //! interactive approval, and because a decision that can be reached by a
 //! stray click is a decision that can be made by accident.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use hrc_core::gate::AgentView;
 
 /// One entry awaiting a human decision.
@@ -143,6 +143,19 @@ impl App {
     /// means in practice — not that a human was present, but that a human
     /// answered a question naming what was about to happen.
     pub fn on_key(&mut self, key: KeyEvent) -> Option<Outcome> {
+        // Windows reports a press and a release for the same physical key,
+        // while Unix terminals report only the press. Counting both would
+        // halve every interaction here: the press proposes a decision and the
+        // release confirms it, so one keystroke would approve a disclosure.
+        //
+        // The guard lives in the state machine rather than in the runner
+        // because it is the two-press rule that makes this screen trusted,
+        // and a rule that depends on the caller filtering its input is a rule
+        // the next caller breaks.
+        if key.kind != KeyEventKind::Press {
+            return None;
+        }
+
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Some(Outcome::Quit);
         }

@@ -95,6 +95,12 @@ pub struct PaneEntry {
     pub title: String,
     /// How Herdr places the pane.
     pub placement: String,
+    /// Popup width, in terminal cells or as a percentage. Popups only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<String>,
+    /// Popup height, in terminal cells or as a percentage. Popups only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<String>,
     /// The argv to run.
     pub command: Vec<String>,
 }
@@ -223,10 +229,33 @@ pub fn manifest() -> Manifest {
                 id: pane.as_str().to_owned(),
                 title: match pane {
                     crate::pane::Pane::Inbox => "Remote channel inbox".to_owned(),
+                    crate::pane::Pane::Review => "Remote channel review".to_owned(),
                 },
-                // A split rather than an overlay: the inbox is something a
-                // person watches while they work, not a modal they dismiss.
-                placement: "split".to_owned(),
+                placement: match pane {
+                    // A split rather than an overlay: the inbox is something
+                    // a person watches while they work, not a modal they
+                    // dismiss.
+                    crate::pane::Pane::Inbox => "split".to_owned(),
+                    // The approval screen is modal on purpose. It is the one
+                    // surface where a quarantined body is on display, and a
+                    // popup is session-modal in Herdr: it takes every key,
+                    // Escape included, and it is not part of the tiled
+                    // layout, so a revealed body cannot be left sitting in a
+                    // corner of the workspace while the human does something
+                    // else. Deciding is meant to be the thing they are doing.
+                    crate::pane::Pane::Review => "popup".to_owned(),
+                },
+                // Sized only where the host reads it. A width on a split
+                // pane is not a smaller split, it is a field the manifest
+                // schema does not define there.
+                width: match pane {
+                    crate::pane::Pane::Inbox => None,
+                    crate::pane::Pane::Review => Some("80%".to_owned()),
+                },
+                height: match pane {
+                    crate::pane::Pane::Inbox => None,
+                    crate::pane::Pane::Review => Some("80%".to_owned()),
+                },
                 command: invoke(&["pane", pane.as_str()]),
             })
             .collect(),
