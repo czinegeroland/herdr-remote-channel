@@ -54,6 +54,50 @@ if ($LASTEXITCODE -ne 0) {
     Fail 'Unable to determine changed files.'
 }
 
+# A dependency update is exempt, and narrowly so.
+#
+# The living-PRD rule exists to keep a behaviour change traceable to the
+# requirement it serves. A version bump serves no requirement: there is no
+# row for it to move and no evidence for it to record, so a bot that opens
+# one cannot satisfy the rule and would be blocked forever. Enabling
+# Dependabot without this made every dependency pull request permanently
+# unmergeable.
+#
+# Two conditions, both required, because an exemption is a hole:
+#
+#   * The author is Dependabot itself. This comes from the event payload
+#     that GitHub populates, not from anything inside the pull request, so a
+#     contributor cannot claim it.
+#   * Every changed path is a dependency manifest. A bump that reached into
+#     `crates/` or `docs/` is not a bump, whoever opened it, and goes
+#     through the ordinary rule.
+#
+# Review is not waived by any of this: CODEOWNERS still covers every path,
+# and a bump of a crate carrying a cryptographic or canonicalization
+# guarantee is exactly the kind a human should read.
+$dependencyManifests = @(
+    'Cargo.toml',
+    'Cargo.lock',
+    '.github/dependabot.yml'
+)
+
+$eventForAuthor = Get-Content $EventPath -Raw | ConvertFrom-Json
+$author = [string]$eventForAuthor.pull_request.user.login
+$authorType = [string]$eventForAuthor.pull_request.user.type
+
+$isDependabot = ($author -eq 'dependabot[bot]') -and ($authorType -eq 'Bot')
+$onlyManifests = $changedFiles.Count -gt 0 -and -not (
+    $changedFiles | Where-Object {
+        ($dependencyManifests -notcontains $_) -and
+        ($_ -notlike '.github/workflows/*')
+    }
+)
+
+if ($isDependabot -and $onlyManifests) {
+    Write-Host "PRD traceability: dependency update by $author touching only dependency manifests; the living-PRD rule does not apply."
+    exit 0
+}
+
 if ($changedFiles -notcontains 'docs/PRD.md') {
     Fail 'Every pull request must update docs/PRD.md.'
 }
