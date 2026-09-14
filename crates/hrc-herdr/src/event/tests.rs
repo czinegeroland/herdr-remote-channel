@@ -1,76 +1,61 @@
 use super::*;
 
-use crate::pane::Pane;
-
 #[test]
-fn a_startup_event_refreshes_the_sidebar() {
-    let event = Event::parse(r#"{"event":"started"}"#).expect("a started event parses");
+fn focusing_a_workspace_refreshes_the_sidebar() {
+    let event = HostEvent::parse("workspace.focused").expect("the subscribed event parses");
 
-    assert_eq!(event, Event::Started);
+    assert_eq!(event, HostEvent::WorkspaceFocused);
     assert_eq!(event.reaction(), Reaction::RefreshStatus);
 }
 
 #[test]
-fn opening_the_inbox_pane_redraws_it() {
-    let event = Event::parse(r#"{"event":"pane_opened","params":{"pane":"inbox"}}"#)
-        .expect("a pane event parses");
-
+fn surrounding_whitespace_does_not_hide_an_event() {
+    // The name arrives through an environment variable, which is one of the
+    // easier places for a trailing newline to survive.
     assert_eq!(
-        event.reaction(),
-        Reaction::RefreshPane { pane: Pane::Inbox }
+        HostEvent::parse(" workspace.focused\n"),
+        Some(HostEvent::WorkspaceFocused)
     );
 }
 
 #[test]
-fn a_pane_this_plugin_does_not_own_is_left_alone() {
-    let event = Event::parse(r#"{"event":"pane_opened","params":{"pane":"someone_elses"}}"#)
-        .expect("a pane event parses");
-
-    assert_eq!(event.reaction(), Reaction::Ignore);
+fn an_event_this_plugin_did_not_subscribe_to_is_ignored() {
+    for name in [
+        "workspace.created",
+        "workspace.closed",
+        "worktree.created",
+        "tab.focused",
+        "approve_everything",
+        "",
+    ] {
+        assert_eq!(HostEvent::parse(name), None, "`{name}` should not parse");
+        assert_eq!(reaction_to(Some(name)), Reaction::Ignore);
+    }
 }
 
 #[test]
-fn a_tick_refreshes_and_shutdown_does_nothing() {
-    assert_eq!(Event::Tick.reaction(), Reaction::RefreshStatus);
-    assert_eq!(Event::Stopping.reaction(), Reaction::Ignore);
+fn a_hook_invoked_with_no_event_named_does_nothing() {
+    assert_eq!(reaction_to(None), Reaction::Ignore);
 }
 
 #[test]
-fn an_unknown_event_is_an_error_rather_than_a_silent_no_op() {
-    let error =
-        Event::parse(r#"{"event":"approve_everything"}"#).expect_err("an unknown event is refused");
-
-    assert!(!error.is_empty());
-}
-
-#[test]
-fn an_unexpected_field_is_refused_rather_than_ignored() {
-    // A dropped parameter is the worst outcome on any boundary: the caller
-    // reasonably concludes it was honored.
-    Event::parse(r#"{"event":"pane_opened","params":{"pane":"inbox","approve":true}}"#)
-        .expect_err("an unknown field is refused");
-}
-
-#[test]
-fn malformed_input_does_not_panic() {
-    Event::parse("").expect_err("empty input is refused");
-    Event::parse("not json").expect_err("garbage is refused");
-    Event::parse("[]").expect_err("the wrong shape is refused");
+fn every_subscribed_event_uses_the_host_dotted_naming() {
+    for event in HostEvent::ALL {
+        let name = event.as_str();
+        assert!(
+            name.contains('.'),
+            "`{name}` is not a Herdr event name; the host namespaces them"
+        );
+        assert_eq!(name, name.trim());
+    }
 }
 
 #[test]
 fn no_reaction_can_approve_deliver_or_reveal_anything() {
     // The whole point of the type. If a variant is ever added that could,
     // this assertion is where the reviewer is meant to stop and think.
-    for event in [
-        Event::Started,
-        Event::Tick,
-        Event::Stopping,
-        Event::PaneOpened {
-            pane: "inbox".to_owned(),
-        },
-    ] {
-        let rendered = serde_json::to_string(&event.reaction()).expect("a reaction serializes");
+    for reaction in [Reaction::RefreshStatus, Reaction::Ignore] {
+        let rendered = serde_json::to_string(&reaction).expect("a reaction serializes");
 
         for forbidden in ["approve", "deliver", "body", "authorization"] {
             assert!(

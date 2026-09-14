@@ -6,6 +6,10 @@
 # cargo-dist output
 /dist/
 
+# The plugin's own copy of the binary. `herdr/build.sh` writes it at
+# `herdr plugin install` time; it is a build artifact, not source.
+/bin/
+
 # Coverage and profiling
 *.profraw
 *.profdata

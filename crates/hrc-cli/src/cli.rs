@@ -369,8 +369,10 @@ pub enum HerdrAction {
         /// Action name, for example `inbox`.
         name: String,
     },
-    /// Handle a Herdr event delivered on standard input.
+    /// Handle a Herdr event named in `HERDR_PLUGIN_EVENT`.
     Event,
+    /// Print the `herdr-plugin.toml` this build advertises.
+    Manifest,
     /// Render a named Herdr pane.
     Pane {
         /// Pane name, for example `inbox`.

@@ -3596,12 +3596,12 @@ pub fn herdr_action(context: &Context, action: &str) -> Result<Value> {
 /// something changed, and the alternative — a hook that reaches into the
 /// daemon on every tick — is the repeated spawning PRD section 13.2 says to
 /// avoid.
-pub fn herdr_event(context: &Context, input: &str) -> Result<Value> {
-    let event = hrc_herdr::Event::parse(input).map_err(|reason| CliError::MalformedEvent {
-        reason: reason.lines().next().unwrap_or("unparseable").to_owned(),
-    })?;
-
-    let reaction = event.reaction();
+pub fn herdr_event(context: &Context, event: Option<&str>) -> Result<Value> {
+    // An unrecognized event name is ignored rather than refused. Herdr names
+    // the event in an environment variable and may deliver one this plugin
+    // did not subscribe to; exiting non-zero would show a person a failed
+    // plugin for something that is not a failure.
+    let reaction = hrc_herdr::reaction_to(event);
 
     // The sidebar is cheap and is what every refresh reaction needs, so it
     // travels with the answer rather than costing the host a second process.
@@ -3612,8 +3612,22 @@ pub fn herdr_event(context: &Context, input: &str) -> Result<Value> {
 
     Ok(json!({
         "status": "ok",
+        "event": event,
         "reaction": reaction,
         "sidebar": sidebar,
+    }))
+}
+
+/// `hrc herdr manifest`: the `herdr-plugin.toml` this build advertises.
+///
+/// Printed rather than written, so regenerating the checked-in file is an
+/// explicit redirection a person performs and reviews, not something a
+/// command does to a working tree on its own.
+pub fn herdr_manifest() -> Result<Value> {
+    Ok(json!({
+        "status": "ok",
+        "manifest": hrc_herdr::manifest(),
+        "toml": hrc_herdr::manifest().to_toml(),
     }))
 }
 

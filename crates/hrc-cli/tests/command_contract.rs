@@ -1960,7 +1960,11 @@ fn herdr_entry_points_are_dispatched_by_the_same_binary() {
     assert!(startup.status.success());
 
     let value: Value = serde_json::from_slice(&startup.stdout).expect("stdout should be JSON");
-    assert_eq!(value["manifest"]["executable"], "hrc");
+    assert_eq!(value["manifest"]["id"], "herdr-remote-channel");
+    assert_eq!(
+        value["manifest"]["startup"][0]["command"][0], "bin/hrc",
+        "the manifest must resolve the binary from the plugin root"
+    );
     assert!(
         value["sidebar"]
             .as_str()
@@ -2057,60 +2061,69 @@ fn an_unknown_herdr_action_or_pane_is_a_usage_error() {
 }
 
 #[test]
-fn a_herdr_event_is_read_from_standard_input_and_answered_with_a_reaction() {
+fn a_herdr_event_is_named_in_the_environment_and_answered_with_a_reaction() {
+    // Herdr does not write the event to standard input. It runs the hook's
+    // argv and names the event in `HERDR_PLUGIN_EVENT`.
     let (home, _remote) = channel_fixture();
 
-    let mut child = hrc_std_in(home.path())
+    let output = hrc_in(home.path())
+        .env("HERDR_PLUGIN_EVENT", "workspace.focused")
         .args(["herdr", "event", "--json"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .expect("the event hook should start");
-
-    std::io::Write::write_all(
-        child.stdin.as_mut().expect("stdin is piped"),
-        br#"{"event":"pane_opened","params":{"pane":"inbox"}}"#,
-    )
-    .expect("the event should be written");
-    drop(child.stdin.take());
-
-    let output = child
-        .wait_with_output()
-        .expect("the event hook should exit");
+        .output()
+        .expect("the event hook should run");
     assert!(output.status.success());
 
     let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
-    assert_eq!(value["reaction"]["reaction"], "refresh_pane");
-    assert_eq!(value["reaction"]["pane"], "inbox");
+    assert_eq!(value["reaction"]["reaction"], "refresh_status");
+    assert!(
+        value["sidebar"]
+            .as_str()
+            .expect("a refresh carries the sidebar it refreshes")
+            .starts_with("HRC: ")
+    );
 }
 
 #[test]
-fn a_herdr_event_that_is_not_an_event_is_refused() {
+fn an_event_this_plugin_did_not_subscribe_to_is_ignored_rather_than_failed() {
+    // A hook that exits non-zero on an event it was not registered for shows
+    // a person a failed plugin for something that is not a failure.
     let (home, _remote) = channel_fixture();
 
-    let mut child = hrc_std_in(home.path())
-        .args(["herdr", "event", "--json"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .expect("the event hook should start");
+    for event in ["worktree.created", "tab.focused", "approve_everything"] {
+        let output = hrc_in(home.path())
+            .env("HERDR_PLUGIN_EVENT", event)
+            .args(["herdr", "event", "--json"])
+            .output()
+            .expect("the event hook should run");
 
-    std::io::Write::write_all(
-        child.stdin.as_mut().expect("stdin is piped"),
-        br#"{"event":"approve_everything"}"#,
-    )
-    .expect("the event should be written");
-    drop(child.stdin.take());
+        assert!(
+            output.status.success(),
+            "`{event}` should not fail the hook"
+        );
 
-    let output = child
-        .wait_with_output()
-        .expect("the event hook should exit");
-    assert_eq!(output.status.code(), Some(USAGE));
-
-    let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
-    assert_eq!(value["code"], "malformed_event");
+        let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+        assert_eq!(value["reaction"]["reaction"], "ignore", "{event}");
+        assert!(
+            value["sidebar"].is_null(),
+            "nothing should be computed for an event this plugin ignores"
+        );
+    }
 }
 
+#[test]
+fn a_herdr_event_hook_invoked_with_no_event_named_does_nothing() {
+    let (home, _remote) = channel_fixture();
+
+    let output = hrc_in(home.path())
+        .env_remove("HERDR_PLUGIN_EVENT")
+        .args(["herdr", "event", "--json"])
+        .output()
+        .expect("the event hook should run");
+
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(value["reaction"]["reaction"], "ignore");
+}
 #[test]
 fn a_message_can_carry_an_expiry_and_the_inbox_shows_it() {
     // PRD requirement HRC-MSG-005: messages support expiration. Section 11.5

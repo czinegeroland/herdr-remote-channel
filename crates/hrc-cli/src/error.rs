@@ -94,13 +94,6 @@ pub enum CliError {
         name: String,
     },
 
-    /// The JSON Herdr wrote to standard input was not an event.
-    #[error("could not read the Herdr event: {reason}")]
-    MalformedEvent {
-        /// Why parsing failed.
-        reason: String,
-    },
-
     /// Several channels exist and the command did not say which.
     #[error("several channels are configured; pass --channel to choose one")]
     AmbiguousChannel,
@@ -182,7 +175,6 @@ impl CliError {
             CliError::AmbiguousChannel => "ambiguous_channel",
             CliError::PublicationUnavailable { .. } => "publication_unavailable",
             CliError::UnknownHerdrTarget { .. } => "unknown_herdr_target",
-            CliError::MalformedEvent { .. } => "malformed_event",
             CliError::ChannelNotPublished { .. } => "channel_not_published",
             CliError::LocalDeviceNotInChannel => "device_not_in_channel",
             CliError::InviteExpired { .. } => "invite_expired",
@@ -211,8 +203,7 @@ impl CliError {
             | CliError::NoSuchMessage { .. }
             | CliError::ContextRepositoryRequired { .. }
             | CliError::InvalidContextSource { .. }
-            | CliError::UnknownHerdrTarget { .. }
-            | CliError::MalformedEvent { .. } => exit::USAGE,
+            | CliError::UnknownHerdrTarget { .. } => exit::USAGE,
             CliError::Io { .. }
             | CliError::Storage(_)
             | CliError::Crypto(_)
