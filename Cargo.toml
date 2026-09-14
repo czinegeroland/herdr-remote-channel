@@ -52,7 +52,18 @@ hmac = "0.13"
 crossterm = "0.29"
 interprocess = { version = "2", features = ["tokio"] }
 ratatui = "0.30"
-tokio = { version = "1", features = ["io-util", "net", "rt", "sync", "time", "macros"] }
+# `signal` is what makes graceful shutdown possible: PRD requirement
+# HRC-TECH-003 asks Tokio to own cancellation, and a daemon that can only be
+# killed cannot finish the tick it is in the middle of.
+tokio = { version = "1", features = [
+    "io-util",
+    "net",
+    "rt",
+    "signal",
+    "sync",
+    "time",
+    "macros",
+] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 secrecy = "0.10"
 tempfile = "3"

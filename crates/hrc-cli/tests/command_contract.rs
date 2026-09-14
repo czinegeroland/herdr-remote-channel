@@ -2260,6 +2260,100 @@ fn hrc_std_in(home: &std::path::Path) -> std::process::Command {
     command
 }
 
+/// Sends SIGTERM to a running child and waits for it.
+///
+/// Unix only: this is the signal a service manager and a container runtime
+/// send, and Windows has no equivalent to deliver from a test.
+#[cfg(unix)]
+fn terminate(child: &mut std::process::Child) -> std::process::ExitStatus {
+    let pid = child.id() as i32;
+
+    // SAFETY is not available in this workspace, which forbids unsafe code,
+    // so the signal goes through the `kill` program rather than libc.
+    let sent = std::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()
+        .expect("kill should run");
+    assert!(sent.success(), "could not signal the daemon");
+
+    for _ in 0..100 {
+        if let Some(status) = child.try_wait().expect("wait should work") {
+            return status;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    child.kill().ok();
+    panic!("the daemon did not exit within five seconds of SIGTERM");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_daemon_stops_cleanly_on_sigterm_and_releases_its_endpoints() {
+    // PRD requirement HRC-TECH-003: Tokio owns cancellation. A daemon that
+    // can only be killed is one that gets killed halfway through publishing.
+    let (home, _remote) = channel_fixture();
+    let (mut child, startup) = start_daemon(home.path());
+    assert_eq!(startup["status"], "ok");
+
+    let agent = daemon_endpoint(home.path(), Interface::AgentSafe);
+    let trusted = daemon_endpoint(home.path(), Interface::TrustedHuman);
+
+    // The startup line is printed before the runtime binds, so wait for the
+    // endpoint to appear rather than racing it. Without this precondition
+    // the test would also pass on a daemon that never listened at all.
+    let listening = match agent.path() {
+        None => true,
+        Some(path) => (0..100).any(|_| {
+            if path.exists() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            false
+        }),
+    };
+    assert!(
+        listening,
+        "the daemon should be listening before it is asked to stop"
+    );
+
+    let status = terminate(&mut child);
+
+    assert!(
+        status.success(),
+        "SIGTERM should be a clean stop, not a failure: {status:?}"
+    );
+
+    for endpoint in [agent, trusted] {
+        if let Some(path) = endpoint.path() {
+            assert!(
+                !path.exists(),
+                "{} should be removed on the way out",
+                path.display()
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_daemon_can_be_restarted_immediately_after_a_clean_stop() {
+    // The reason releasing the endpoints matters. A restart that had to
+    // reclaim a stale socket would do extra work to prove nobody is behind
+    // it, and that probe is the part most likely to be wrong.
+    let (home, _remote) = channel_fixture();
+
+    let (mut first, _) = start_daemon(home.path());
+    let status = terminate(&mut first);
+    assert!(status.success());
+
+    let (mut second, startup) = start_daemon(home.path());
+    assert_eq!(startup["status"], "ok", "the daemon should start again");
+
+    let status = terminate(&mut second);
+    assert!(status.success());
+}
+
 fn start_daemon(home: &std::path::Path) -> (std::process::Child, Value) {
     let mut child = hrc_std_in(home)
         .args(["daemon", "--json"])
