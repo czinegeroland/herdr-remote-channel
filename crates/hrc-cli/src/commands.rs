@@ -352,7 +352,7 @@ fn publish_control(
 }
 
 /// The single channel this installation is configured for, if there is one.
-fn only_channel(database: &Database) -> Result<hrc_storage::ChannelRecord> {
+pub(crate) fn only_channel(database: &Database) -> Result<hrc_storage::ChannelRecord> {
     let mut channels = database.channels()?;
 
     match channels.len() {
@@ -3600,6 +3600,7 @@ pub fn herdr_action(context: &Context, action: &str) -> Result<Value> {
     match action {
         "inbox" => herdr_pane(context, "inbox"),
         "review" => herdr_pane(context, "review"),
+        "joins" => herdr_pane(context, "joins"),
         other => Err(CliError::UnknownHerdrTarget {
             kind: "action",
             name: other.to_owned(),
@@ -3661,6 +3662,9 @@ pub fn herdr_pane(context: &Context, pane: &str) -> Result<Value> {
         // popup, which is a real terminal, so the screen runs here rather
         // than rendering rows for the host to print.
         hrc_herdr::Pane::Review => review::review(context, None, &review::local_agent()),
+
+        // Membership approval, the other decision a human owns.
+        hrc_herdr::Pane::Joins => review::review_joins(context),
 
         hrc_herdr::Pane::Inbox => {
             let database = Database::open(context.paths.database())?;

@@ -229,6 +229,7 @@ pub fn manifest() -> Manifest {
                 id: pane.as_str().to_owned(),
                 title: match pane {
                     crate::pane::Pane::Inbox => "Remote channel inbox".to_owned(),
+                    crate::pane::Pane::Joins => "Remote channel join requests".to_owned(),
                     crate::pane::Pane::Review => "Remote channel review".to_owned(),
                 },
                 placement: match pane {
@@ -243,18 +244,20 @@ pub fn manifest() -> Manifest {
                     // layout, so a revealed body cannot be left sitting in a
                     // corner of the workspace while the human does something
                     // else. Deciding is meant to be the thing they are doing.
-                    crate::pane::Pane::Review => "popup".to_owned(),
+                    // Admitting a member is the same kind of decision as
+                    // approving content, and gets the same modal treatment.
+                    crate::pane::Pane::Joins | crate::pane::Pane::Review => "popup".to_owned(),
                 },
                 // Sized only where the host reads it. A width on a split
                 // pane is not a smaller split, it is a field the manifest
                 // schema does not define there.
                 width: match pane {
                     crate::pane::Pane::Inbox => None,
-                    crate::pane::Pane::Review => Some("80%".to_owned()),
+                    crate::pane::Pane::Joins | crate::pane::Pane::Review => Some("80%".to_owned()),
                 },
                 height: match pane {
                     crate::pane::Pane::Inbox => None,
-                    crate::pane::Pane::Review => Some("80%".to_owned()),
+                    crate::pane::Pane::Joins | crate::pane::Pane::Review => Some("80%".to_owned()),
                 },
                 command: invoke(&["pane", pane.as_str()]),
             })

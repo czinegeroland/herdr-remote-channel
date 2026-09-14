@@ -21,7 +21,7 @@ use hrc_core::rpc::{TrustedRequest, WireDecision};
 use hrc_ipc::Client;
 use hrc_ipc::endpoint::{Endpoint, Interface};
 use hrc_storage::Database;
-use hrc_tui::{App, Outcome, PendingItem};
+use hrc_tui::{App, JoinApp, JoinOutcome, Outcome, PendingItem, PendingJoin};
 use serde_json::{Value, json};
 
 use crate::commands::Context;
@@ -288,4 +288,103 @@ fn agent_label(value: &Value) -> Option<String> {
         .find_map(|key| value.get(key).and_then(Value::as_str))
         .filter(|name| !name.is_empty())
         .map(str::to_owned)
+}
+
+/// Opens the membership approval screen (PRD requirement HRC-CH-007).
+///
+/// The requests come from `join_pending`, which only returns those whose
+/// proof already validates against an invite this installation issued. An
+/// unverifiable request is not shown, because there is nothing a human could
+/// usefully decide about one.
+pub fn review_joins(context: &Context) -> Result<Value> {
+    if !is_a_terminal() {
+        return Err(CliError::NotInteractive);
+    }
+
+    let listed = crate::commands::join_pending(context)?;
+    let requests = pending_joins(&listed);
+
+    if requests.is_empty() {
+        return Ok(json!({
+            "status": "ok",
+            "pending": 0,
+            "decided": Value::Null,
+        }));
+    }
+
+    let channel_local_name = channel_label(context)?;
+    let mut screen = JoinApp::new(requests, channel_local_name);
+    let outcome = hrc_tui::run(&mut screen).map_err(|source| CliError::Io {
+        action: "run the membership approval screen",
+        source,
+    })?;
+
+    let (request, admitted) = match outcome {
+        JoinOutcome::Admit { request_id } => (
+            TrustedRequest::ApproveJoin {
+                request_id: request_id.clone(),
+            },
+            true,
+        ),
+        JoinOutcome::Refuse { request_id } => (
+            TrustedRequest::RejectJoin {
+                request_id: request_id.clone(),
+            },
+            false,
+        ),
+        // Leaving is not a decision, and recording one would put a choice in
+        // the audit log that nobody made.
+        JoinOutcome::Quit => {
+            return Ok(json!({
+                "status": "ok",
+                "decided": Value::Null,
+            }));
+        }
+    };
+
+    let runtime = runtime()?;
+    let endpoint = trusted_endpoint(context)?;
+    let applied: Value = runtime.block_on(async {
+        let mut client = connect(&endpoint).await?;
+        let response: Value = client.call(&request).await.map_err(CliError::from)?;
+        Ok::<Value, CliError>(response)
+    })?;
+
+    Ok(json!({
+        "status": "ok",
+        "decided": if admitted { "admit" } else { "refuse" },
+        "daemon": applied,
+    }))
+}
+
+/// Reads the pending join requests out of a `join pending` result.
+fn pending_joins(listed: &Value) -> Vec<PendingJoin> {
+    listed["pending"]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    Some(PendingJoin {
+                        request_id: entry["requestId"].as_str()?.to_owned(),
+                        principal_id: entry["principalId"].as_str()?.to_owned(),
+                        device_id: entry["deviceId"].as_str()?.to_owned(),
+                        created_at: entry["createdAt"].as_str().unwrap_or_default().to_owned(),
+                        safety_phrase: entry["safetyPhrase"].as_str()?.to_owned(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The locally chosen name of the channel being admitted to.
+///
+/// Local rather than anything a remote party supplied: the confirmation
+/// prompt names it, and a name a joiner could choose would be a name a
+/// joiner could use to make admission read as routine.
+fn channel_label(context: &Context) -> Result<String> {
+    let database = Database::open(context.paths.database())?;
+    let channel = crate::commands::only_channel(&database)?;
+    Ok(channel.local_name)
 }

@@ -288,3 +288,15 @@ impl App {
         }
     }
 }
+
+impl crate::run::Screen for App {
+    type Outcome = Outcome;
+
+    fn draw(&self, frame: &mut ratatui::Frame<'_>) {
+        crate::render(frame, self);
+    }
+
+    fn on_key(&mut self, key: KeyEvent) -> Option<Outcome> {
+        App::on_key(self, key)
+    }
+}

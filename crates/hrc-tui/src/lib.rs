@@ -20,9 +20,11 @@
 #![warn(missing_docs)]
 
 pub mod app;
+pub mod join;
 pub mod run;
 pub mod view;
 
 pub use app::{App, Focus, Outcome, PendingItem};
-pub use run::run;
-pub use view::render;
+pub use join::{JoinApp, JoinOutcome, PendingJoin};
+pub use run::{Screen, run};
+pub use view::{render, render_joins};

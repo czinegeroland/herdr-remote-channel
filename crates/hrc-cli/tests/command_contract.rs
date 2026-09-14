@@ -2994,3 +2994,27 @@ fn the_refusal_says_where_a_human_can_actually_approve() {
         "the refusal should point somewhere a decision can be made: {stderr}"
     );
 }
+
+#[test]
+fn the_membership_pane_refuses_a_captured_terminal_too() {
+    // Admitting a member is the other decision a human owns, and it has to
+    // hold the same line as message approval. A boundary enforced on one
+    // pane and forgotten on the other is how a channel ends up letting a
+    // script add members.
+    let (home, _remote) = channel_fixture();
+
+    let output = hrc_in(home.path())
+        .args(["herdr", "pane", "joins"])
+        .output()
+        .expect("command should run");
+
+    assert_eq!(
+        output.status.code(),
+        Some(AUTHORIZATION_REQUIRED),
+        "the membership pane must refuse without a human at the terminal"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "no content may reach standard output"
+    );
+}

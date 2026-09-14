@@ -85,9 +85,10 @@ pub enum CliError {
     /// captured subprocess, and an agent's tool call are all indistinguishable
     /// from each other here, and none of them is a person.
     #[error(
-        "the trusted approval screen needs an interactive terminal; \
-         open the Herdr `Remote channel review` pane, or run `hrc review` \
-         directly in a terminal"
+        "this decision needs an interactive terminal; open the matching \
+         Herdr pane (`Remote channel review` for messages, `Remote channel \
+         join requests` for members), or run the command directly in a \
+         terminal"
     )]
     NotInteractive,
 

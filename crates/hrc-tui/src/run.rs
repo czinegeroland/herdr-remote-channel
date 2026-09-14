@@ -18,9 +18,25 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui::{Frame, Terminal, backend::CrosstermBackend};
 
-use crate::{App, Outcome, render};
+/// Something this module can put on a terminal.
+///
+/// The trait exists so the terminal handling below is written once. Every
+/// screen here has the same shape — draw, take a key, maybe reach a decision
+/// — and the part that is delicate is not the drawing but restoring the
+/// terminal afterwards. Two copies of that would be two chances to leave a
+/// human's shell in raw mode.
+pub trait Screen {
+    /// What this screen produces when the human is done with it.
+    type Outcome;
+
+    /// Draws the current state.
+    fn draw(&self, frame: &mut Frame<'_>);
+
+    /// Handles one key press, returning an outcome when one is reached.
+    fn on_key(&mut self, key: crossterm::event::KeyEvent) -> Option<Self::Outcome>;
+}
 
 /// Restores the terminal when it goes out of scope.
 ///
@@ -61,21 +77,21 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// Shows the approval screen until the human decides or leaves.
+/// Shows a screen until the human decides or leaves.
 ///
 /// Returns what they chose. Carrying it out is the caller's job: the screen
 /// reports a decision and the daemon's trusted path applies it, so this
 /// cannot become a second place where approval rules live.
-pub fn run(app: &mut App) -> io::Result<Outcome> {
+pub fn run<S: Screen>(screen: &mut S) -> io::Result<S::Outcome> {
     let mut guard = TerminalGuard::enter()?;
 
     loop {
-        guard.terminal.draw(|frame| render(frame, app))?;
+        guard.terminal.draw(|frame| screen.draw(frame))?;
 
-        // Only key events matter, and only some of them. A resize redraws on
-        // the next pass, which the loop does anyway.
+        // Only key events matter. A resize redraws on the next pass, which
+        // the loop does anyway.
         if let Event::Key(key) = event::read()?
-            && let Some(outcome) = app.on_key(key)
+            && let Some(outcome) = screen.on_key(key)
         {
             return Ok(outcome);
         }

@@ -110,3 +110,88 @@ fn render_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
         area,
     );
 }
+
+/// Draws the membership approval screen.
+///
+/// The same two rules apply. Nothing relies on colour, so the selection is
+/// carried by a text marker. And unlike the message screen there is nothing
+/// to hide: the safety phrase must be on screen for the administrator to
+/// read it aloud, so it is drawn in full for the selected request.
+pub fn render_joins(frame: &mut Frame<'_>, app: &crate::join::JoinApp) {
+    let areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(4),
+            Constraint::Length(8),
+            Constraint::Length(3),
+        ])
+        .split(frame.area());
+
+    let items: Vec<ListItem<'_>> = app
+        .requests()
+        .iter()
+        .enumerate()
+        .map(|(index, request)| {
+            let marker = if index == app.selected_index() {
+                "> "
+            } else {
+                "  "
+            };
+
+            ListItem::new(Line::from(vec![
+                Span::raw(marker),
+                Span::raw(request.principal_id.clone()),
+                Span::raw(format!("  asked {}", request.created_at)),
+            ]))
+        })
+        .collect();
+
+    let title = format!(
+        "Join requests for {} ({})",
+        app.channel_local_name(),
+        app.requests().len()
+    );
+    frame.render_widget(
+        List::new(items).block(Block::default().borders(Borders::ALL).title(title)),
+        areas[0],
+    );
+
+    // The detail panel is where the verification actually happens, so the
+    // phrase is given its own line and labelled with what to do with it.
+    let detail = match app.selected() {
+        Some(request) => vec![
+            Line::from(format!("principal  {}", request.principal_id)),
+            Line::from(format!("device     {}", request.device_id)),
+            Line::from(""),
+            Line::from("Read this phrase to the joiner and have them read it back:"),
+            Line::from(Span::styled(
+                request.safety_phrase.clone(),
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+        ],
+        None => vec![Line::from("No join requests are waiting.")],
+    };
+
+    frame.render_widget(
+        Paragraph::new(detail)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Safety phrase"),
+            )
+            .wrap(Wrap { trim: false }),
+        areas[1],
+    );
+
+    let status = match app.proposed() {
+        Some(proposed) => proposed.prompt.clone(),
+        None => app.status().to_owned(),
+    };
+
+    frame.render_widget(
+        Paragraph::new(status)
+            .block(Block::default().borders(Borders::ALL))
+            .wrap(Wrap { trim: false }),
+        areas[2],
+    );
+}
