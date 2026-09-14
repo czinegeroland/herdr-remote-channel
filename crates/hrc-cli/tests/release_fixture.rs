@@ -320,3 +320,86 @@ fn no_installer_asks_the_user_for_a_toolchain() {
         }
     }
 }
+
+#[test]
+fn the_installed_executable_runs_daemon_mode_on_a_clean_host() {
+    // `AC-RELEASE-ARTIFACTS` names CLI *and* daemon modes. The daemon is the
+    // harder claim: it opens a database, binds two local endpoints, and
+    // stays resident, so it exercises far more of the runtime than
+    // `--version` does. If anything in that path needed a toolchain or a
+    // runtime, it would fail here.
+    let target = host_target();
+    if target == "unsupported" {
+        return;
+    }
+
+    let release = tempfile::tempdir().expect("release directory");
+    let prefix = tempfile::tempdir().expect("install prefix");
+    publish_fixture_release(release.path(), target);
+
+    let output = run_installer(release.path(), prefix.path(), target);
+    assert!(output.status.success(), "install should succeed");
+
+    let installed = prefix.path().join("hrc");
+    let state = prefix.path().join("state");
+
+    // A clean environment: no cargo, no rustc, no node, no python.
+    let clean = |arguments: &[&str]| {
+        let mut command = Command::new(&installed);
+        command
+            .args(arguments)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", prefix.path())
+            .env("HRC_HOME", &state)
+            .env("HRC_PASSPHRASE", "correct horse battery staple");
+        command
+    };
+
+    let initialized = clean(&["init"]).output().expect("init should run");
+    assert!(
+        initialized.status.success(),
+        "init failed on a clean host: {}",
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+
+    let mut daemon = clean(&["daemon", "--json"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("the daemon should start");
+
+    // Read the startup line, which is how the daemon reports it is up.
+    let mut startup = String::new();
+    {
+        use std::io::{BufRead as _, BufReader};
+        let stdout = daemon.stdout.take().expect("stdout is piped");
+        BufReader::new(stdout)
+            .read_line(&mut startup)
+            .expect("the daemon should report its startup");
+    }
+    assert!(
+        startup.contains("\"status\":\"ok\""),
+        "the daemon should start cleanly: {startup}"
+    );
+
+    // And it stops on a signal rather than needing to be killed.
+    let sent = Command::new("kill")
+        .args(["-TERM", &daemon.id().to_string()])
+        .status()
+        .expect("kill should run");
+    assert!(sent.success());
+
+    for _ in 0..100 {
+        if let Some(status) = daemon.try_wait().expect("wait should work") {
+            assert!(
+                status.success(),
+                "the installed daemon should stop cleanly: {status:?}"
+            );
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    daemon.kill().ok();
+    panic!("the installed daemon did not stop within five seconds");
+}
