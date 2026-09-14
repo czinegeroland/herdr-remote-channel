@@ -5,20 +5,24 @@ name: Build and test
 # compiles and runs pull-request code, so it deliberately uses the untrusted
 # `pull_request` trigger with a read-only token instead.
 #
-# This repository is private, so every minute is billed and the platforms are
-# not billed equally: Linux is the base rate, Windows twice it, macOS ten
-# times it. A full three-platform matrix on both the pull request and the
-# merge that follows costs roughly two dollars a change, about two thirds of
-# it on macOS alone.
+# The test job runs on all three platforms. It did not always: while this
+# repository was private every minute was billed, and the platforms are not
+# billed equally — Linux at the base rate, Windows twice it, macOS ten times
+# it — which put a full matrix at roughly two dollars a change. Decision
+# DEC-049 traded cross-platform coverage for that, and the trade had a real
+# cost: the Windows half of the plugin's install step shipped broken, because
+# nothing on a pull request ever ran Windows, and it could not be reproduced
+# on the PowerShell available locally either.
 #
-# Public Rust projects usually do run a full matrix on every pull request —
-# tokio, ripgrep and friends all do — but Actions is free for them. For a
-# private repository the ordinary pattern is fast feedback on one platform
-# per change, with the other platforms run deliberately. That is the shape
-# here: this workflow is Linux only, and `cross-platform.yml` runs Windows
-# and macOS when someone asks it to.
+# Standard GitHub-hosted runners are free and unlimited on public
+# repositories, so that trade no longer buys anything. The matrix is what
+# public Rust projects run for good reason.
 #
-# A change that touches no Rust and no agent skill runs none of it.
+# `lint` stays on Linux alone: `cargo fmt` and `clippy` produce the same
+# answer everywhere, so running them three times would cost time and tell
+# nobody anything.
+#
+# A change that touches no Rust and no agent skill still runs none of it.
 on:
   push:
     branches: [main]
@@ -119,15 +123,25 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   test:
-    name: Build and test
+    # PRD acceptance suite AC-RUST-FOUNDATION requires the workspace to build
+    # and pass on Windows, macOS, and Linux. Every change is now held to all
+    # three rather than to Linux with the others run by hand.
+    name: Build and test (${{ matrix.platform }})
     needs: plan
     if: needs.plan.outputs.rust == 'true'
-    # PRD acceptance suite AC-RUST-FOUNDATION requires the workspace to build
-    # and pass on Windows, macOS, and Linux. Linux is what every change is
-    # held to; the other two are `cross-platform.yml`, run before a release
-    # and whenever a change touches paths, filesystem behavior, process
-    # handling, or time.
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing is the interesting case, and cancelling the
+      # others would hide whether the failure is specific to it or general.
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            os: ubuntu-latest
+          - platform: windows
+            os: windows-latest
+          - platform: macos
+            os: macos-latest
     steps:
       - name: Check out the pull request
         uses: actions/checkout@v7
@@ -144,7 +158,10 @@ jobs:
       - name: Cache cargo build output
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          shared-key: test
+          # Per-platform, because artifacts from one operating system are
+          # useless to another and a shared key would have them evicting
+          # each other on every run.
+          shared-key: test-${{ matrix.platform }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # No separate `cargo build` step: `cargo test` builds the same targets,
@@ -164,3 +181,43 @@ jobs:
           set -euo pipefail
           cargo run --locked --quiet --bin hrc -- --version
           cargo run --locked --quiet --bin hrc -- --help > /dev/null
+
+  # One check to require, whatever the matrix does underneath.
+  #
+  # Branch protection names a status check as a string. Without this job, the
+  # three matrix jobs would report as `Build and test (linux)` and friends,
+  # the required `Build and test` would never report again, and every pull
+  # request would block forever — including the one making the change.
+  # Adding a platform later would need the ruleset edited in lockstep; this
+  # way it does not.
+  #
+  # `if: always()` so it reports even when the matrix was skipped. A required
+  # check that simply never arrives is indistinguishable from one still
+  # running, and merges wait on it.
+  gate:
+    name: Build and test
+    needs: [plan, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every platform to have passed
+        env:
+          RUST: ${{ needs.plan.outputs.rust }}
+          RESULT: ${{ needs.test.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "$RUST" != "true" ]; then
+            echo "No Rust, manifest, or agent-skill changes; nothing to build."
+            exit 0
+          fi
+
+          # `needs.<job>.result` for a matrix job is the aggregate: `success`
+          # only when every leg succeeded.
+          if [ "$RESULT" != "success" ]; then
+            echo "At least one platform did not pass (aggregate result: $RESULT)." >&2
+            exit 1
+          fi
+
+          echo "Linux, Windows and macOS all passed." 

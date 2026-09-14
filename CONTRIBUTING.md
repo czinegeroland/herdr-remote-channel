@@ -50,11 +50,9 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --all-targets --locked
 ```
 
-Pull-request CI runs these on Linux and skips them entirely when no Rust
-source changed. Windows and macOS are a manual workflow
-(`.github/workflows/cross-platform.yml`), to be run before a release and
-after any change touching paths, filesystem behaviour, process handling,
-time, or line endings.
+Pull-request CI runs these on Linux, Windows and macOS, and skips them
+entirely when no Rust source changed, so you will hear about a
+platform-specific problem on the pull request rather than after it merges.
 
 `docs/PRD.md` has CRLF line endings. Edit it in a way that preserves them.
 

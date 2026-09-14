@@ -145,11 +145,9 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Pull-request CI runs these on Linux only, and skips them entirely when no
-Rust source changed. Windows and macOS are a manual workflow
-(`.github/workflows/cross-platform.yml`), to be run before a release and
-after any change touching paths, filesystem behavior, process handling, time,
-or line endings (PRD decision DEC-049).
+Pull-request CI runs these on Linux, Windows and macOS, and skips them
+entirely when no Rust source changed. Formatting and lint run on Linux alone,
+because `cargo fmt` and `clippy` give the same answer everywhere.
 
 ## Exit codes
 
