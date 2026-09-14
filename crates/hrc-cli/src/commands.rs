@@ -2618,9 +2618,7 @@ fn daemon_endpoint(paths: &Paths, interface: Interface) -> Result<Endpoint> {
 
 fn handle_agent_request(context: &Context, request: Request) -> Value {
     match request {
-        request @ Request::Agent(AgentRequest::Inbox { .. })
-        | request @ Request::Agent(AgentRequest::ShowApproved { .. })
-        | request @ Request::Agent(AgentRequest::Draft { .. })
+        request @ Request::Agent(AgentRequest::Draft { .. })
         | request @ Request::Agent(AgentRequest::Wait { .. }) => json!({
             "status": "error",
             "code": "unimplemented",
@@ -2761,6 +2759,19 @@ struct DaemonBroker {
     /// Pending data reconstructed from the durable, trusted-only quarantine.
     pending: Vec<hrc_core::message::QuarantinedMessage>,
     pending_bodies: HashMap<String, String>,
+    /// The section 19.1 metadata set for every stored inbox row.
+    ///
+    /// Held as `AgentView` rather than as database rows so there is no
+    /// column here that could hold a body: the agent-safe inbox answer is
+    /// assembled from a type that has no field for one.
+    inbox_views: Vec<hrc_core::gate::AgentView>,
+    /// Content a human already released, keyed by message.
+    ///
+    /// Read from the append-only decision record rather than from the inbox
+    /// row, because the decision is what a human authorized. A row whose
+    /// disposition says `approved` with no decision behind it releases
+    /// nothing.
+    approved: HashMap<String, String>,
     /// Where the database lives, so a decision can be appended durably
     /// rather than held in memory until the daemon exits.
     database_path: std::path::PathBuf,
@@ -2857,6 +2868,25 @@ impl DaemonBroker {
             })
             .collect::<Result<Vec<_>>>()?;
 
+        let mut inbox_views = Vec::new();
+        let mut approved = HashMap::new();
+        for channel in &channel_records {
+            for entry in database.plugin_inbox(&channel.channel_id)? {
+                // No local alias store exists yet, so the verified principal
+                // ID stands in for the display name, exactly as the plugin
+                // pane does.
+                inbox_views.push(hrc_herdr::agent_view(
+                    &entry,
+                    &entry.sender_principal,
+                    &channel.local_name,
+                ));
+
+                if let Some(text) = released_content(&database, &entry.message_id)? {
+                    approved.insert(entry.message_id.clone(), text);
+                }
+            }
+        }
+
         Ok(Self {
             channel_status,
             channel_names,
@@ -2866,10 +2896,66 @@ impl DaemonBroker {
             audit,
             pending,
             pending_bodies,
+            inbox_views,
+            approved,
             database_path: context.paths.database(),
             context: context.clone(),
         })
     }
+}
+
+/// The content a human released for one message, if they released any.
+///
+/// Only a decision that actually delivers produces readable content.
+/// Keeping a message in the inbox and declining it are decisions too, and
+/// neither authorizes disclosure — so this returns `None` for both, and the
+/// agent-safe surface cannot tell them apart from a message that was never
+/// decided at all.
+fn released_content(database: &Database, message_id: &str) -> Result<Option<String>> {
+    let Some(decision) = database
+        .decisions_for(message_id)?
+        .into_iter()
+        .rfind(|decision| {
+            matches!(
+                decision.action.as_str(),
+                "deliver_to_agent" | "deliver_edited"
+            )
+        })
+    else {
+        return Ok(None);
+    };
+
+    // The edit is what the human approved when they made one. Returning the
+    // original in that case would hand an agent text a human chose not to
+    // send it.
+    let body = decision
+        .edited_content
+        .clone()
+        .unwrap_or_else(|| decision.original_content.clone());
+
+    let channel_local_name = database
+        .channel(&decision.channel_id)?
+        .map(|channel| channel.local_name)
+        .unwrap_or_else(|| decision.channel_id.clone());
+
+    let sender_principal = database
+        .inbox_entries(&decision.channel_id)?
+        .into_iter()
+        .find(|entry| entry.message_id == message_id)
+        .map(|entry| entry.sender_principal)
+        .unwrap_or_default();
+
+    // Reframed rather than stored framed: the banner names the channel and
+    // the approver as they are known now, and a banner kept as text would be
+    // one more place a sender-influenced string could be edited into.
+    let banner = hrc_core::gate::provenance_banner(
+        &sender_principal,
+        &channel_local_name,
+        message_id,
+        &decision.decided_by,
+    );
+
+    Ok(Some(format!("{banner}{body}")))
 }
 
 impl DaemonBroker {
@@ -2892,12 +2978,19 @@ impl Broker for DaemonBroker {
         (self.principal_id.clone(), self.device_id.clone())
     }
 
-    fn inbox(&self, _pending_only: bool) -> Vec<hrc_core::gate::AgentView> {
-        Vec::new()
+    fn inbox(&self, pending_only: bool) -> Vec<hrc_core::gate::AgentView> {
+        // Built from the same stored row and the same mapping the Herdr
+        // plugin uses, so the daemon's answer and the plugin's pane cannot
+        // disagree about what section 19.1 admits.
+        self.inbox_views
+            .iter()
+            .filter(|view| !pending_only || view.awaiting_decision)
+            .cloned()
+            .collect()
     }
 
-    fn approved_content(&self, _message_id: &str) -> Option<String> {
-        None
+    fn approved_content(&self, message_id: &str) -> Option<String> {
+        self.approved.get(message_id).cloned()
     }
 
     fn checks(&self) -> Vec<(String, bool)> {

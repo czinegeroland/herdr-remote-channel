@@ -2510,3 +2510,336 @@ fn a_command_never_prints_the_passphrase_or_a_private_key() {
         );
     }
 }
+
+/// The PRD's own end-to-end scenario (section 28.5), driven through the
+/// built binary against a real Git repository.
+///
+/// The messaging tests elsewhere in this file are self-addressed: one
+/// installation sends to its own principal and syncs twice. That covers the
+/// transport and the inbox, but it cannot cover the parts that only exist
+/// when there are two parties — encrypting to *someone else's* device
+/// recipient, decrypting with a key the sender never had, and a roster with
+/// more than one member. This test is two installations with independent
+/// keys, which is what the product is for.
+#[test]
+fn the_end_to_end_scenario_from_section_28_5() {
+    // Steps 1 to 3: Alice creates a channel, invites Bob, and Bob joins
+    // with keys he generated himself.
+    let (alice, _remote, bob, request_id) = pending_join_fixture();
+
+    // Step 4: Alice admits Bob. `join approve` is on the section 22.7 list,
+    // so this can only happen through the trusted socket.
+    let (mut daemon, _startup) = start_daemon(alice.path());
+    let admitted = daemon_call(
+        alice.path(),
+        Interface::TrustedHuman,
+        serde_json::json!({
+            "method": "approve_join",
+            "params": { "request_id": request_id },
+        }),
+    );
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    assert_eq!(admitted["status"], "ok", "{admitted}");
+
+    // Bob learns he is a member.
+    hrc_in(bob.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+
+    let members = hrc_in(alice.path())
+        .args(["members", "--json"])
+        .output()
+        .expect("command should run");
+    let members: Value = serde_json::from_slice(&members.stdout).expect("stdout should be JSON");
+    assert_eq!(members["rosterEpoch"], 1);
+
+    let alice_principal = principal_of(alice.path(), _remote.path());
+    let bob_principal = members["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .map(|member| member["principalId"].as_str().expect("a principal"))
+        .find(|principal| *principal != alice_principal)
+        .expect("Bob should be in the roster")
+        .to_owned();
+
+    // Step 5: Alice asks a question while Bob is offline.
+    let question = "does the backoff need jitter?";
+    let asked = hrc_in(alice.path())
+        .args(["ask", &bob_principal, question, "--json"])
+        .output()
+        .expect("command should run");
+    assert!(
+        asked.status.success(),
+        "ask failed: {}{}",
+        String::from_utf8_lossy(&asked.stdout),
+        String::from_utf8_lossy(&asked.stderr)
+    );
+    let asked: Value = serde_json::from_slice(&asked.stdout).expect("stdout should be JSON");
+    let thread_id = asked["threadId"].as_str().expect("a thread id").to_owned();
+
+    hrc_in(alice.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+
+    // Step 6: Bob reconnects and receives it, quarantined rather than
+    // delivered.
+    hrc_in(bob.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+
+    let inbox = hrc_in(bob.path())
+        .args(["inbox", "--json"])
+        .output()
+        .expect("command should run");
+    let rendered = String::from_utf8_lossy(&inbox.stdout).into_owned();
+    let inbox: Value = serde_json::from_slice(&inbox.stdout).expect("stdout should be JSON");
+
+    let entry = inbox["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .find(|entry| entry["kind"] == "question")
+        .unwrap_or_else(|| panic!("Bob should have received the question: {inbox}"));
+
+    assert_eq!(
+        entry["sender"], alice_principal,
+        "the question should be attributed to Alice"
+    );
+    assert_eq!(entry["disposition"], "quarantined");
+    assert!(
+        !rendered.contains(question),
+        "an unapproved body must not appear on the agent-safe inbox surface"
+    );
+
+    let message_id = entry["messageId"]
+        .as_str()
+        .expect("a message id")
+        .to_owned();
+    assert_eq!(
+        entry["threadId"], thread_id,
+        "the thread should survive the hop"
+    );
+
+    // Step 7: Bob approves delivery to a local agent. Both halves of the
+    // prompt gate run on the trusted socket: the preview decrypts the body
+    // for a human to read, and the approval records what they chose.
+    let (mut bob_daemon, _startup) = start_daemon(bob.path());
+
+    let previewed = daemon_call(
+        bob.path(),
+        Interface::TrustedHuman,
+        serde_json::json!({
+            "method": "preview_pending",
+            "params": { "message_id": message_id },
+        }),
+    );
+    assert_eq!(previewed["status"], "ok", "{previewed}");
+    assert!(
+        previewed.to_string().contains(question),
+        "the trusted surface should show the body the agent-safe one withheld: {previewed}"
+    );
+
+    let approved = daemon_call(
+        bob.path(),
+        Interface::TrustedHuman,
+        serde_json::json!({
+            "method": "approve",
+            "params": {
+                "message_id": message_id,
+                "decision": { "action": "deliver_to_agent", "agent": "reviewer" },
+                "expires_at": "2099-01-01T00:00:00Z",
+            },
+        }),
+    );
+    assert_eq!(approved["status"], "ok", "{approved}");
+
+    // Only now may the agent-safe surface see it, and only because a human
+    // said so.
+    let released = daemon_call(
+        bob.path(),
+        Interface::AgentSafe,
+        serde_json::json!({
+            "method": "show_approved",
+            "params": { "message_id": message_id },
+        }),
+    );
+    assert_eq!(released["status"], "ok", "{released}");
+    assert!(
+        released.to_string().contains(question),
+        "approved content should be readable on the agent-safe surface: {released}"
+    );
+
+    let _ = bob_daemon.kill();
+    let _ = bob_daemon.wait();
+
+    // Step 8: Bob returns the answer.
+    let answer = "yes, and cap it at a minute";
+    let replied = hrc_in(bob.path())
+        .args(["reply", &message_id, answer, "--json"])
+        .output()
+        .expect("command should run");
+    assert!(
+        replied.status.success(),
+        "reply failed: {}{}",
+        String::from_utf8_lossy(&replied.stdout),
+        String::from_utf8_lossy(&replied.stderr)
+    );
+    let replied: Value = serde_json::from_slice(&replied.stdout).expect("stdout should be JSON");
+    assert_eq!(replied["kind"], "answer");
+    assert_eq!(
+        replied["threadId"], thread_id,
+        "the answer should continue Alice's thread rather than open one"
+    );
+
+    hrc_in(bob.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+
+    // Step 9: Alice receives the answer in the original thread.
+    hrc_in(alice.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+
+    let thread = hrc_in(alice.path())
+        .args(["thread", &thread_id, "--json"])
+        .output()
+        .expect("command should run");
+    let thread: Value = serde_json::from_slice(&thread.stdout).expect("stdout should be JSON");
+    // `hrc thread` reads the inbox, so on the asking side the thread holds
+    // what arrived rather than both halves: Alice's own question was never
+    // delivered to her. What step 9 requires is that the answer reached her
+    // under the thread she opened, and that is what is asserted.
+    let entries = thread["entries"].as_array().expect("an entries array");
+    let answer_entry = entries
+        .iter()
+        .find(|entry| entry["kind"] == "answer")
+        .unwrap_or_else(|| panic!("Alice should have received the answer: {thread}"));
+    assert_eq!(answer_entry["sender"], bob_principal);
+    assert_eq!(thread["threadId"], thread_id);
+
+    // Step 10: both send before either fetches, so the two histories diverge
+    // and have to be reconciled without a human resolving a Git conflict.
+    let alice_concurrent = "alice writes first";
+    let bob_concurrent = "bob writes at the same time";
+    hrc_in(alice.path())
+        .args(["send", &bob_principal, alice_concurrent, "--json"])
+        .assert()
+        .success();
+    hrc_in(bob.path())
+        .args(["send", &alice_principal, bob_concurrent, "--json"])
+        .assert()
+        .success();
+
+    // Neither has seen the other's commit at this point.
+    for home in [alice.path(), bob.path()] {
+        hrc_in(home).args(["sync", "--once"]).assert().success();
+        hrc_in(home).args(["sync", "--once"]).assert().success();
+    }
+    hrc_in(alice.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+
+    for (home, expected) in [
+        (alice.path(), bob_concurrent),
+        (bob.path(), alice_concurrent),
+    ] {
+        let inbox = hrc_in(home)
+            .args(["inbox", "--json"])
+            .output()
+            .expect("command should run");
+        let inbox: Value = serde_json::from_slice(&inbox.stdout).expect("stdout should be JSON");
+        let notes = inbox["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .filter(|entry| entry["kind"] == "note")
+            .count();
+        assert!(
+            notes >= 1,
+            "a concurrently sent note should have arrived ({expected}): {inbox}"
+        );
+    }
+
+    // Step 11: Alice revokes Bob's device, and a message sent afterwards
+    // does not reach it.
+    let members = hrc_in(alice.path())
+        .args(["members", "--json"])
+        .output()
+        .expect("command should run");
+    let members: Value = serde_json::from_slice(&members.stdout).expect("stdout should be JSON");
+    let bob_device = members["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .find(|member| member["principalId"] == bob_principal.as_str())
+        .expect("Bob should be in the roster")["devices"]
+        .as_array()
+        .expect("devices")[0]["deviceId"]
+        .as_str()
+        .expect("a device id")
+        .to_owned();
+
+    let (mut daemon, _startup) = start_daemon(alice.path());
+    let revoked = daemon_call(
+        alice.path(),
+        Interface::TrustedHuman,
+        serde_json::json!({
+            "method": "revoke_device",
+            "params": { "device_id": bob_device },
+        }),
+    );
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    assert_eq!(revoked["status"], "ok", "{revoked}");
+
+    hrc_in(alice.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+
+    let members = hrc_in(alice.path())
+        .args(["members", "--json"])
+        .output()
+        .expect("command should run");
+    let members: Value = serde_json::from_slice(&members.stdout).expect("stdout should be JSON");
+    assert!(
+        members["rosterEpoch"].as_u64().expect("an epoch") > 1,
+        "revocation should advance the roster epoch: {members}"
+    );
+
+    // Bob's only device is gone, so there is no active recipient left for a
+    // message addressed to him. The revocation excludes future messages by
+    // refusing to seal one for a device that is no longer in the roster,
+    // rather than by publishing something Bob's old key could still open.
+    let after_revocation = hrc_in(alice.path())
+        .args([
+            "send",
+            &bob_principal,
+            "sent after the revocation",
+            "--json",
+        ])
+        .output()
+        .expect("command should run");
+    assert!(
+        !after_revocation.status.success(),
+        "a message to a fully revoked member should not be sealed"
+    );
+    let refusal: Value =
+        serde_json::from_slice(&after_revocation.stdout).expect("stdout should be JSON");
+    assert_eq!(refusal["status"], "error");
+    assert!(
+        refusal["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no active recipient device"),
+        "the refusal should name the missing recipient device: {refusal}"
+    );
+}

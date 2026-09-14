@@ -164,35 +164,51 @@ impl InboxRow {
         channel_local_name: &str,
         now: &str,
     ) -> Self {
-        let kind = match hrc_protocol::MessageKind::parse(&entry.kind) {
-            Some(kind) => kind.as_str().to_owned(),
-            None => "unsupported".to_owned(),
-        };
-
-        let view = AgentView {
-            sender_principal: entry.sender_principal.clone(),
-            sender_local_name: sender_local_name.to_owned(),
-            kind,
-            channel_local_name: channel_local_name.to_owned(),
-            endpoint_label: hrc_core::gate::endpoint_label(entry.endpoint.as_deref()),
-            ciphertext_bytes: entry.ciphertext_bytes,
-            plaintext_bytes: entry.plaintext_bytes,
-            created_at: entry.created_at.clone(),
-            arrival_at: entry.received_at.clone(),
-            expires_at: entry.expires_at.clone(),
-            thread_label: hrc_core::gate::thread_label(entry.thread_id.as_deref()),
-            prompt_request: entry.prompt_request,
-            attachment_count: entry.attachment_count,
-            attachment_bytes: entry.attachment_bytes,
-            awaiting_decision: entry.disposition == "quarantined",
-        };
-
-        Self::from_view(&view, now)
+        Self::from_view(
+            &agent_view(entry, sender_local_name, channel_local_name),
+            now,
+        )
     }
 
     /// Whether the human still has a decision to make about this row.
     pub fn awaiting_decision(&self) -> bool {
         !self.decisions.is_empty()
+    }
+}
+
+/// The section 19.1 metadata set for one stored inbox row.
+///
+/// Extracted from [`InboxRow::from_entry`] so the daemon's agent-safe
+/// surface and the short-lived plugin process build the same view from the
+/// same row. Two independent mappings from storage to the closed metadata
+/// set would be two places for a body-adjacent field to appear in one and
+/// not the other.
+pub fn agent_view(
+    entry: &PluginInboxEntry,
+    sender_local_name: &str,
+    channel_local_name: &str,
+) -> AgentView {
+    let kind = match hrc_protocol::MessageKind::parse(&entry.kind) {
+        Some(kind) => kind.as_str().to_owned(),
+        None => "unsupported".to_owned(),
+    };
+
+    AgentView {
+        sender_principal: entry.sender_principal.clone(),
+        sender_local_name: sender_local_name.to_owned(),
+        kind,
+        channel_local_name: channel_local_name.to_owned(),
+        endpoint_label: hrc_core::gate::endpoint_label(entry.endpoint.as_deref()),
+        ciphertext_bytes: entry.ciphertext_bytes,
+        plaintext_bytes: entry.plaintext_bytes,
+        created_at: entry.created_at.clone(),
+        arrival_at: entry.received_at.clone(),
+        expires_at: entry.expires_at.clone(),
+        thread_label: hrc_core::gate::thread_label(entry.thread_id.as_deref()),
+        prompt_request: entry.prompt_request,
+        attachment_count: entry.attachment_count,
+        attachment_bytes: entry.attachment_bytes,
+        awaiting_decision: entry.disposition == "quarantined",
     }
 }
 

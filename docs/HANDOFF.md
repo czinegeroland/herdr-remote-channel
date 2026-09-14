@@ -144,6 +144,19 @@ M2 100%, M3 100%, M4 95%, M5 0%.**
 
 `main` carries the whole PRD. Nothing is in flight.
 
+The section 28.5 scenario now runs as one test,
+`the_end_to_end_scenario_from_section_28_5` in
+`crates/hrc-cli/tests/command_contract.rs`, over two independent
+installations and one bare Git remote. Writing it was worth doing for what
+it found rather than for what it confirmed: the other messaging tests use a
+single-installation fixture where sender and recipient are the same device,
+so nothing had ever encrypted to a key the process did not already hold.
+Driving a real two-party exchange turned up two agent-safe daemon methods
+still answering `unimplemented` — `inbox` and `show_approved`, which are
+exactly what the Herdr plugin talks to a running daemon for. Both are now
+served. `draft` and `wait` are still unimplemented on that surface, and so
+are the `hrc show`, `hrc wait`, and `hrc delegate` commands.
+
 What works today, end to end and proven by tests against a real Git
 repository: two installations create a channel, invite, join, compare
 matching safety phrases, admit a member through the trusted interface,
@@ -174,6 +187,14 @@ host with no toolchain.
   macOS. `DEC-052` explains why the requirement does not depend on it.
 - **The product and technical owners are still `TBD`.**
 - **M5** is deliberately 0%: deferred until the core protocol stabilizes.
+- **Four surfaces answer `unimplemented`.** The agent-safe daemon's `draft`
+  and `wait`, and the `hrc show`, `hrc wait` and `hrc delegate` commands. No
+  requirement row claims them, which is why the count still reads 94 of 94 —
+  but a plugin or an agent that calls them gets an error, so they are worth
+  closing before a first tag.
+- **`OQ-014`** is new and open: whether a sender should see its own messages
+  in `hrc thread`. Today it sees only what arrived, because an installation
+  keeps ciphertext and a payload hash for what it sent, not plaintext.
 
 ### Two operational things the next session must know
 
