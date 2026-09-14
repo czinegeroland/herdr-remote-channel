@@ -180,11 +180,25 @@ callers, and must be completed in the trusted local interface (PRD section
 `hrc review` and `hrc approve` additionally reject `--json`; they never write
 pending content to standard output.
 
+## Security
+
+This project moves other people's private conversations, so a defect can
+expose one. **Do not open a public issue for a security problem** — report it
+privately through
+[GitHub's private vulnerability reporting](https://github.com/czinegeroland/herdr-remote-channel/security/advisories/new).
+[SECURITY.md](SECURITY.md) sets out what is in scope and what is not.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).
+
 ## Contributing
 
 Every pull request must update `docs/PRD.md`, including the delivery ledger
 and the `Last updated` timestamp, and must name the requirement IDs it
 touches or give a concrete no-progress rationale. The `PRD traceability`
 check enforces this. `.github/pull_request_template.md` has the expected
-structure.
+structure, and [CONTRIBUTING.md](CONTRIBUTING.md) explains both this rule and
+the human authorization boundary before you spend effort on a change that
+would be rejected.
 
