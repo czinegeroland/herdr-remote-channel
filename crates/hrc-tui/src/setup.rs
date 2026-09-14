@@ -18,6 +18,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 /// A step this screen can carry out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetupStep {
+    /// Generate this installation's principal and device keys.
+    Initialize,
     /// Create a channel backed by a Git repository.
     CreateChannel,
     /// Issue a single-use invite.
@@ -30,6 +32,7 @@ impl SetupStep {
     /// What a person sees.
     pub const fn title(self) -> &'static str {
         match self {
+            SetupStep::Initialize => "Set up this installation",
             SetupStep::CreateChannel => "Create a channel",
             SetupStep::CreateInvite => "Invite someone",
             SetupStep::Join => "Join with an invite code",
@@ -39,6 +42,10 @@ impl SetupStep {
     /// What the step needs typed in.
     const fn prompt(self) -> &'static str {
         match self {
+            SetupStep::Initialize => {
+                "Choose a passphrase for this installation's key store. \
+                 There is no way to recover it:"
+            }
             SetupStep::CreateChannel => {
                 "Git repository backing the channel, as owner/name or a path:"
             }
@@ -50,14 +57,20 @@ impl SetupStep {
     /// Whether the typed value is a secret that should not be echoed.
     const fn is_secret(self) -> bool {
         // An invite code is a bearer secret: anyone holding it can present a
-        // join request. It is typed where other people can see the screen.
-        matches!(self, SetupStep::Join)
+        // join request. A passphrase needs no explanation. Both are typed
+        // where other people can see the screen.
+        matches!(self, SetupStep::Join | SetupStep::Initialize)
     }
 }
 
 /// What the human asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetupOutcome {
+    /// Generate keys for this installation, protected by this passphrase.
+    Initialize {
+        /// The passphrase as typed.
+        passphrase: String,
+    },
     /// Create a channel on this repository.
     CreateChannel {
         /// Repository locator as typed.
@@ -243,6 +256,7 @@ impl SetupApp {
         let value = self.input.clone();
 
         Some(match step {
+            SetupStep::Initialize => SetupOutcome::Initialize { passphrase: value },
             SetupStep::CreateChannel => SetupOutcome::CreateChannel { repo: value },
             SetupStep::CreateInvite => SetupOutcome::CreateInvite { github_user: value },
             SetupStep::Join => SetupOutcome::Join { invite_code: value },
@@ -278,6 +292,12 @@ impl SetupApp {
         // say what they are about to touch rather than asking whether the
         // person is sure.
         self.proposed = Some(match step {
+            // Losing this passphrase loses the identity every channel knows
+            // this installation by, so the confirmation says so rather than
+            // asking whether the person is sure.
+            SetupStep::Initialize => "Create this installation's keys with that passphrase? \
+                 It cannot be recovered or changed later. [y/N]"
+                .to_owned(),
             SetupStep::CreateChannel => format!(
                 "Create a channel on {}? This publishes to that repository. [y/N]",
                 self.input

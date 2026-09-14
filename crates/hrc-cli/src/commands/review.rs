@@ -22,9 +22,10 @@ use hrc_ipc::Client;
 use hrc_ipc::endpoint::{Endpoint, Interface};
 use hrc_storage::Database;
 use hrc_tui::{
-    App, ComposeApp, ComposeOutcome, JoinApp, JoinOutcome, Outcome, PendingItem, PendingJoin,
-    Recipient, SetupApp, SetupOutcome,
+    App, ComposeApp, ComposeOutcome, JoinApp, JoinOutcome, Outcome, PassphraseApp,
+    PassphraseOutcome, PendingItem, PendingJoin, Recipient, SetupApp, SetupOutcome,
 };
+use secrecy::SecretString;
 use serde_json::{Value, json};
 
 use crate::commands::Context;
@@ -304,6 +305,7 @@ pub fn review_joins(context: &Context) -> Result<Value> {
         return Err(CliError::NotInteractive);
     }
 
+    let context = &unlocked(context, "review join requests")?;
     let listed = crate::commands::join_pending(context)?;
     let requests = pending_joins(&listed);
 
@@ -404,6 +406,7 @@ pub fn compose(context: &Context) -> Result<Value> {
         return Err(CliError::NotInteractive);
     }
 
+    let context = &unlocked(context, "send a message")?;
     let recipients = addressable(context)?;
     if recipients.is_empty() {
         return Ok(json!({
@@ -481,7 +484,21 @@ pub fn setup(context: &Context) -> Result<Value> {
         return Err(CliError::NotInteractive);
     }
 
-    let mut screen = SetupApp::new(available_steps(context)?);
+    let steps = available_steps(context)?;
+
+    // Initialization is the one step that cannot ask for the passphrase
+    // first, because it is the step that chooses it. Everything else needs
+    // the key store open before it can do anything.
+    let initializing = steps == [hrc_tui::SetupStep::Initialize];
+    let owned;
+    let context = if initializing {
+        context
+    } else {
+        owned = unlocked(context, "set up this channel")?;
+        &owned
+    };
+
+    let mut screen = SetupApp::new(steps);
     let outcome = hrc_tui::run(&mut screen).map_err(|source| CliError::Io {
         action: "run the channel setup screen",
         source,
@@ -490,6 +507,13 @@ pub fn setup(context: &Context) -> Result<Value> {
     // Each arm calls the same function the CLI does, so there is one
     // implementation of what creating, inviting and joining mean.
     match outcome {
+        SetupOutcome::Initialize { passphrase } => {
+            let context = Context {
+                paths: context.paths.clone(),
+                passphrase: Some(SecretString::from(passphrase)),
+            };
+            crate::commands::init(&context)
+        }
         SetupOutcome::CreateChannel { repo } => crate::commands::create(context, &repo, None),
         SetupOutcome::CreateInvite { github_user } => {
             crate::commands::invite_create(context, &github_user, DEFAULT_INVITE_LIFETIME)
@@ -512,6 +536,21 @@ const DEFAULT_INVITE_LIFETIME: &str = "24h";
 
 /// The setup steps that make sense for this installation right now.
 fn available_steps(context: &Context) -> Result<Vec<hrc_tui::SetupStep>> {
+    // Before there are keys there is nothing else to offer: every other step
+    // signs something.
+    //
+    // The directory alone is not the test. `paths.ensure` creates it, so an
+    // installation that has merely been looked at has one; what decides this
+    // is whether anything is in it. Reading the store itself would need the
+    // passphrase, which is the thing this step exists to choose.
+    let initialized = std::fs::read_dir(context.paths.keys())
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false);
+
+    if !initialized {
+        return Ok(vec![hrc_tui::SetupStep::Initialize]);
+    }
+
     let database = Database::open(context.paths.database())?;
     let has_channel = !database.channels()?.is_empty();
 
@@ -523,4 +562,37 @@ fn available_steps(context: &Context) -> Result<Vec<hrc_tui::SetupStep>> {
     } else {
         vec![hrc_tui::SetupStep::CreateChannel, hrc_tui::SetupStep::Join]
     })
+}
+
+/// A context whose key store can be opened, asking for the passphrase if the
+/// environment did not supply one.
+///
+/// `HRC_PASSPHRASE` still works and still wins, because scripts and the
+/// daemon depend on it. What this adds is that a person in Herdr does not
+/// have to export a secret into their environment to use the plugin — an
+/// environment variable is inherited by every child process, readable from
+/// `/proc` on Linux by anything running as the same user, and captured in
+/// shell history when it is set by hand.
+///
+/// The passphrase lives for this one invocation and is not stored. That is a
+/// stopgap rather than an answer: the answer is the OS keychain (decision
+/// DEC-051), which is still awaiting a product-owner view.
+fn unlocked(context: &Context, reason: &str) -> Result<Context> {
+    if context.passphrase.is_some() {
+        return Ok(context.clone());
+    }
+
+    let mut prompt = PassphraseApp::new(reason);
+    let outcome = hrc_tui::run(&mut prompt).map_err(|source| CliError::Io {
+        action: "ask for the key store passphrase",
+        source,
+    })?;
+
+    match outcome {
+        PassphraseOutcome::Unlock(passphrase) => Ok(Context {
+            paths: context.paths.clone(),
+            passphrase: Some(SecretString::from(passphrase)),
+        }),
+        PassphraseOutcome::Quit => Err(CliError::NoPassphrase),
+    }
 }

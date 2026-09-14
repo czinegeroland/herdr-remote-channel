@@ -3018,3 +3018,28 @@ fn the_membership_pane_refuses_a_captured_terminal_too() {
         "no content may reach standard output"
     );
 }
+
+#[test]
+fn every_interactive_pane_refuses_a_captured_terminal() {
+    // All of these run a terminal interface, and three of them open the key
+    // store or publish to a channel. A captured subprocess is what an
+    // agent's tool call looks like; none of these screens should run for one.
+    let (home, _remote) = channel_fixture();
+
+    for pane in ["review", "joins", "compose", "setup"] {
+        let output = hrc_in(home.path())
+            .args(["herdr", "pane", pane])
+            .output()
+            .expect("command should run");
+
+        assert_eq!(
+            output.status.code(),
+            Some(AUTHORIZATION_REQUIRED),
+            "the `{pane}` pane must refuse without a human at the terminal"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "`{pane}` must not write to standard output"
+        );
+    }
+}

@@ -346,3 +346,36 @@ pub fn render_setup(frame: &mut Frame<'_>, app: &crate::setup::SetupApp) {
         areas[2],
     );
 }
+
+/// Draws the passphrase prompt.
+///
+/// The entry comes from `masked`, never from the buffer, so no change here
+/// can paint a passphrase onto a screen other people can see.
+pub fn render_passphrase(frame: &mut Frame<'_>, app: &crate::passphrase::PassphraseApp) {
+    let areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(6), Constraint::Min(0)])
+        .split(frame.area());
+
+    let lines = vec![
+        Line::from(format!("Unlock this installation to {}.", app.reason())),
+        Line::from(""),
+        Line::from(Span::styled(
+            app.masked(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("Enter: unlock   Esc: cancel"),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Key store passphrase"),
+            )
+            .wrap(Wrap { trim: false }),
+        areas[0],
+    );
+}
