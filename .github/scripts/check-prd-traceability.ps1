@@ -173,4 +173,49 @@ if ($duplicateIds.Count -gt 0) {
     Fail "Duplicate primary requirement IDs: $($duplicateIds -join ', ')."
 }
 
+# PRD requirement HRC-GOV-004 and acceptance criterion `AC-EVIDENCE`: a row
+# may not claim `Verified` without citing something. The rule was written
+# down and nothing enforced it, which is the state in which a ledger starts
+# drifting from the thing it describes.
+#
+# `Implemented` is deliberately not checked here. It means the code exists;
+# `Verified` means someone can point at the evidence, and that is the
+# transition worth guarding.
+$verifiedWithoutEvidence = @()
+foreach ($row in $primaryRows) {
+    $cells = @($row.Value.Trim('|').Split('|') | ForEach-Object { $_.Trim() })
+
+    # The two primary sections do not share a layout. Section 12 rows carry a
+    # priority column and section 25 rows do not, so the status is the
+    # second-to-last cell and the evidence the last one in both. Indexing
+    # from the front would silently read the wrong column for every security
+    # requirement, which is the kind of bug a checker quietly passes with.
+    if ($cells.Count -lt 4) { continue }
+
+    $requirementId = $cells[0]
+    $status = $cells[$cells.Count - 2]
+    $evidence = $cells[$cells.Count - 1]
+
+    if ($status -ne 'Verified') { continue }
+
+    # Evidence has to name something a reader can open: a path, a test, or a
+    # decision. Prose alone is how 'Verified' becomes a word rather than a
+    # claim.
+    $citesSomething = ($evidence -match '`[^`]+`') -or
+        ($evidence -match 'DEC-\d{3}') -or
+        ($evidence -match 'AC-[A-Z-]+')
+
+    if ([string]::IsNullOrWhiteSpace($evidence) -or
+        $evidence -eq 'Pending' -or
+        -not $citesSomething) {
+        $verifiedWithoutEvidence += $requirementId
+    }
+}
+
+if ($verifiedWithoutEvidence.Count -gt 0) {
+    Fail ("These requirements claim Verified without citing stable evidence: " +
+        ($verifiedWithoutEvidence -join ', ') +
+        ". A Verified row must reference a file, a test, a decision, or an acceptance criterion.")
+}
+
 Write-Output 'PRD traceability checks passed.'
