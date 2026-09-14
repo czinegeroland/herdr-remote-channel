@@ -1500,6 +1500,7 @@ pub fn context_draft(
     // The manifest's excerpt text is untrusted caller input. Replace it with
     // the exact selected source bytes before computing the stored digest.
     let package = materialize_excerpt_sources(package, repository_root.as_deref())?;
+    let package = materialize_captures(package, repository_root.as_deref())?;
     let canonical_manifest = canonical::to_canonical_bytes(&package)?;
     let digest = package.digest()?;
     let mut preview = package.preview()?;
@@ -1744,6 +1745,137 @@ fn materialize_excerpt_sources(
         }
     }
     Ok(package)
+}
+
+/// The largest capture HRC will carry into a context package.
+///
+/// A bound rather than a limit chosen for elegance: a repository with a
+/// thousand modified files produces a `git status` nobody will read and a
+/// message that costs everyone bandwidth. Truncation is reported in the
+/// text, so a reader never mistakes a cut-off capture for a complete one.
+const MAX_CAPTURE_BYTES: usize = 64 * 1024;
+
+/// Replaces requested patch and output items with what HRC captured itself
+/// (PRD requirements HRC-CTX-004 and HRC-CTX-007).
+///
+/// This is the whole point of those two rows. A caller names *what* to
+/// capture — a revision range, or one command from
+/// [`hrc_core::context::AllowedCommand`] — and HRC produces the bytes. Text
+/// the caller supplied is discarded rather than trusted, exactly as
+/// [`materialize_excerpt_sources`] does for excerpts, so provenance is
+/// derived and not asserted.
+fn materialize_captures(
+    mut package: ContextPackage,
+    repository_root: Option<&str>,
+) -> Result<ContextPackage> {
+    let needs_capture = package.items.iter().any(|item| {
+        matches!(
+            item,
+            hrc_core::ContextItem::Patch { .. } | hrc_core::ContextItem::Output { .. }
+        )
+    });
+
+    if !needs_capture {
+        return Ok(package);
+    }
+
+    let Some(root) = repository_root else {
+        return Err(CliError::ContextRepositoryRequired {
+            package_id: package.id.clone(),
+        });
+    };
+
+    for item in &mut package.items {
+        match item {
+            hrc_core::ContextItem::Patch { range, diff } => {
+                // A range is caller input that reaches a command line, so it
+                // is checked against a conservative shape rather than passed
+                // through. `--output=/etc/passwd` is a revision range as far
+                // as a naive check is concerned.
+                if !is_plain_revision_range(range) {
+                    // The rejected range is deliberately not echoed: this
+                    // field is `&'static str` so caller input cannot reach a
+                    // diagnostic, and a range is caller input.
+                    return Err(CliError::InvalidContextSource {
+                        reason: "a patch range must be a plain revision range such as \
+                                 HEAD~3..HEAD",
+                    });
+                }
+
+                *diff = capture_git(root, &["diff", "--no-color", range])?;
+            }
+            hrc_core::ContextItem::Output { command, text } => {
+                let allowed = hrc_core::context::AllowedCommand::parse(command).ok_or(
+                    CliError::InvalidContextSource {
+                        reason: "output items may carry only the output of a command HRC runs \
+                                 itself; see AllowedCommand for the list",
+                    },
+                )?;
+
+                *text = capture_git(root, &allowed.argv())?;
+            }
+            _ => {}
+        }
+    }
+
+    Ok(package)
+}
+
+/// Whether a string is a revision range and nothing else.
+///
+/// Deliberately narrow. Git accepts a great deal of syntax, and the ones
+/// that matter here are the ones that stop being a range: anything starting
+/// with `-` is an option, and whitespace makes it more than one argument.
+fn is_plain_revision_range(range: &str) -> bool {
+    let range = range.trim();
+
+    !range.is_empty()
+        && !range.starts_with('-')
+        && range.len() <= 200
+        && range.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(character, '.' | '_' | '-' | '/' | '~' | '^' | '@')
+        })
+}
+
+/// Runs one read-only Git command in the repository and returns its output.
+fn capture_git(root: &str, arguments: &[&str]) -> Result<String> {
+    let mut command = ProcessCommand::new("git");
+    command.args(["-C", root]).args(arguments);
+
+    let output = command.output().map_err(|source| CliError::Io {
+        action: "capture context from the repository",
+        source,
+    })?;
+
+    if !output.status.success() {
+        // Git's stderr can quote refs and paths from the repository, so it
+        // is not repeated here for the same reason the range is not.
+        return Err(CliError::InvalidContextSource {
+            reason: "the repository could not produce that capture",
+        });
+    }
+
+    let captured = String::from_utf8_lossy(&output.stdout).into_owned();
+    Ok(truncate_capture(captured))
+}
+
+/// Bounds a capture, saying so in the text when it was cut.
+fn truncate_capture(captured: String) -> String {
+    if captured.len() <= MAX_CAPTURE_BYTES {
+        return captured;
+    }
+
+    // Cut on a character boundary, then on a line, so the result is neither
+    // invalid UTF-8 nor a half-written path.
+    let mut cut = MAX_CAPTURE_BYTES;
+    while cut > 0 && !captured.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let head = &captured[..cut];
+    let head = head.rfind('\n').map_or(head, |line| &head[..line]);
+
+    format!("{head}\n[truncated by HRC at {MAX_CAPTURE_BYTES} bytes]\n")
 }
 
 /// Confirms that the checked source still equals the snapshot a human will

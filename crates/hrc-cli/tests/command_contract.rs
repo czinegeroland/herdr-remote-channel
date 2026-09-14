@@ -1117,6 +1117,197 @@ fn a_message_is_sealed_published_fetched_and_quarantined() {
     );
 }
 
+/// A source repository with one commit, so `git diff` and `git log` have
+/// something to report.
+fn committed_source() -> tempfile::TempDir {
+    let source = tempfile::tempdir().expect("temporary source repository");
+    git_init(source.path());
+
+    let run = |arguments: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(source.path())
+            .args(arguments)
+            .output()
+            .expect("git should run");
+        assert!(
+            output.status.success(),
+            "git {arguments:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    run(&["config", "user.email", "fixture@example.invalid"]);
+    run(&["config", "user.name", "Fixture"]);
+    std::fs::create_dir_all(source.path().join("src")).expect("create source directory");
+    std::fs::write(source.path().join("src/lib.rs"), "fn retry() {}\n").expect("write source");
+    run(&["add", "."]);
+    run(&["commit", "--quiet", "-m", "the first commit"]);
+
+    source
+}
+
+#[test]
+fn hrc_captures_patch_and_output_itself_rather_than_trusting_the_caller() {
+    // PRD requirements HRC-CTX-004 and HRC-CTX-007. The caller names what to
+    // capture; HRC produces the bytes. Whatever text the manifest supplied
+    // is discarded, exactly as it already is for excerpts.
+    let (home, _remote) = channel_fixture();
+    let source = committed_source();
+    let manifest = source.path().join("context.json");
+
+    let caller_invented = "THIS DIFF WAS NEVER IN THE REPOSITORY";
+    std::fs::write(
+        &manifest,
+        format!(
+            r#"{{"version":1,"id":"ctx-capture","items":[
+                {{"kind":"patch","range":"HEAD","diff":"{caller_invented}"}},
+                {{"kind":"output","command":"git status --porcelain","text":"{caller_invented}"}}
+            ]}}"#
+        ),
+    )
+    .expect("write manifest");
+
+    let drafted = hrc_in(home.path())
+        .args([
+            "context",
+            "draft",
+            manifest.to_str().expect("manifest path"),
+            "--repository",
+            source.path().to_str().expect("repository path"),
+            "--json",
+        ])
+        .output()
+        .expect("draft should run");
+
+    assert!(
+        drafted.status.success(),
+        "draft failed: {}{}",
+        String::from_utf8_lossy(&drafted.stdout),
+        String::from_utf8_lossy(&drafted.stderr)
+    );
+
+    let draft: Value = serde_json::from_slice(&drafted.stdout).expect("draft JSON");
+    assert_eq!(draft["state"], "draft");
+    assert_eq!(draft["sendable"], true);
+    assert!(
+        !String::from_utf8_lossy(&drafted.stdout).contains(caller_invented),
+        "the caller's invented text must not survive capture"
+    );
+}
+
+#[test]
+fn a_command_hrc_will_not_run_is_refused_at_draft_time() {
+    // The allowlist, from the outside. Every one of these evades a
+    // pattern-matching deny-list while doing what the requirement forbids.
+    let (home, _remote) = channel_fixture();
+    let source = committed_source();
+
+    for command in [
+        "sh -c 'cat ~/.bash_history'",
+        "cat /proc/self/environ",
+        "git config --list --show-origin",
+        "cargo test",
+        "git status",
+    ] {
+        let manifest = source.path().join("denied.json");
+        std::fs::write(
+            &manifest,
+            format!(
+                r#"{{"version":1,"id":"ctx-denied","items":[
+                    {{"kind":"output","command":"{command}","text":"anything"}}
+                ]}}"#
+            ),
+        )
+        .expect("write manifest");
+
+        let drafted = hrc_in(home.path())
+            .args([
+                "context",
+                "draft",
+                manifest.to_str().expect("manifest path"),
+                "--repository",
+                source.path().to_str().expect("repository path"),
+                "--json",
+            ])
+            .output()
+            .expect("draft should run");
+
+        assert!(!drafted.status.success(), "`{command}` should not draft");
+    }
+}
+
+#[test]
+fn a_patch_range_that_is_not_a_range_is_refused() {
+    // A range reaches a command line, so it is checked against a
+    // conservative shape rather than passed through.
+    let (home, _remote) = channel_fixture();
+    let source = committed_source();
+
+    for range in [
+        "--output=/tmp/escape",
+        "HEAD; rm -rf /",
+        "HEAD --exec=sh",
+        "",
+    ] {
+        let manifest = source.path().join("range.json");
+        std::fs::write(
+            &manifest,
+            format!(
+                r#"{{"version":1,"id":"ctx-range","items":[
+                    {{"kind":"patch","range":"{range}","diff":"ignored"}}
+                ]}}"#
+            ),
+        )
+        .expect("write manifest");
+
+        let drafted = hrc_in(home.path())
+            .args([
+                "context",
+                "draft",
+                manifest.to_str().expect("manifest path"),
+                "--repository",
+                source.path().to_str().expect("repository path"),
+                "--json",
+            ])
+            .output()
+            .expect("draft should run");
+
+        assert!(
+            !drafted.status.success(),
+            "`{range}` should not be accepted as a revision range"
+        );
+    }
+}
+
+#[test]
+fn a_capture_without_a_repository_is_refused() {
+    // There is nowhere to capture from, and inventing an answer is exactly
+    // what these requirements exist to prevent.
+    let (home, _remote) = channel_fixture();
+    let source = committed_source();
+    let manifest = source.path().join("norepo.json");
+    std::fs::write(
+        &manifest,
+        r#"{"version":1,"id":"ctx-norepo","items":[
+            {"kind":"output","command":"git status --porcelain","text":"anything"}
+        ]}"#,
+    )
+    .expect("write manifest");
+
+    let drafted = hrc_in(home.path())
+        .args([
+            "context",
+            "draft",
+            manifest.to_str().expect("manifest path"),
+            "--json",
+        ])
+        .output()
+        .expect("draft should run");
+
+    assert!(!drafted.status.success(), "a capture needs a repository");
+}
+
 #[test]
 fn context_draft_cannot_authorize_a_noninteractive_preview_or_send() {
     let (home, remote) = channel_fixture();

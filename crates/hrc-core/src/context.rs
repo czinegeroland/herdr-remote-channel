@@ -46,8 +46,16 @@ pub enum ContextItem {
         /// The excerpt itself.
         text: String,
     },
-    /// A Git patch.
+    /// A Git patch that HRC produced itself.
+    ///
+    /// `range` records what was asked for, so the receiver sees where the
+    /// diff came from and the sender cannot pass off arbitrary text as one.
+    /// An item without it is refused: see [`AllowedCommand`] for the same
+    /// reasoning applied to command output.
     Patch {
+        /// The revision range the diff was taken over, for example
+        /// `HEAD~3..HEAD`.
+        range: String,
         /// The patch text.
         diff: String,
     },
@@ -74,6 +82,75 @@ pub enum ContextItem {
         #[serde(skip_serializing_if = "Option::is_none")]
         description: Option<String>,
     },
+}
+
+/// The commands HRC will run to produce an output item (PRD requirements
+/// HRC-CTX-004 and HRC-CTX-007).
+///
+/// A closed set, and deliberately a short one. Every member is read-only,
+/// reports on the repository rather than the machine, and emits no
+/// environment variable, no shell history, and no terminal scrollback — the
+/// four things section 12.5 requires excluded by default.
+///
+/// Git's own behavior does part of the work: `status` and `diff` do not
+/// report ignored files, so an ignored path cannot reach a package through
+/// them. It does not do all of it — an untracked `.env` appears in
+/// `git status` — so each emitted path is still checked against
+/// [`excluded_path_reason`].
+///
+/// Nothing here runs project code. `cargo test` would be a useful context
+/// item and is deliberately absent: capturing it means executing whatever
+/// the repository says to execute, which is a larger decision than adding an
+/// attachment to a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AllowedCommand {
+    /// `git status --porcelain`: what is modified, staged, or untracked.
+    GitStatus,
+    /// `git log --oneline -n 20`: recent history, subjects only.
+    GitLog,
+    /// `git diff --stat`: which files changed and by how much, no content.
+    GitDiffStat,
+}
+
+impl AllowedCommand {
+    /// Every command HRC will run for an output item.
+    pub const ALL: [AllowedCommand; 3] = [
+        AllowedCommand::GitStatus,
+        AllowedCommand::GitLog,
+        AllowedCommand::GitDiffStat,
+    ];
+
+    /// The exact command string recorded in the item, and the only spelling
+    /// accepted.
+    ///
+    /// One spelling per command on purpose. Accepting variants would mean
+    /// parsing command lines, and a parser that decides `git  status` is the
+    /// same as `git status` is one that can be argued into deciding
+    /// something worse is too.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            AllowedCommand::GitStatus => "git status --porcelain",
+            AllowedCommand::GitLog => "git log --oneline -n 20",
+            AllowedCommand::GitDiffStat => "git diff --stat",
+        }
+    }
+
+    /// The argument vector to execute, without the `git` program name.
+    pub fn argv(self) -> Vec<&'static str> {
+        match self {
+            AllowedCommand::GitStatus => vec!["status", "--porcelain"],
+            AllowedCommand::GitLog => vec!["log", "--oneline", "-n", "20"],
+            AllowedCommand::GitDiffStat => vec!["diff", "--stat"],
+        }
+    }
+
+    /// Recognizes a command string, exactly.
+    pub fn parse(command: &str) -> Option<Self> {
+        AllowedCommand::ALL
+            .into_iter()
+            .find(|allowed| allowed.as_str() == command)
+    }
 }
 
 impl ContextItem {
@@ -105,7 +182,7 @@ impl ContextItem {
                 }
                 fields
             }
-            ContextItem::Patch { diff } => vec![diff],
+            ContextItem::Patch { range, diff } => vec![range, diff],
             ContextItem::Reference {
                 reference,
                 description,
@@ -138,53 +215,31 @@ impl ContextItem {
     /// Material that is never an acceptable context source, independent of
     /// whether it happens to contain a recognizable secret.
     fn excluded_content_reason(&self) -> Option<&'static str> {
-        let command = match self {
-            ContextItem::Patch { .. } => {
-                return Some("patch items require HRC-controlled source capture");
+        match self {
+            // A patch must name the range it was taken over. HRC produces
+            // the diff from a verified worktree; text handed in with no
+            // provenance is not a patch, it is a note the sender called one.
+            ContextItem::Patch { range, .. } if range.trim().is_empty() => {
+                Some("patch items must name the revision range HRC captured them over")
             }
-            ContextItem::Output { command, .. } => command,
-            _ => return None,
-        };
+            ContextItem::Patch { .. } => None,
 
-        let command = command
-            .trim()
-            .trim_matches(|character| matches!(character, '"' | '\''))
-            .to_ascii_lowercase();
-        let normalized = command.replace('\\', "/");
-        let environmental_dump = matches!(
-            normalized.as_str(),
-            "env" | "printenv" | "set" | "setenv" | "export" | "get-childitem env:"
-        ) || normalized.starts_with("env ")
-            || normalized.starts_with("printenv ")
-            || normalized.starts_with("set ")
-            || normalized.starts_with("export ")
-            || normalized.starts_with("get-childitem env:")
-            || normalized.starts_with("dir env:")
-            || normalized.ends_with("/env")
-            || normalized.ends_with("/printenv")
-            || normalized.contains(" -c env")
-            || normalized.contains(" -c printenv")
-            || normalized.contains(" -lc env")
-            || normalized.contains(" -lc printenv")
-            || normalized.contains(" /c set")
-            || normalized.contains(" -command get-childitem env:")
-            || normalized.contains(" -command dir env:");
-        if environmental_dump {
-            return Some("environment dumps are excluded from context packages");
+            // An allowlist, not a deny-list. The previous check tried to
+            // recognize environment dumps and scrollback by pattern, which
+            // is a losing game: `sh -c 'cat ~/.bash_history'` is neither
+            // `history` nor `env` and dumps a transcript anyway. Naming the
+            // commands HRC will run inverts it — anything not on the list is
+            // refused without having to be recognized as dangerous.
+            ContextItem::Output { command, .. } => match AllowedCommand::parse(command) {
+                Some(_) => None,
+                None => Some(
+                    "output items may carry only the output of a command HRC ran itself; \
+                     see AllowedCommand for the list",
+                ),
+            },
+
+            _ => None,
         }
-
-        if command.contains("scrollback")
-            || command.contains("terminal history")
-            || command.contains("prompt transcript")
-            || command.contains("agent transcript")
-            || matches!(command.as_str(), "history" | "fc")
-        {
-            return Some(
-                "terminal scrollback and agent transcripts are excluded from context packages",
-            );
-        }
-
-        Some("output items require HRC-controlled command capture")
     }
 }
 

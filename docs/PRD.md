@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-14T03:10:00+02:00 |
+| Last updated | 2026-09-14T03:45:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -546,10 +546,10 @@ The Herdr plugin must expose:
 | HRC-CTX-001 | Build explicit context packages. | Should | Implemented | `crates/hrc-core/src/context.rs` |
 | HRC-CTX-002 | Preview exact outgoing context and byte count. | Must | Implemented | `crates/hrc-core/src/context.rs` `preview` reports the real serialized size, not the sum of item texts |
 | HRC-CTX-003 | Block common secrets by default. | Must | Implemented | `crates/hrc-core/src/context.rs` `scan_for_secrets`; findings block the send and never quote the match |
-| HRC-CTX-004 | Support note, excerpt, patch, ref, output, and link items. | Should | In progress | `crates/hrc-core/src/context.rs` represents all six item kinds; note, source-derived excerpt, reference, and link items are draftable and sendable. Caller-authored patch and output items fail closed before persistence. Remaining: HRC-controlled patch and command-output capture so provenance cannot bypass excluded-path or environment protections. |
+| HRC-CTX-004 | Support note, excerpt, patch, ref, output, and link items. | Should | Implemented | All six kinds are draftable and sendable. `crates/hrc-cli/src/commands.rs` `materialize_captures` produces patch and output bytes itself, discarding whatever the manifest supplied, exactly as excerpts already were: a caller names a revision range or one member of `AllowedCommand` and HRC runs the command. A range is checked against a conservative shape before it reaches a command line, captures are bounded at 64 KiB with truncation stated in the text, and a capture without a repository is refused rather than invented. `crates/hrc-cli/tests/command_contract.rs` proves a caller's invented diff does not survive |
 | HRC-CTX-005 | Place received context into quarantine. | Must | Implemented | `crates/hrc-cli/src/commands.rs` makes canonical context body the same pending inbox content; migration 007 gives `inbound_context` an inbox-row foreign key with no independent disposition, so prompt-gate decisions govern both atomically |
 | HRC-CTX-006 | Verify hashes before displaying or extracting content. | Must | Implemented | `crates/hrc-core/src/context.rs` `verify_digest` |
-| HRC-CTX-007 | Exclude environment variables, full scrollback, `.env` files, and ignored paths by default. | Must | In progress | `crates/hrc-core/src/context.rs` rejects caller-authored patch and output items until their provenance can be controlled; `crates/hrc-cli/src/commands.rs` persists a canonical absolute Git root, derives every excerpt from checked source, normalizes separators for Git-ignore checks, and rechecks source bytes and ignore rules before trusted review/send. Remaining: HRC-controlled patch and output capture. |
+| HRC-CTX-007 | Exclude environment variables, full scrollback, `.env` files, and ignored paths by default. | Must | Implemented | `crates/hrc-core/src/context.rs` replaces the previous deny-list with `AllowedCommand`, a closed set of three read-only Git commands HRC runs itself. Inverting it is the point: a deny-list has to recognize `sh -c 'cat ~/.bash_history'` as scrollback, and an allowlist refuses it without recognizing anything. None of the three can emit an environment variable, shell history, or scrollback, and a test asserts that against their argument vectors rather than their prose. `crates/hrc-cli/src/commands.rs` still persists a canonical absolute Git root, derives every excerpt from checked source, and rechecks source bytes and ignore rules before trusted review or send |
 
 ### 12.5 Synchronization
 
@@ -2554,7 +2554,7 @@ Every implementation PR must update this table.
 | M1 Secure foundation | 100% | Adds the public-repository gate: the full section 16.4 disclosure and a typed phrase naming the channel, enforced in the trusted dispatcher rather than in any one interface | Public-repository confirmation | Replace the provisional OQ-008 wording with product-owner text |
 | M2 Git messaging | 100% | The GitHub optimization closes `AC-GIT-ADAPTER`: conditional head polling with ETags where it is available, and a byte-identical fallback to plain Git everywhere else | GitHub change-detection optimization | Add receipts over a published channel and end-to-end restart coverage |
 | M3 Herdr integration | 97% | Adds the release pipeline and both installers, with a clean-host fixture that installs and smoke-tests through the real installer with every language runtime removed from `PATH` | Release artifacts and install fixture | Cut a first tag so the published artifacts are proven, and add daemon mode to the clean-host smoke test |
-| M4 Context/delegation | 85% | Context drafts now snapshot checked source under a canonical absolute root; preview/send require trusted one-use authorization and inbound context shares the message quarantine lifecycle | Trusted context authorization and source integrity | Add delegation message exchange and its CLI surface |
+| M4 Context/delegation | 95% | Patch and command-output items are now captured by HRC from a verified repository instead of being taken on the caller's word, and the environment and scrollback exclusions became an allowlist rather than a deny-list | HRC-controlled context capture | Add delegation message exchange and its CLI surface |
 | M5 Provider ecosystem | 0% | Not started | N/A | Deferred until core protocol stabilizes |
 
 ### Requirement completion summary
