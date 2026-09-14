@@ -1241,7 +1241,7 @@ dependencies = [
 
 [[package]]
 name = "hrc-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -1264,7 +1264,7 @@ dependencies = [
 
 [[package]]
 name = "hrc-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hrc-crypto",
  "hrc-protocol",
@@ -1277,7 +1277,7 @@ dependencies = [
 
 [[package]]
 name = "hrc-crypto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "age",
  "ed25519-dalek",
@@ -1296,7 +1296,7 @@ dependencies = [
 
 [[package]]
 name = "hrc-herdr"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hrc-core",
  "hrc-protocol",
@@ -1308,7 +1308,7 @@ dependencies = [
 
 [[package]]
 name = "hrc-ipc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "interprocess",
  "serde",
@@ -1321,7 +1321,7 @@ dependencies = [
 
 [[package]]
 name = "hrc-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.23.1",
  "getrandom 0.4.3",
@@ -1335,7 +1335,7 @@ dependencies = [
 
 [[package]]
 name = "hrc-storage"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hrc-protocol",
  "rusqlite",
@@ -1346,7 +1346,7 @@ dependencies = [
 
 [[package]]
 name = "hrc-transport"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hrc-protocol",
  "serde",
@@ -1356,7 +1356,7 @@ dependencies = [
 
 [[package]]
 name = "hrc-transport-git"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hrc-protocol",
  "hrc-transport",
@@ -1366,7 +1366,7 @@ dependencies = [
 
 [[package]]
 name = "hrc-tui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "crossterm",
  "hrc-core",
