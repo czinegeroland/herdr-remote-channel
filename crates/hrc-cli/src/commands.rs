@@ -2474,25 +2474,103 @@ pub async fn daemon(context: &Context) -> Result<()> {
         Arc::new(Mutex::new(hrc_core::rpc::ContextAuthorizationLedger::new()));
     let trusted_context_authorizations = Arc::clone(&context_authorizations);
 
-    tokio::try_join!(
-        async {
-            serve(&agent_endpoint, move |request: Request| {
-                handle_agent_request(&agent_context, request)
-            })
-            .await
-            .map_err(CliError::from)
-        },
-        async {
-            serve(&trusted_endpoint, move |request: TrustedRequest| {
-                handle_trusted_request(&trusted_context, &trusted_context_authorizations, request)
-            })
-            .await
-            .map_err(CliError::from)
-        },
-        daemon_sync_loop(&loop_context),
-    )?;
+    // PRD requirement HRC-TECH-003: Tokio owns cancellation. A daemon that
+    // can only be killed is one that gets killed halfway through publishing,
+    // and while the storage layer survives that — reservations and
+    // transactions are built for it — recovering costs a synchronization
+    // pass and leaves an abandoned slot behind. Asking it to stop instead is
+    // cheaper and quieter.
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
 
-    Ok(())
+    let served = async {
+        tokio::try_join!(
+            async {
+                serve(&agent_endpoint, move |request: Request| {
+                    handle_agent_request(&agent_context, request)
+                })
+                .await
+                .map_err(CliError::from)
+            },
+            async {
+                serve(&trusted_endpoint, move |request: TrustedRequest| {
+                    handle_trusted_request(
+                        &trusted_context,
+                        &trusted_context_authorizations,
+                        request,
+                    )
+                })
+                .await
+                .map_err(CliError::from)
+            },
+            daemon_sync_loop(&loop_context),
+        )
+    };
+    tokio::pin!(served);
+
+    let outcome = tokio::select! {
+        // Biased so a shutdown that arrives at the same moment as an error
+        // is still a shutdown. Reporting a failure caused by tearing the
+        // daemon down would make a clean stop look like a crash.
+        biased;
+
+        () = &mut shutdown => {
+            // The listeners stop accepting when this future is dropped, and
+            // an in-flight synchronization tick is synchronous, so it has
+            // already finished or has not started.
+            Ok(())
+        }
+        result = &mut served => result.map(|_| ()),
+    };
+
+    // Endpoints are removed on the way out rather than left for the next
+    // start to probe and reclaim. On Unix a stale socket file makes the next
+    // bind do extra work to prove nobody is behind it; on Windows the pipe
+    // name simply goes when the process does.
+    release_endpoint(&agent_endpoint);
+    release_endpoint(&trusted_endpoint);
+
+    outcome
+}
+
+/// Resolves when the operating system asks this process to stop.
+///
+/// Ctrl-C everywhere, and SIGTERM as well on Unix, because that is what a
+/// service manager and a container runtime send. A daemon that handled only
+/// Ctrl-C would shut down cleanly when a developer stopped it by hand and be
+/// killed outright by every automated stop, which is the case that matters.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut terminate = match signal(SignalKind::terminate()) {
+            Ok(stream) => stream,
+            // Without SIGTERM handling, Ctrl-C alone is still better than
+            // nothing, so this degrades rather than refusing to start.
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// Removes a local endpoint's filesystem entry, if it has one.
+fn release_endpoint(endpoint: &Endpoint) {
+    if let Some(path) = endpoint.path() {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 async fn daemon_sync_loop(context: &Context) -> Result<()> {
