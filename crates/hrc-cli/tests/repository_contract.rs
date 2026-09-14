@@ -145,3 +145,43 @@ fn every_third_party_action_is_pinned_to_an_immutable_revision() {
          no longer testing anything"
     );
 }
+
+#[test]
+fn the_dependency_exemption_stays_narrow() {
+    // Enabling Dependabot made every dependency pull request permanently
+    // unmergeable: the living-PRD rule asks for a requirement row to move,
+    // and a version bump moves none. The exemption that fixes it is a hole
+    // in the project's central enforcement mechanism, so its shape is worth
+    // pinning.
+    //
+    // Two conditions must both survive. Dropping the author check would let
+    // any contributor skip the rule by touching only manifests; dropping the
+    // path check would let a bump carry a change to `crates/` past it. The
+    // second was verified by constructing that exact commit and watching the
+    // validator refuse it.
+    let validator = read(".github/scripts/check-prd-traceability.ps1");
+
+    assert!(
+        validator.contains("dependabot[bot]"),
+        "the exemption should name the one author it trusts"
+    );
+    assert!(
+        validator.contains("'Bot'"),
+        "the exemption should require the author be a bot account, not a \
+         user who took the name"
+    );
+    assert!(
+        validator.contains("$isDependabot -and $onlyManifests"),
+        "both conditions should be required together; either alone is a hole"
+    );
+
+    // The check must pass for an exempt pull request rather than be skipped
+    // by the workflow. A required status check that never runs blocks a
+    // merge instead of satisfying it.
+    let workflow = read(".github/workflows/prd-traceability.yml");
+    assert!(
+        !workflow.contains("dependabot"),
+        "the exemption belongs in the validator, where it is one testable \
+         rule, not in a workflow `if:` that skips the check entirely"
+    );
+}
