@@ -21,9 +21,101 @@ command surface exists and the human authorization boundary is enforced;
 channel, messaging, and synchronization behavior land with their milestones.
 Section 30 of the PRD tracks the roadmap and section 31 the delivery ledger.
 
+## Installing
+
+The Herdr plugin and the `hrc` CLI are the same executable, so one install
+gets you both.
+
+### As a Herdr plugin
+
+```bash
+herdr plugin install czinegeroland/herdr-remote-channel
+```
+
+Herdr clones the repository, shows you the commands it is about to run, and
+on your confirmation runs the manifest's build step. That step installs
+`hrc` twice on purpose:
+
+- `bin/hrc` inside the plugin directory, which is what `herdr-plugin.toml`
+  invokes. Resolving the binary relative to the plugin root rather than
+  through `PATH` means the plugin works whether or not the install prefix is
+  on the `PATH` Herdr inherited.
+- `~/.local/bin/hrc` (`%LOCALAPPDATA%\Programs\hrc` on Windows), so that
+  `hrc send`, `hrc doctor`, and the agent skill's `hrc --help` discovery work
+  in your own terminal. Override with `HRC_INSTALL_PREFIX`. If this copy
+  cannot be written the build says so and continues; the plugin still works.
+
+The build step prefers a published release artifact, which it downloads and
+verifies against its SHA-256 checksum and which needs no Rust toolchain. When
+no release covers the platform — including right now, before the first tag
+exists — it falls back to `cargo build --release`, which does need
+[rustup](https://rustup.rs). Set `HRC_VERSION` to pin a specific release tag.
+
+Confirm the install, and check `~/.local/bin` is on your `PATH`:
+
+```bash
+herdr plugin list
+hrc --version
+hrc doctor
+```
+
+### For local development
+
+```bash
+git clone https://github.com/czinegeroland/herdr-remote-channel
+cd herdr-remote-channel
+sh herdr/build.sh
+herdr plugin link "$PWD"
+```
+
+`herdr plugin link` does not run build commands, which is why `herdr/build.sh`
+is invoked by hand first. Re-run it after any change to the Rust sources.
+
+### The CLI on its own
+
+`hrc` is useful without Herdr. Once a release exists:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/czinegeroland/herdr-remote-channel/main/scripts/install.sh | sh -s -- --version v0.1.0
+```
+
+`scripts/install.ps1` is the Windows equivalent. Both verify a checksum and
+refuse an artifact that does not match.
+
+## What the plugin registers
+
+`herdr-plugin.toml` is generated from `crates/hrc-herdr/src/manifest.rs` and
+held to it by `crates/hrc-cli/tests/plugin_manifest.rs`, so the entry points
+it advertises and the subcommands the binary accepts cannot drift apart. Do
+not edit it by hand; regenerate it:
+
+```bash
+cargo run --quiet --bin hrc -- herdr manifest > herdr-plugin.toml
+```
+
+| Kind | What it does |
+|---|---|
+| Startup | `hrc herdr startup` — returns the manifest and the sidebar line |
+| Action `inbox` | `hrc herdr action inbox` — the remote channel inbox, in workspace and pane contexts |
+| Pane `inbox` | `hrc herdr pane inbox` — the same inbox as a split pane |
+| Event `workspace.focused` | `hrc herdr event` — refreshes the sidebar |
+
+The event subscription is deliberately one entry long. PRD section 13.2 puts
+frequently occurring event processing in the daemon rather than in repeatedly
+spawned hook commands, and every name added there is a process spawn at the
+host's rate rather than ours. Herdr names the event in `HERDR_PLUGIN_EVENT`;
+an event this plugin did not subscribe to is ignored rather than failed, so a
+host that delivers one does not show you a broken plugin.
+
+Nothing the plugin can be asked to do approves, delivers, or reveals remote
+content. Approval is a human act on the trusted screen (PRD section 19.2),
+and the reaction type has no variant that could perform one.
+
 ## Repository layout
 
 ```text
+herdr-plugin.toml     Generated Herdr plugin manifest
+herdr/                Plugin install-time build scripts
 crates/
   hrc-protocol/       Wire protocol constants, domains, and message kinds
   hrc-crypto/         Signing, encryption, hashing, invite proofs
@@ -53,7 +145,11 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-CI runs the same commands on Linux, macOS, and Windows.
+Pull-request CI runs these on Linux only, and skips them entirely when no
+Rust source changed. Windows and macOS are a manual workflow
+(`.github/workflows/cross-platform.yml`), to be run before a release and
+after any change touching paths, filesystem behavior, process handling, time,
+or line endings (PRD decision DEC-049).
 
 ## Exit codes
 

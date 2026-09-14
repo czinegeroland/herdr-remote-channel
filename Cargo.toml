@@ -67,6 +67,16 @@ tokio = { version = "1", features = [
 rusqlite = { version = "0.40", features = ["bundled"] }
 secrecy = "0.10"
 tempfile = "3"
+# The Herdr plugin manifest is the host's format, not ours: `herdr-plugin.toml`
+# is what Herdr reads to discover and install a plugin. Emitting it with a real
+# serializer rather than a hand-rolled writer means a quoted string or an array
+# of argv is escaped by something that has been tested. Serialization only —
+# nothing here parses TOML.
+toml = { version = "1", default-features = false, features = [
+    "display",
+    "serde",
+    "std",
+] }
 zeroize = "1"
 
 [workspace.lints.rust]

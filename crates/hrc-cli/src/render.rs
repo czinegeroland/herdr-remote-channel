@@ -34,9 +34,19 @@ pub fn success(as_json: bool, command: &str, value: &Value) {
         "device list" => render_devices(value),
         "thread" => render_thread(value),
         "herdr startup" => render_herdr_startup(value),
+        "herdr manifest" => render_herdr_manifest(value),
         "herdr action" | "herdr pane" => render_herdr_pane(value),
         _ => println!("{value}"),
     }
+}
+
+/// Prints the manifest file itself, so the command can be redirected.
+///
+/// `hrc herdr manifest > herdr-plugin.toml` has to produce a file Herdr can
+/// read, which means no framing, no trailing summary, and no `println!` of a
+/// JSON blob. `--json` is the structured form for anything that wants one.
+fn render_herdr_manifest(value: &Value) {
+    print!("{}", text(value, "toml"));
 }
 
 fn render_init(value: &Value) {

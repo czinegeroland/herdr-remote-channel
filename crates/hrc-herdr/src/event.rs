@@ -1,42 +1,76 @@
-//! Herdr events delivered to `hrc herdr event` (PRD section 13.2).
+//! Herdr events delivered to `bin/hrc herdr event` (PRD section 13.2).
 //!
-//! Herdr writes one JSON object to standard input and the plugin decides
-//! what to do about it. Two things shape this module.
+//! Herdr does not write the event to standard input. It runs the hook's argv
+//! with the plugin directory as the working directory and names the event in
+//! `HERDR_PLUGIN_EVENT`, with the host's payload in `HERDR_PLUGIN_EVENT_JSON`.
+//! So the hook dispatches on the *name*, which is part of the host's
+//! documented contract, and never parses the payload: nothing this plugin
+//! does with an event needs a field out of it, and a parser for a shape we
+//! have not verified would fail on host input that is perfectly valid.
 //!
-//! First, the input is parsed into a closed enum with unknown fields
-//! rejected. An event is host input, not remote input, but the plugin should
-//! still fail loudly on an event shape it does not understand rather than
-//! silently treating it as something else.
+//! Two things shape the rest.
 //!
-//! Second, an event never carries a decision. PRD section 13.2 says
-//! frequently occurring event processing belongs in the daemon rather than
-//! in repeatedly spawned hook commands, and section 19.2 says approval is a
-//! human act on the trusted screen. So the reactions below refresh, notify,
-//! and nudge the daemon — none of them approve anything, and there is no
-//! variant that could.
+//! First, the subscription list is deliberately one entry long. Section 13.2
+//! says frequently occurring event processing belongs in the daemon rather
+//! than in repeatedly spawned hook commands, and every name added here is a
+//! process spawn at the host's rate, not ours.
+//!
+//! Second, an event never carries a decision. Section 19.2 says approval is a
+//! human act on the trusted screen, so the reactions below refresh and
+//! nothing else — there is no variant that could approve, deliver, or reveal
+//! anything, and that is a property of the type rather than of a handler.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-/// Something Herdr told the plugin about.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "event",
-    content = "params",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-pub enum Event {
-    /// Herdr finished starting up.
-    Started,
-    /// The user opened a pane belonging to this plugin.
-    PaneOpened {
-        /// Which pane, as the manifest named it.
-        pane: String,
-    },
-    /// A periodic tick the host schedules.
-    Tick,
-    /// Herdr is shutting down.
-    Stopping,
+/// The name of the environment variable Herdr names the event in.
+pub const EVENT_VARIABLE: &str = "HERDR_PLUGIN_EVENT";
+
+/// A host event this plugin subscribes to.
+///
+/// A closed set, and the same one the manifest declares: `manifest()` builds
+/// its `[[events]]` tables from [`HostEvent::ALL`], so a name this plugin can
+/// react to and a name it is registered for cannot disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostEvent {
+    /// A person brought a workspace to the front.
+    ///
+    /// The one moment where a stale sidebar is visible to somebody. Workspace
+    /// and tab creation, closure, renaming and movement all leave the channel
+    /// state untouched, so subscribing to them would spawn a process to
+    /// recompute an answer that has not changed.
+    WorkspaceFocused,
+}
+
+impl HostEvent {
+    /// Every event this plugin subscribes to, in manifest order.
+    pub const ALL: [HostEvent; 1] = [HostEvent::WorkspaceFocused];
+
+    /// The host's name for this event.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            HostEvent::WorkspaceFocused => "workspace.focused",
+        }
+    }
+
+    /// Parses a host event name, returning `None` for anything else.
+    ///
+    /// Anything else includes events this plugin is not registered for. A
+    /// host may deliver one — a shared subscription, a later Herdr that
+    /// widens a category — and reacting to an event we did not ask for is
+    /// how a hook ends up running at a rate nobody chose.
+    pub fn parse(name: &str) -> Option<HostEvent> {
+        HostEvent::ALL
+            .into_iter()
+            .find(|event| event.as_str() == name.trim())
+    }
+
+    /// What the plugin does about this event.
+    pub const fn reaction(self) -> Reaction {
+        match self {
+            HostEvent::WorkspaceFocused => Reaction::RefreshStatus,
+        }
+    }
 }
 
 /// What the plugin does about an event.
@@ -45,40 +79,24 @@ pub enum Event {
 /// oversight to be filled in later: an event is a host callback, and a host
 /// callback that could approve remote content would be an approval no human
 /// made.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(tag = "reaction", rename_all = "snake_case")]
 pub enum Reaction {
     /// Ask the daemon for current state and redraw the sidebar.
     RefreshStatus,
-    /// Redraw one pane.
-    RefreshPane {
-        /// Which pane.
-        pane: crate::pane::Pane,
-    },
     /// Nothing to do.
     Ignore,
 }
 
-impl Event {
-    /// Parses one event from the JSON Herdr wrote to standard input.
-    pub fn parse(input: &str) -> Result<Self, String> {
-        serde_json::from_str(input).map_err(|error| error.to_string())
-    }
-
-    /// What the plugin should do about this event.
-    pub fn reaction(&self) -> Reaction {
-        match self {
-            Event::Started | Event::Tick => Reaction::RefreshStatus,
-            Event::PaneOpened { pane } => match crate::pane::Pane::parse(pane) {
-                Some(pane) => Reaction::RefreshPane { pane },
-                // A pane this plugin does not own is not this plugin's to
-                // redraw. Herdr may host others.
-                None => Reaction::Ignore,
-            },
-            // Shutdown is the daemon's business, and the daemon outlives the
-            // plugin process. There is nothing for a hook invocation to do.
-            Event::Stopping => Reaction::Ignore,
-        }
+/// The reaction to whatever the host named, including nothing at all.
+///
+/// A hook invoked with no event named is not an error: Herdr runs the same
+/// argv for several purposes, and exiting non-zero because a variable was
+/// absent would show a person a failed plugin for a reason that is not one.
+pub fn reaction_to(name: Option<&str>) -> Reaction {
+    match name.and_then(HostEvent::parse) {
+        Some(event) => event.reaction(),
+        None => Reaction::Ignore,
     }
 }
 

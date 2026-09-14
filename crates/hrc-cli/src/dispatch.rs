@@ -162,6 +162,7 @@ pub fn command_path(command: &Command) -> String {
             HerdrAction::Startup => "herdr startup".into(),
             HerdrAction::Action { .. } => "herdr action".into(),
             HerdrAction::Event => "herdr event".into(),
+            HerdrAction::Manifest => "herdr manifest".into(),
             HerdrAction::Pane { .. } => "herdr pane".into(),
         },
     }

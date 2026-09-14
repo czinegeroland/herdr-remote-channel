@@ -72,26 +72,19 @@ fn run_daemon(cli: &Cli, path: &str) -> std::process::ExitCode {
         }
     });
 
-    match commands::daemon_tick(&context) {
-        Ok(value) => {
-            render::success(cli.json, path, &value);
-            let mut stdout = std::io::stdout();
-            if let Err(error) = std::io::Write::flush(&mut stdout) {
-                report(
-                    cli.json,
-                    "io_error",
-                    path,
-                    &format!("could not flush daemon startup output: {error}"),
-                    None,
-                );
-                return code(exit::FAILURE);
-            }
-        }
-        Err(error) => {
-            report(cli.json, error.code(), path, &error.to_string(), None);
-            return code(error.exit_code());
-        }
-    }
+    // The startup line is printed by `commands::daemon`, once the shutdown
+    // signals are armed. Printing it here, before the runtime existed, meant
+    // the daemon announced itself during a window in which a SIGTERM would
+    // still kill it under the default disposition — so the line claimed a
+    // daemon that was up and stoppable before it was either.
+    let announce = |value: Value| -> std::result::Result<(), CliError> {
+        render::success(cli.json, path, &value);
+        std::io::Write::flush(&mut std::io::stdout()).map_err(|source| CliError::Io {
+            action: "flush the daemon startup output",
+            source,
+        })?;
+        Ok(())
+    };
 
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -110,7 +103,7 @@ fn run_daemon(cli: &Cli, path: &str) -> std::process::ExitCode {
         }
     };
 
-    match runtime.block_on(commands::daemon(&context)) {
+    match runtime.block_on(commands::daemon(&context, announce)) {
         Ok(()) => code(exit::SUCCESS),
         Err(error) => {
             report(cli.json, error.code(), path, &error.to_string(), None);
@@ -228,21 +221,15 @@ fn run(cli: &Cli, _path: &str) -> std::result::Result<Value, Failure> {
                 commands::herdr_action(&context, name).map_err(Failure::from)
             }
             cli::HerdrAction::Event => {
-                // Herdr writes one JSON object to standard input. Reading it
-                // here rather than in `commands` keeps the command functions
-                // testable without a process to feed.
-                let mut input = String::new();
-                std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).map_err(
-                    |source| {
-                        Failure::from(CliError::Io {
-                            action: "read the Herdr event from standard input",
-                            source,
-                        })
-                    },
-                )?;
+                // Herdr names the event in an environment variable rather
+                // than writing it to standard input. Reading it here instead
+                // of in `commands` keeps the command function testable
+                // without an environment to set up.
+                let event = std::env::var(hrc_herdr::event::EVENT_VARIABLE).ok();
 
-                commands::herdr_event(&context, &input).map_err(Failure::from)
+                commands::herdr_event(&context, event.as_deref()).map_err(Failure::from)
             }
+            cli::HerdrAction::Manifest => commands::herdr_manifest().map_err(Failure::from),
             cli::HerdrAction::Pane { name } => {
                 commands::herdr_pane(&context, name).map_err(Failure::from)
             }
