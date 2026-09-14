@@ -33,25 +33,30 @@ herdr plugin install czinegeroland/herdr-remote-channel
 ```
 
 Herdr clones the repository, shows you the commands it is about to run, and
-on your confirmation runs the manifest's build step. That step installs
-`hrc` twice on purpose:
+on your confirmation runs the manifest's build steps. They are three `cargo`
+invocations and nothing else — the same three on Linux, macOS and Windows:
 
-- `bin/hrc` inside the plugin directory, which is what `herdr-plugin.toml`
-  invokes. Resolving the binary relative to the plugin root rather than
-  through `PATH` means the plugin works whether or not the install prefix is
-  on the `PATH` Herdr inherited.
-- `~/.local/bin/hrc` (`%LOCALAPPDATA%\Programs\hrc` on Windows), so that
-  `hrc send`, `hrc doctor`, and the agent skill's `hrc --help` discovery work
-  in your own terminal. Override with `HRC_INSTALL_PREFIX`. If this copy
-  cannot be written the build says so and continues; the plugin still works.
+1. `cargo install --path crates/hrc-cli --root .` puts the binary at
+   `bin/hrc` inside the plugin directory, which is what `herdr-plugin.toml`
+   invokes. Resolving it relative to the plugin root rather than through
+   `PATH` means the plugin works whether or not the install prefix is on the
+   `PATH` Herdr inherited. Cargo appends `.exe` on Windows itself.
+2. `cargo install --path crates/hrc-cli` puts a second copy in Cargo's own
+   bin directory, so `hrc send`, `hrc doctor` and the agent skill's
+   `hrc --help` discovery work in your terminal. Rustup already puts that
+   directory on your `PATH`.
+3. `cargo clean` reclaims the build directory the first two filled — about
+   400 MB, which would otherwise sit in the Herdr plugins folder for as long
+   as the plugin is installed. The cost is that a reinstall rebuilds.
 
-The build step prefers a published release artifact, which it downloads and
-verifies against its SHA-256 checksum and which needs no Rust toolchain. When
-no release covers the platform — including right now, before the first tag
-exists — it falls back to `cargo build --release`, which does need
-[rustup](https://rustup.rs). Set `HRC_VERSION` to pin a specific release tag.
+This needs a Rust toolchain ([rustup](https://rustup.rs)); the first build
+takes a couple of minutes. There is deliberately no shell script on either
+side: an earlier version had one per platform, and the PowerShell half failed
+on the first real Windows install while the POSIX half worked, because two
+scripts are two implementations of one idea and only one of them had been
+run.
 
-Confirm the install, and check `~/.local/bin` is on your `PATH`:
+Confirm the install:
 
 ```bash
 herdr plugin list
@@ -64,23 +69,26 @@ hrc doctor
 ```bash
 git clone https://github.com/czinegeroland/herdr-remote-channel
 cd herdr-remote-channel
-sh herdr/build.sh
+cargo install --path crates/hrc-cli --root . --locked --force
 herdr plugin link "$PWD"
 ```
 
-`herdr plugin link` does not run build commands, which is why `herdr/build.sh`
-is invoked by hand first. Re-run it after any change to the Rust sources.
+`herdr plugin link` does not run build commands, which is why the install is
+invoked by hand first. Re-run it after any change to the Rust sources. Skip
+the `cargo clean` step here — you want the build cache.
 
-### The CLI on its own
+### The CLI on its own, with no toolchain
 
-`hrc` is useful without Herdr. Once a release exists:
+`hrc` is useful without Herdr, and this is the path that needs nothing
+installed. Once a release is tagged:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/czinegeroland/herdr-remote-channel/main/scripts/install.sh | sh -s -- --version v0.1.0
 ```
 
-`scripts/install.ps1` is the Windows equivalent. Both verify a checksum and
-refuse an artifact that does not match.
+`scripts/install.ps1` is the Windows equivalent. Both download a prebuilt
+binary, verify its SHA-256 against the published checksum, and refuse an
+artifact that does not match. Neither compiles anything.
 
 ## What the plugin registers
 
@@ -115,7 +123,6 @@ and the reaction type has no variant that could perform one.
 
 ```text
 herdr-plugin.toml     Generated Herdr plugin manifest
-herdr/                Plugin install-time build scripts
 crates/
   hrc-protocol/       Wire protocol constants, domains, and message kinds
   hrc-crypto/         Signing, encryption, hashing, invite proofs

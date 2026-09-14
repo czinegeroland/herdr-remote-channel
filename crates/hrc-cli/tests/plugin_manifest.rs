@@ -120,7 +120,22 @@ fn every_command_the_manifest_names_is_a_subcommand_this_binary_accepts() {
 }
 
 #[test]
-fn the_build_step_the_manifest_names_exists_and_is_a_script() {
+fn the_build_steps_are_the_same_on_every_platform() {
+    // The property that replaced a pair of per-platform shell scripts, and
+    // the reason it is asserted rather than assumed.
+    //
+    // The PowerShell half failed on the first real Windows install. `git
+    // describe` writes to standard error in a checkout with no tags — the
+    // ordinary case, because Herdr installs from a commit — and Windows
+    // PowerShell turns a redirected native command's stderr into a
+    // terminating error. `cargo build` would have failed next for the same
+    // reason. Neither could be reproduced on the PowerShell available to
+    // test with, because version 7 relaxed that behavior.
+    //
+    // Two scripts were two implementations of one idea, only one of which
+    // anyone had ever run. `cargo` is the same program on all three
+    // platforms, so a build step that is only `cargo` has nothing left to
+    // diverge.
     let manifest = hrc()
         .args(["herdr", "manifest", "--json"])
         .output()
@@ -137,6 +152,11 @@ fn the_build_step_the_manifest_names_exists_and_is_a_script() {
     );
 
     for step in steps {
+        assert!(
+            step.get("platforms").is_none_or(serde_json::Value::is_null),
+            "a build step restricted to some platforms is a second flow: {step}"
+        );
+
         let command: Vec<&str> = step["command"]
             .as_array()
             .expect("an argv array")
@@ -144,16 +164,87 @@ fn the_build_step_the_manifest_names_exists_and_is_a_script() {
             .map(|argument| argument.as_str().expect("an argv string"))
             .collect();
 
-        let script = command
-            .iter()
-            .find(|argument| argument.ends_with(".sh") || argument.ends_with(".ps1"))
-            .unwrap_or_else(|| panic!("`{command:?}` names no build script"));
-
-        let path = repository_root().join(script);
-        assert!(
-            path.is_file(),
-            "the manifest's build step runs {}, which is not in the repository",
-            path.display()
+        assert_eq!(
+            command.first(),
+            Some(&"cargo"),
+            "a build step that runs an interpreter is a per-platform script \
+             by another name: {command:?}"
         );
+
+        // `--locked` is what makes an install build the dependency versions
+        // this repository actually tested. Only the installing steps take it;
+        // the cleanup step is not an install.
+        if command.contains(&"install") {
+            assert!(
+                command.contains(&"--locked"),
+                "a build step should install from the committed lockfile: {command:?}"
+            );
+        }
     }
+
+    // `cargo install --path` builds into the workspace's own `target`
+    // directory and leaves roughly four hundred megabytes there, inside the
+    // Herdr plugins folder, for as long as the plugin is installed. Measured,
+    // not assumed: 407.8 MiB on the run that produced this test.
+    let cleans = steps.iter().any(|step| {
+        step["command"]
+            .as_array()
+            .expect("an argv array")
+            .iter()
+            .any(|argument| argument == "clean")
+    });
+    assert!(
+        cleans,
+        "the build should reclaim its own artifacts: {steps:?}"
+    );
+}
+
+#[test]
+fn one_build_step_installs_where_the_manifest_looks_and_one_onto_the_path() {
+    // The two copies are the install contract. The manifest invokes
+    // `bin/hrc` and cannot depend on PATH; a person's terminal and the agent
+    // skill's `hrc --help` discovery need `hrc` on PATH. A build that
+    // produced only one of them would half-work in a way nobody notices
+    // until they try the other.
+    let manifest = hrc()
+        .args(["herdr", "manifest", "--json"])
+        .output()
+        .expect("the manifest command should run");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&manifest.stdout).expect("stdout should be JSON");
+
+    let commands: Vec<Vec<String>> = manifest["manifest"]["build"]
+        .as_array()
+        .expect("an array of build steps")
+        .iter()
+        .map(|step| {
+            step["command"]
+                .as_array()
+                .expect("an argv array")
+                .iter()
+                .map(|argument| argument.as_str().expect("an argv string").to_owned())
+                .collect()
+        })
+        .collect();
+
+    // `cargo install --root .` writes to `./bin/`, which is exactly where
+    // `EXECUTABLE` points, and appends `.exe` there itself on Windows.
+    let into_plugin = commands
+        .iter()
+        .filter(|command| command.windows(2).any(|pair| pair == ["--root", "."]))
+        .count();
+    assert_eq!(
+        into_plugin, 1,
+        "exactly one step should install into the plugin root: {commands:?}"
+    );
+
+    let onto_path = commands
+        .iter()
+        .filter(|command| command.iter().any(|argument| argument == "install"))
+        .filter(|command| !command.iter().any(|argument| argument == "--root"))
+        .count();
+    assert_eq!(
+        onto_path, 1,
+        "exactly one step should install onto the PATH: {commands:?}"
+    );
 }
