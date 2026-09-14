@@ -64,6 +64,7 @@ fn every_supported_item_kind_is_representable() {
             note("a note"),
             excerpt("src/lib.rs", "fn main() {}"),
             ContextItem::Patch {
+                range: "HEAD~1..HEAD".into(),
                 diff: "--- a\n+++ b\n".into(),
             },
             ContextItem::Reference {
@@ -333,7 +334,11 @@ fn environmental_dumps_and_scrollback_are_explicitly_rejected() {
         let preview = package.preview().unwrap();
         assert!(!preview.is_sendable(), "{command:?} was accepted");
         assert!(preview.secrets.is_empty());
-        assert!(preview.excluded[0].reason.contains("excluded"));
+        assert!(
+            preview.excluded[0].reason.contains("HRC ran itself"),
+            "{:?}",
+            preview.excluded[0].reason
+        );
     }
 }
 
@@ -341,6 +346,7 @@ fn environmental_dumps_and_scrollback_are_explicitly_rejected() {
 fn caller_authored_patch_and_output_provenance_is_not_sendable() {
     for item in [
         ContextItem::Patch {
+            range: String::new(),
             diff: "--- a/.env\n+++ b/.env\n+DATABASE_URL=postgres://example\n".into(),
         },
         ContextItem::Output {
@@ -352,7 +358,12 @@ fn caller_authored_patch_and_output_provenance_is_not_sendable() {
             .preview()
             .unwrap();
         assert!(!preview.is_sendable());
-        assert!(preview.excluded[0].reason.contains("HRC-controlled"));
+        assert!(
+            preview.excluded[0].reason.contains("HRC captured")
+                || preview.excluded[0].reason.contains("HRC ran itself"),
+            "{:?}",
+            preview.excluded[0].reason
+        );
     }
 }
 
@@ -431,4 +442,144 @@ fn a_context_without_a_digest_is_refused_before_storage() {
         ContextPackage::from_message_body(&body),
         Err(CoreError::MalformedMessage { .. })
     ));
+}
+
+#[test]
+fn only_commands_hrc_runs_itself_are_accepted_as_output() {
+    for allowed in AllowedCommand::ALL {
+        let package = ContextPackage::new(
+            "ctx-allowed",
+            vec![ContextItem::Output {
+                command: allowed.as_str().into(),
+                text: "M src/lib.rs".into(),
+            }],
+        );
+
+        let preview = package.preview().unwrap();
+        assert!(
+            preview.is_sendable(),
+            "`{}` should be sendable: {:?}",
+            allowed.as_str(),
+            preview.excluded
+        );
+    }
+}
+
+#[test]
+fn the_allowlist_closes_what_a_deny_list_could_not() {
+    // The previous check recognized environment dumps and scrollback by
+    // pattern. Every command below evades that kind of matching while doing
+    // exactly what the requirement forbids, and an allowlist refuses all of
+    // them without having to recognize any of them as dangerous.
+    for command in [
+        "sh -c 'cat ~/.bash_history'",
+        "cat /proc/self/environ",
+        "bash -lc 'declare -p'",
+        "cat .env",
+        "git config --list --show-origin",
+        "aws configure list",
+        "cat ~/.aws/credentials",
+        "tmux capture-pane -p -S -",
+        "screen -X hardcopy /tmp/out",
+        "cargo test",
+        "git status",              // right idea, not the exact spelling
+        "git  status --porcelain", // doubled space
+        "GIT STATUS --PORCELAIN",
+        "",
+    ] {
+        let package = ContextPackage::new(
+            "ctx-denied",
+            vec![ContextItem::Output {
+                command: command.into(),
+                text: "ordinary-looking text without a scanner match".into(),
+            }],
+        );
+
+        let preview = package.preview().unwrap();
+        assert!(!preview.is_sendable(), "`{command}` should not be sendable");
+    }
+}
+
+#[test]
+fn a_patch_must_name_the_range_it_was_captured_over() {
+    let without = ContextPackage::new(
+        "ctx-patch",
+        vec![ContextItem::Patch {
+            range: "   ".into(),
+            diff: "--- a\n+++ b\n".into(),
+        }],
+    )
+    .preview()
+    .unwrap();
+    assert!(
+        !without.is_sendable(),
+        "a patch with no range is not a patch"
+    );
+
+    let with = ContextPackage::new(
+        "ctx-patch",
+        vec![ContextItem::Patch {
+            range: "HEAD~2..HEAD".into(),
+            diff: "--- a\n+++ b\n".into(),
+        }],
+    )
+    .preview()
+    .unwrap();
+    assert!(with.is_sendable(), "{:?}", with.excluded);
+}
+
+#[test]
+fn a_patch_range_is_scanned_for_secrets_like_any_other_caller_text() {
+    // The range is caller-supplied, so it is one more field somebody could
+    // put a token in.
+    let package = ContextPackage::new(
+        "ctx-patch",
+        vec![ContextItem::Patch {
+            range: "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB".into(),
+            diff: "--- a\n+++ b\n".into(),
+        }],
+    );
+
+    let preview = package.preview().unwrap();
+    assert!(
+        !preview.is_sendable(),
+        "a token in the range must block the send"
+    );
+}
+
+#[test]
+fn every_allowed_command_round_trips_and_names_a_read_only_git_operation() {
+    for allowed in AllowedCommand::ALL {
+        assert_eq!(AllowedCommand::parse(allowed.as_str()), Some(allowed));
+
+        let argv = allowed.argv();
+        assert!(!argv.is_empty());
+        // Read-only: none of these write to the repository or run project
+        // code, which is why capturing them is a smaller decision than
+        // running a build.
+        assert!(
+            matches!(argv[0], "status" | "log" | "diff"),
+            "`{}` is not a read-only git operation",
+            allowed.as_str()
+        );
+    }
+}
+
+#[test]
+fn no_allowed_command_can_emit_an_environment_variable() {
+    // The property section 12.5 actually asks for. Asserted against the
+    // argument vector rather than the prose, so adding a command to the list
+    // without thinking about it fails here.
+    for allowed in AllowedCommand::ALL {
+        let flat = format!("{} {}", allowed.as_str(), allowed.argv().join(" "));
+        let lower = flat.to_lowercase();
+
+        for forbidden in ["env", "printenv", "history", "config", "--show-origin"] {
+            assert!(
+                !lower.split_whitespace().any(|word| word == forbidden),
+                "`{}` could emit environment or configuration data",
+                allowed.as_str()
+            );
+        }
+    }
 }
