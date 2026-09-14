@@ -1,0 +1,111 @@
+name: Publish to npm
+
+# Publishes the `hrc` CLI to npm after a release is created.
+#
+# Deliberately separate from `release.yml`, which `cargo dist` generates and
+# owns. Everything here is hand-written, so nothing in it has to be re-applied
+# after a `dist generate`, and the verification below lives in code this
+# repository controls rather than in a patch over generated output.
+#
+# `cargo dist` can emit an npm installer itself. It is not used, because it
+# fetches the release archive over HTTPS at install time and checks nothing.
+# This project publishes SHA-256 checksums so that an artifact can be refused;
+# a channel that ignores them throws that away. `build-npm-packages.mjs`
+# verifies every archive against its published checksum and bundles the
+# executables into the packages, so npm serves the bytes under its own
+# integrity hash and no install ever fetches from GitHub.
+on:
+  release:
+    types: [published]
+  # So a failed publish can be retried without cutting another tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish, for example v0.1.0
+        required: true
+        type: string
+      dry-run:
+        description: Build and verify the packages without publishing
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the release
+        uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22.x'
+          registry-url: https://registry.npmjs.org
+
+      - name: Work out which tag to publish
+        id: release
+        env:
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${EVENT_TAG:-$INPUT_TAG}"
+          [ -n "$tag" ] || { echo "no tag to publish" >&2; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download the release archives and their checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir artifacts \
+            --pattern 'hrc-cli-*'
+          ls -la artifacts
+
+      # Refuses a tampered or unchecksummed archive, and refuses to publish at
+      # all unless every supported platform is present: a release where one
+      # platform silently went missing would install for some people and not
+      # others, which is worse than not publishing.
+      - name: Build and verify the npm packages
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: node scripts/build-npm-packages.mjs --version "$VERSION" --artifacts artifacts --out npm-dist
+
+      - name: Check the built shim runs the bundled binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd npm-dist/herdr-remote-channel
+          mkdir -p node_modules/@herdr-remote-channel
+          cp -r ../linux-x64 node_modules/@herdr-remote-channel/linux-x64
+          test "$(node bin.js --version)" = "hrc ${{ steps.release.outputs.version }}"
+          echo "the packaged shim runs the packaged binary"
+
+      - name: Publish
+        if: ${{ !inputs.dry-run }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Platform packages first. The root package depends on them, and an
+          # `npm install` that resolved before they existed would fail.
+          for dir in npm-dist/*/; do
+            name="$(basename "$dir")"
+            [ "$name" = "herdr-remote-channel" ] && continue
+            echo "publishing @herdr-remote-channel/$name"
+            npm publish --access public "$dir"
+          done
+
+          echo "publishing herdr-remote-channel"
+          npm publish --access public npm-dist/herdr-remote-channel

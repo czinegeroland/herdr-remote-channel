@@ -185,3 +185,97 @@ fn the_dependency_exemption_stays_narrow() {
          rule, not in a workflow `if:` that skips the check entirely"
     );
 }
+
+#[test]
+fn the_npm_channel_verifies_what_it_publishes() {
+    // The reason this project builds its own npm packages rather than using
+    // the installer `cargo dist` generates: that one fetches the release
+    // archive over HTTPS at install time and checks nothing. This project
+    // publishes SHA-256 checksums so an artifact can be refused, and a
+    // distribution channel that ignores them discards the property.
+    //
+    // Checked by reading, because running it needs four platform archives.
+    // `scripts/build-npm-packages.mjs` was exercised against real archives
+    // and refuses a tampered one, a missing checksum file, and a missing
+    // platform, each with a non-zero exit.
+    let builder = read("scripts/build-npm-packages.mjs");
+
+    assert!(
+        builder.contains("createHash('sha256')"),
+        "the builder should compute a SHA-256 of each archive"
+    );
+    assert!(
+        builder.contains("checksum mismatch") && builder.contains("Refusing to install"),
+        "a mismatch should refuse rather than warn and continue"
+    );
+    assert!(
+        builder.contains("has no published checksum"),
+        "an archive with no checksum beside it should be refused, not trusted"
+    );
+
+    // Bundled rather than fetched. A `postinstall` in the published package
+    // would mean an unverified download on every install, which is the thing
+    // being avoided.
+    //
+    // Asserted against what the builder *emits* rather than against the word
+    // appearing anywhere: both files explain in prose why there is no
+    // postinstall, and a substring search on the bare word matches the
+    // explanation. That is a test failing on its own documentation.
+    for emitted in ["postinstall:", "\"postinstall\""] {
+        assert!(
+            !builder.contains(emitted),
+            "the published package.json must declare no `{emitted}` hook"
+        );
+    }
+
+    let shim = read("npm/hrc/bin.js");
+    for forbidden in ["https://", "fetch(", "http.get", "require('node:https')"] {
+        assert!(
+            !shim.contains(forbidden),
+            "the published shim must not reach the network: found `{forbidden}`"
+        );
+    }
+    assert!(
+        builder.contains("optionalDependencies"),
+        "platforms should be selected by npm through optional dependencies"
+    );
+}
+
+#[test]
+fn the_npm_shim_and_its_builder_agree_on_the_platforms() {
+    // Two lists of the same four targets, in different languages, in
+    // different files. They drift the moment a platform is added to one and
+    // not the other, and the failure would be a person on that platform
+    // installing a package with no binary in it.
+    let shim = read("npm/hrc/bin.js");
+    let builder = read("scripts/build-npm-packages.mjs");
+
+    for suffix in ["linux-x64", "darwin-x64", "darwin-arm64", "win32-x64"] {
+        assert!(
+            shim.contains(suffix),
+            "the shim does not resolve `{suffix}`"
+        );
+        assert!(
+            builder.contains(suffix),
+            "the builder does not build `{suffix}`"
+        );
+    }
+
+    // And the same four the release pipeline is configured to produce.
+    let workspace = read("Cargo.toml");
+    for target in [
+        "x86_64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+    ] {
+        assert!(
+            workspace.contains(target),
+            "`{target}` is packaged for npm but not built by the release pipeline"
+        );
+        assert!(
+            builder.contains(target),
+            "`{target}` is built by the release pipeline but not packaged for npm"
+        );
+    }
+}

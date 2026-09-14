@@ -79,8 +79,19 @@ the `cargo clean` step here — you want the build cache.
 
 ### The CLI on its own, with no toolchain
 
-`hrc` is useful without Herdr, and this is the path that needs nothing
-installed. Once a release is tagged:
+Once a release is tagged, the CLI is on npm and needs no Rust:
+
+```bash
+npx herdr-remote-channel@latest --version
+```
+
+The binary is not downloaded when you install. Each platform's executable is
+published inside its own npm package and selected by npm's `os` and `cpu`
+constraints, so npm serves the bytes under its own integrity hash and nothing
+is fetched from GitHub at install time. Every archive is checked against its
+published SHA-256 before it is packed, and a mismatch stops the publish.
+
+There is also a shell installer, which does the same verification itself:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/czinegeroland/herdr-remote-channel/main/scripts/install.sh | sh -s -- --version v0.1.0
