@@ -93,9 +93,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install the pinned toolchain
+        # Reads the exact version from `rust-toolchain.toml` (decision
+        # DEC-050) rather than pulling whatever `stable` is today, so CI
+        # tests with the compiler releases are built with.
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt,clippy
-          rustup default stable
+          rustup show active-toolchain || rustup toolchain install
           rustc --version
           cargo --version
 
@@ -131,9 +133,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install the pinned toolchain
+        # Reads the exact version from `rust-toolchain.toml` (decision
+        # DEC-050) rather than pulling whatever `stable` is today, so CI
+        # tests with the compiler releases are built with.
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup show active-toolchain || rustup toolchain install
           rustc --version
           cargo --version
 

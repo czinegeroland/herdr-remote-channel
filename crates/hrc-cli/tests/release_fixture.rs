@@ -221,12 +221,13 @@ fn the_installer_requires_a_version_rather_than_guessing_one() {
 }
 
 #[test]
-fn the_release_workflow_covers_every_target_the_prd_requires() {
-    // PRD section 13.2 lists four targets. A release that silently omitted
-    // one would leave those users with no way to install, so the workflow
-    // both builds all four and refuses to publish without them.
-    let workflow = std::fs::read_to_string(repository_root().join(".github/workflows/release.yml"))
-        .expect("the release workflow should exist");
+fn the_release_configuration_covers_every_target_the_prd_requires() {
+    // PRD section 13.2 lists four targets. This reads `Cargo.toml` rather
+    // than the workflow, because `cargo dist` computes the matrix at run
+    // time from this configuration — the workflow never names a target, so
+    // grepping it would assert nothing while appearing to assert everything.
+    let manifest = std::fs::read_to_string(repository_root().join("Cargo.toml"))
+        .expect("the workspace manifest should exist");
 
     for target in [
         "x86_64-pc-windows-msvc",
@@ -235,90 +236,56 @@ fn the_release_workflow_covers_every_target_the_prd_requires() {
         "aarch64-apple-darwin",
     ] {
         assert!(
-            workflow.matches(target).count() >= 2,
-            "`{target}` should be built and then checked for before publishing"
+            manifest.contains(target),
+            "`{target}` is required by section 13.2 and is not in the dist targets"
         );
     }
+
+    assert!(
+        manifest.contains("checksum = \"sha256\""),
+        "artifacts must be published with checksums"
+    );
 }
 
 #[test]
-fn the_release_toolchain_is_pinned_rather_than_tracked() {
-    // Open question OQ-012, answered by decision DEC-050: a released binary
-    // must be rebuildable from its tag, which `stable` does not give.
-    let workflow = std::fs::read_to_string(repository_root().join(".github/workflows/release.yml"))
-        .expect("the release workflow should exist");
+fn the_reference_adapter_is_not_shipped_to_users() {
+    // Caught by running `dist plan` for real: cargo-dist packaged the
+    // conformance fixture as a user-facing artifact alongside `hrc`.
+    // Requirement HRC-TECH-002 ships one self-contained executable.
+    let manifest =
+        std::fs::read_to_string(repository_root().join("crates/hrc-transport/Cargo.toml"))
+            .expect("the transport manifest should exist");
 
-    let pinned = workflow
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("RUSTUP_TOOLCHAIN:"))
-        .map(str::trim)
-        .expect("the release workflow should pin a toolchain");
-
-    let mut parts = pinned.split('.');
     assert!(
-        parts.clone().count() == 3 && parts.all(|part| part.chars().all(|c| c.is_ascii_digit())),
-        "`{pinned}` should be an exact version, not a channel"
+        manifest.contains("[package.metadata.dist]") && manifest.contains("dist = false"),
+        "the reference adapter must be excluded from release artifacts"
     );
+}
 
-    // Development stays on the channel; only releases are pinned.
+#[test]
+fn the_toolchain_is_pinned_rather_than_tracked() {
+    // Open question OQ-012, answered by decision DEC-050. `cargo dist`
+    // deprecated its release-only pin and points at `rust-toolchain.toml`,
+    // and it is right to: a release built by a compiler that development
+    // and CI never tested against is its own risk. So one compiler for all
+    // three, pinned exactly, and bumping it is a reviewable change.
     let toolchain = std::fs::read_to_string(repository_root().join("rust-toolchain.toml"))
         .expect("rust-toolchain.toml should exist");
+
+    let channel = toolchain
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("channel = "))
+        .map(|value| value.trim().trim_matches('"').to_owned())
+        .expect("a toolchain channel should be set");
+
+    let parts: Vec<&str> = channel.split('.').collect();
     assert!(
-        toolchain.contains("channel = \"stable\""),
-        "everyday development should stay on stable"
+        parts.len() == 3
+            && parts
+                .iter()
+                .all(|part| part.chars().all(|c| c.is_ascii_digit())),
+        "`{channel}` should be an exact version, not a moving channel like `stable`"
     );
-}
-
-#[test]
-fn both_installers_verify_a_checksum_before_installing() {
-    // The Windows installer cannot be exercised from this fixture, which is
-    // POSIX-only, so its contract is checked by reading it. The property
-    // that matters is the same on both: an artifact whose digest does not
-    // match the published one is refused, not installed and reported.
-    let root = repository_root();
-
-    for script in ["scripts/install.sh", "scripts/install.ps1"] {
-        let text = std::fs::read_to_string(root.join(script))
-            .unwrap_or_else(|_| panic!("{script} should exist"));
-        let lower = text.to_lowercase();
-
-        assert!(
-            lower.contains("checksum mismatch"),
-            "{script} should refuse a mismatched artifact"
-        );
-        assert!(
-            lower.contains("refusing to install"),
-            "{script} should say it refused rather than warn and continue"
-        );
-        assert!(
-            lower.contains("sha256") || lower.contains("sha-256"),
-            "{script} should verify a SHA-256 digest"
-        );
-    }
-}
-
-#[test]
-fn no_installer_asks_the_user_for_a_toolchain() {
-    // HRC-TECH-012 is a negative requirement, and the way it is usually
-    // broken is an installer that helpfully falls back to `cargo install`.
-    let root = repository_root();
-
-    for script in ["scripts/install.sh", "scripts/install.ps1"] {
-        let text = std::fs::read_to_string(root.join(script))
-            .unwrap_or_else(|_| panic!("{script} should exist"));
-
-        for forbidden in [
-            "cargo install",
-            "cargo build",
-            "rustup toolchain",
-            "npm install",
-        ] {
-            assert!(
-                !text.contains(forbidden),
-                "{script} must not fall back to `{forbidden}`; installing may not need a toolchain"
-            );
-        }
-    }
 }
 
 #[test]
@@ -402,4 +369,56 @@ fn the_installed_executable_runs_daemon_mode_on_a_clean_host() {
 
     daemon.kill().ok();
     panic!("the installed daemon did not stop within five seconds");
+}
+
+#[test]
+fn both_installers_verify_a_checksum_before_installing() {
+    // The Windows installer cannot be exercised from this fixture, which is
+    // POSIX-only, so its contract is checked by reading it. The property
+    // that matters is the same on both: an artifact whose digest does not
+    // match the published one is refused, not installed and reported.
+    let root = repository_root();
+
+    for script in ["scripts/install.sh", "scripts/install.ps1"] {
+        let text = std::fs::read_to_string(root.join(script))
+            .unwrap_or_else(|_| panic!("{script} should exist"));
+        let lower = text.to_lowercase();
+
+        assert!(
+            lower.contains("checksum mismatch"),
+            "{script} should refuse a mismatched artifact"
+        );
+        assert!(
+            lower.contains("refusing to install"),
+            "{script} should say it refused rather than warn and continue"
+        );
+        assert!(
+            lower.contains("sha256") || lower.contains("sha-256"),
+            "{script} should verify a SHA-256 digest"
+        );
+    }
+}
+
+#[test]
+fn no_installer_asks_the_user_for_a_toolchain() {
+    // HRC-TECH-012 is a negative requirement, and the way it is usually
+    // broken is an installer that helpfully falls back to `cargo install`.
+    let root = repository_root();
+
+    for script in ["scripts/install.sh", "scripts/install.ps1"] {
+        let text = std::fs::read_to_string(root.join(script))
+            .unwrap_or_else(|_| panic!("{script} should exist"));
+
+        for forbidden in [
+            "cargo install",
+            "cargo build",
+            "rustup toolchain",
+            "npm install",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "{script} must not fall back to `{forbidden}`; installing may not need a toolchain"
+            );
+        }
+    }
 }

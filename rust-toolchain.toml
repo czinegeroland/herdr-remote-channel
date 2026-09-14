@@ -1,3 +1,12 @@
+# Pinned exactly rather than tracking a channel, answering open question
+# OQ-012 per decision DEC-050.
+#
+# A released binary should be rebuildable from its tag, and `stable` moves.
+# The pin lives here rather than only in the release workflow for two
+# reasons: `cargo dist` deprecated its release-only pin and points at this
+# file, and a release built by a compiler that development and CI never
+# tested against is its own risk. One compiler for development, CI, and
+# releases; bumping it is a deliberate, reviewable change.
 [toolchain]
-channel = "stable"
+channel = "1.94.1"
 components = ["rustfmt", "clippy"]

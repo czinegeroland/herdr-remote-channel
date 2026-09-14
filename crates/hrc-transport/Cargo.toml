@@ -13,5 +13,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
+# The reference adapter is a conformance fixture, not something a user
+# installs. PRD requirement HRC-TECH-002 ships one self-contained `hrc`
+# executable; `cargo dist` would otherwise publish this binary alongside it.
+[package.metadata.dist]
+dist = false
+
 [lints]
 workspace = true
