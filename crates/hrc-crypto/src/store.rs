@@ -20,9 +20,13 @@
 //! - [`PassphraseStore`] encrypts the key file with a passphrase, using
 //!   age's scrypt recipient. It works everywhere, including headless
 //!   servers and CI, and it is fully implemented and tested.
-//! - An OS keychain backend is **not implemented yet**. Its place in the
-//!   design is the [`KeyStore`] trait, which is the platform abstraction PRD
-//!   section 28 requires.
+//! - An OS keychain backend is **not implemented**. Its place in the design
+//!   is the [`KeyStore`] trait, which is the platform abstraction PRD
+//!   section 28 requires. That is a deliberate gap, not an unfinished one:
+//!   see decision DEC-052. A keychain protects a key from other processes on
+//!   the same device, which is a different property from requirement
+//!   HRC-SEC-001's "never leave their device", and section 14.1 asks for it
+//!   only "where available".
 //!
 //! # Why there is no Linux keychain backend
 //!
