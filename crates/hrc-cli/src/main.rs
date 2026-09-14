@@ -72,26 +72,19 @@ fn run_daemon(cli: &Cli, path: &str) -> std::process::ExitCode {
         }
     });
 
-    match commands::daemon_tick(&context) {
-        Ok(value) => {
-            render::success(cli.json, path, &value);
-            let mut stdout = std::io::stdout();
-            if let Err(error) = std::io::Write::flush(&mut stdout) {
-                report(
-                    cli.json,
-                    "io_error",
-                    path,
-                    &format!("could not flush daemon startup output: {error}"),
-                    None,
-                );
-                return code(exit::FAILURE);
-            }
-        }
-        Err(error) => {
-            report(cli.json, error.code(), path, &error.to_string(), None);
-            return code(error.exit_code());
-        }
-    }
+    // The startup line is printed by `commands::daemon`, once the shutdown
+    // signals are armed. Printing it here, before the runtime existed, meant
+    // the daemon announced itself during a window in which a SIGTERM would
+    // still kill it under the default disposition — so the line claimed a
+    // daemon that was up and stoppable before it was either.
+    let announce = |value: Value| -> std::result::Result<(), CliError> {
+        render::success(cli.json, path, &value);
+        std::io::Write::flush(&mut std::io::stdout()).map_err(|source| CliError::Io {
+            action: "flush the daemon startup output",
+            source,
+        })?;
+        Ok(())
+    };
 
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -110,7 +103,7 @@ fn run_daemon(cli: &Cli, path: &str) -> std::process::ExitCode {
         }
     };
 
-    match runtime.block_on(commands::daemon(&context)) {
+    match runtime.block_on(commands::daemon(&context, announce)) {
         Ok(()) => code(exit::SUCCESS),
         Err(error) => {
             report(cli.json, error.code(), path, &error.to_string(), None);

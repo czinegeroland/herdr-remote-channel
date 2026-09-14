@@ -212,7 +212,13 @@ host with no toolchain.
 
 ### Two operational things the next session must know
 
-**GitHub Actions spending is exhausted.** From pull request #42 onward every
+**GitHub Actions is billable again as of pull request #51**, and the first
+real run immediately earned its keep: it caught a shutdown gap that had
+passed locally every time. Prefer CI over a local run where both are
+available. What follows is the local equivalent, still correct and still
+what to use when Actions is unavailable.
+
+**Actions spending was exhausted from #42 to #50.** From pull request #42 onward every
 job failed in seconds with no runner assigned — that signature is billing,
 not code. The user's instruction was to run the checks locally and merge on
 a clean pass, which is what the last several pull requests did. Since #38

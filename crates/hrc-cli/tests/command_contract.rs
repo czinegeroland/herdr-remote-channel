@@ -2312,9 +2312,10 @@ fn the_daemon_stops_cleanly_on_sigterm_and_releases_its_endpoints() {
     let agent = daemon_endpoint(home.path(), Interface::AgentSafe);
     let trusted = daemon_endpoint(home.path(), Interface::TrustedHuman);
 
-    // The startup line is printed before the runtime binds, so wait for the
-    // endpoint to appear rather than racing it. Without this precondition
-    // the test would also pass on a daemon that never listened at all.
+    // Wait for the endpoint to appear before asking the daemon to stop.
+    // Without this precondition the test would also pass on a daemon that
+    // never listened at all. It is not protecting against a signal race —
+    // `a_daemon_is_stoppable_the_moment_it_announces_itself` covers that.
     let listening = match agent.path() {
         None => true,
         Some(path) => (0..100).any(|_| {
@@ -2345,6 +2346,80 @@ fn the_daemon_stops_cleanly_on_sigterm_and_releases_its_endpoints() {
                 path.display()
             );
         }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_daemon_is_stoppable_the_moment_it_announces_itself() {
+    // The startup line is a claim, and this is the claim it makes: the
+    // daemon is up, and asking it to stop will work. Nothing else in the
+    // suite pins the ordering behind that — the tests either side wait for
+    // an endpoint to appear first, so both would pass against a daemon that
+    // announced itself and only then installed its signal handlers.
+    //
+    // That gap was real. SIGTERM arriving in it killed the process under the
+    // default disposition, so `hrc daemon` reported success and then died to
+    // the very signal it advertises handling. A supervisor performing a fast
+    // start-then-stop, or any restart loop, would have seen a signal death
+    // rather than a clean exit.
+    //
+    // Catching it needs the signal sent with nothing in between. `terminate`
+    // forks `kill`, and a fork and exec is several milliseconds — more than
+    // enough slack for the daemon to arm, which is why this cannot reuse it
+    // and why the gap survived until CI on a slower machine found it. So the
+    // daemon's own standard output is piped into a shell that reads one line
+    // and then signals from a builtin, firing as close to the flush as a
+    // process can.
+    let (home, _remote) = channel_fixture();
+
+    for attempt in 0..5 {
+        let mut child = hrc_std_in(home.path())
+            .args(["daemon", "--json"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("daemon should start");
+
+        let stdout = child.stdout.take().expect("stdout is piped");
+        let trigger = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "read -r line; kill -TERM {}; echo \"$line\"",
+                child.id()
+            ))
+            .stdin(std::process::Stdio::from(stdout))
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("the trigger shell should start");
+
+        let announced = trigger
+            .wait_with_output()
+            .expect("the trigger shell should exit");
+        let announced = String::from_utf8_lossy(&announced.stdout).into_owned();
+        assert!(
+            announced.contains("\"status\":\"ok\""),
+            "attempt {attempt}: the daemon should announce itself: {announced}"
+        );
+
+        let mut status = None;
+        for _ in 0..100 {
+            if let Some(exited) = child.try_wait().expect("wait should work") {
+                status = Some(exited);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        let status = status.unwrap_or_else(|| {
+            child.kill().ok();
+            panic!("attempt {attempt}: the daemon did not exit within five seconds of SIGTERM")
+        });
+
+        assert!(
+            status.success(),
+            "attempt {attempt}: a daemon that has announced itself must stop \
+             cleanly rather than be killed: {status:?}"
+        );
     }
 }
 

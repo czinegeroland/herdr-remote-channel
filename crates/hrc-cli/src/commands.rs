@@ -2464,7 +2464,17 @@ pub fn daemon_tick(context: &Context) -> Result<Value> {
 }
 
 /// Runs the resident daemon loop until the process is stopped.
-pub async fn daemon(context: &Context) -> Result<()> {
+pub async fn daemon(context: &Context, announce: impl FnOnce(Value) -> Result<()>) -> Result<()> {
+    // Armed before anything is announced, and before the first
+    // synchronization pass runs. `hrc daemon` prints a startup line that a
+    // supervisor, a test, or a person reads as "it is up"; if the signal
+    // handlers were installed after that line, a SIGTERM arriving in the gap
+    // would kill the process outright under the default disposition. The
+    // daemon would have reported success and then died to the very signal it
+    // advertises handling. Arming first makes the line mean what it says.
+    let shutdown = arm_shutdown();
+    tokio::pin!(shutdown);
+
     let agent_endpoint = daemon_endpoint(&context.paths, Interface::AgentSafe)?;
     let trusted_endpoint = daemon_endpoint(&context.paths, Interface::TrustedHuman)?;
     let agent_context = context.clone();
@@ -2474,14 +2484,11 @@ pub async fn daemon(context: &Context) -> Result<()> {
         Arc::new(Mutex::new(hrc_core::rpc::ContextAuthorizationLedger::new()));
     let trusted_context_authorizations = Arc::clone(&context_authorizations);
 
-    // PRD requirement HRC-TECH-003: Tokio owns cancellation. A daemon that
-    // can only be killed is one that gets killed halfway through publishing,
-    // and while the storage layer survives that — reservations and
-    // transactions are built for it — recovering costs a synchronization
-    // pass and leaves an abandoned slot behind. Asking it to stop instead is
-    // cheaper and quieter.
-    let shutdown = shutdown_signal();
-    tokio::pin!(shutdown);
+    // The first synchronization pass, whose result is the startup line. It
+    // runs here rather than before the runtime so that the daemon is already
+    // stoppable while it happens: on a channel with a slow remote this pass
+    // is the longest part of starting up.
+    announce(daemon_tick(context)?)?;
 
     let served = async {
         tokio::try_join!(
@@ -2539,29 +2546,39 @@ pub async fn daemon(context: &Context) -> Result<()> {
 /// service manager and a container runtime send. A daemon that handled only
 /// Ctrl-C would shut down cleanly when a developer stopped it by hand and be
 /// killed outright by every automated stop, which is the case that matters.
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
+#[cfg(unix)]
+fn arm_shutdown() -> impl std::future::Future<Output = ()> {
+    use tokio::signal::unix::{SignalKind, signal};
 
-        let mut terminate = match signal(SignalKind::terminate()) {
-            Ok(stream) => stream,
-            // Without SIGTERM handling, Ctrl-C alone is still better than
-            // nothing, so this degrades rather than refusing to start.
-            Err(_) => {
-                let _ = tokio::signal::ctrl_c().await;
-                return;
+    // Registered here rather than inside the returned future, and this is
+    // the whole point of splitting "arm" from "wait": an `async fn` body
+    // does not run until something polls it, so a handler installed there
+    // would not exist until the select loop first ran. Installing it while
+    // building the future means the process stops trusting the default
+    // disposition from this line onward.
+    //
+    // Without SIGTERM handling, Ctrl-C alone is still better than nothing,
+    // so a failure to register degrades rather than refusing to start.
+    let terminate = signal(SignalKind::terminate()).ok();
+
+    async move {
+        match terminate {
+            Some(mut terminate) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = terminate.recv() => {}
+                }
             }
-        };
-
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = terminate.recv() => {}
+            None => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
         }
     }
+}
 
-    #[cfg(not(unix))]
-    {
+#[cfg(not(unix))]
+fn arm_shutdown() -> impl std::future::Future<Output = ()> {
+    async {
         let _ = tokio::signal::ctrl_c().await;
     }
 }

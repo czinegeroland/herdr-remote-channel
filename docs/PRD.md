@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-14T18:10:00+02:00 |
+| Last updated | 2026-09-14T19:30:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -2575,7 +2575,7 @@ Every implementation PR must update this table.
 | M0 Product and protocol | 90% | The section 21 adapter protocol now has its out-of-process JSON-RPC binding and its push half: `wait` crosses the boundary, and the conformance suite refuses an adapter whose push declaration disagrees with its behavior | Push-capable adapters | Obtain product-owner specification review, which is not an agent's to record |
 | M1 Secure foundation | 100% | Closes the last requirement row: every path a private key could leave by is shut and evidenced, and keychain storage is separated out as the different property it is (decisions DEC-051 and DEC-052) | Key containment | Nothing outstanding; DEC-051 awaits a product-owner view on whether to add keychain storage where one exists |
 | M2 Git messaging | 100% | The GitHub optimization closes `AC-GIT-ADAPTER`: conditional head polling with ETags where it is available, and a byte-identical fallback to plain Git everywhere else | GitHub change-detection optimization | Add receipts over a published channel and end-to-end restart coverage |
-| M3 Herdr integration | 100% | The plugin is installable: `herdr plugin install czinegeroland/herdr-remote-channel` now finds a `herdr-plugin.toml` in the host's own schema, whose build step puts an `hrc` binary where the manifest points, with a source build as the fallback until a release is tagged (decision DEC-053) | Installable Herdr plugin | Cut a first tag so the Windows and macOS artifacts exist |
+| M3 Herdr integration | 100% | The plugin is installable: `herdr plugin install czinegeroland/herdr-remote-channel` now finds a `herdr-plugin.toml` in the host's own schema, whose build step puts an `hrc` binary where the manifest points, with a source build as the fallback until a release is tagged (decision DEC-053). CI, running again after the spending outage, also caught a real shutdown gap: the daemon announced itself before arming its signal handlers | Installable Herdr plugin | Cut a first tag so the Windows and macOS artifacts exist |
 | M4 Context/delegation | 95% | Patch and command-output items are now captured by HRC from a verified repository instead of being taken on the caller's word, and the environment and scrollback exclusions became an allowlist rather than a deny-list | HRC-controlled context capture | Add delegation message exchange and its CLI surface |
 | M5 Provider ecosystem | 0% | Not started | N/A | Deferred until core protocol stabilizes |
 
