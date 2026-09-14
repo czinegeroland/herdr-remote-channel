@@ -1961,9 +1961,24 @@ fn herdr_entry_points_are_dispatched_by_the_same_binary() {
 
     let value: Value = serde_json::from_slice(&startup.stdout).expect("stdout should be JSON");
     assert_eq!(value["manifest"]["id"], "herdr-remote-channel");
+    let startup_command = value["manifest"]["startup"][0]["command"]
+        .as_array()
+        .expect("an argv array");
     assert_eq!(
-        value["manifest"]["startup"][0]["command"][0], "bin/hrc",
-        "the manifest must resolve the binary from the plugin root"
+        startup_command[0], "node",
+        "an entry point runs through node, which resolves however the host \
+         spawns a command"
+    );
+    assert!(
+        startup_command[1]
+            .as_str()
+            .expect("a launcher path")
+            .starts_with("node_modules/"),
+        "the manifest must resolve the launcher from the plugin root"
+    );
+    assert_eq!(
+        startup_command[2], "herdr",
+        "an entry point is an `hrc herdr ...` invocation"
     );
     assert!(
         value["sidebar"]

@@ -14,29 +14,28 @@ description = "Secure asynchronous communication between independent Herdr insta
 platforms = ["linux", "macos", "windows"]
 
 [[build]]
-command = ["cargo", "install", "--path", "crates/hrc-cli", "--locked", "--force", "--root", "."]
+command = ["cmd", "/c", "npm", "install", "--no-save", "--no-audit", "--no-fund", "herdr-remote-channel@0.1.0"]
+platforms = ["windows"]
 
 [[build]]
-command = ["cargo", "install", "--path", "crates/hrc-cli", "--locked", "--force"]
-
-[[build]]
-command = ["cargo", "clean"]
+command = ["npm", "install", "--no-save", "--no-audit", "--no-fund", "herdr-remote-channel@0.1.0"]
+platforms = ["linux", "macos"]
 
 [[startup]]
-command = ["bin/hrc", "herdr", "startup"]
+command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "startup"]
 
 [[actions]]
 id = "inbox"
 title = "Remote channel inbox"
 contexts = ["workspace", "pane"]
-command = ["bin/hrc", "herdr", "action", "inbox"]
+command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "action", "inbox"]
 
 [[events]]
 on = "workspace.focused"
-command = ["bin/hrc", "herdr", "event"]
+command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "event"]
 
 [[panes]]
 id = "inbox"
 title = "Remote channel inbox"
 placement = "split"
-command = ["bin/hrc", "herdr", "pane", "inbox"]
+command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "pane", "inbox"]

@@ -32,37 +32,32 @@ gets you both.
 herdr plugin install czinegeroland/herdr-remote-channel
 ```
 
-Herdr clones the repository, shows you the commands it is about to run, and
-on your confirmation runs the manifest's build steps. They are three `cargo`
-invocations and nothing else — the same three on Linux, macOS and Windows:
+Herdr clones the repository, shows you the command it is about to run, and on
+your confirmation installs the published executable from npm into the plugin
+directory. It takes about a second and needs **no Rust toolchain and no
+compiler** — the binary is downloaded, not built. npm serves it under its own
+integrity hash, and every archive was checked against its published SHA-256
+before it was packed.
 
-1. `cargo install --path crates/hrc-cli --root .` puts the binary at
-   `bin/hrc` inside the plugin directory, which is what `herdr-plugin.toml`
-   invokes. Resolving it relative to the plugin root rather than through
-   `PATH` means the plugin works whether or not the install prefix is on the
-   `PATH` Herdr inherited. Cargo appends `.exe` on Windows itself.
-2. `cargo install --path crates/hrc-cli` puts a second copy in Cargo's own
-   bin directory, so `hrc send`, `hrc doctor` and the agent skill's
-   `hrc --help` discovery work in your terminal. Rustup already puts that
-   directory on your `PATH`.
-3. `cargo clean` reclaims the build directory the first two filled — about
-   400 MB, which would otherwise sit in the Herdr plugins folder for as long
-   as the plugin is installed. The cost is that a reinstall rebuilds.
+The version is pinned to the one the manifest declares, so the entry points
+Herdr registered and the binary answering them are always the same release.
 
-This needs a Rust toolchain ([rustup](https://rustup.rs)); the first build
-takes a couple of minutes. There is deliberately no shell script on either
-side: an earlier version had one per platform, and the PowerShell half failed
-on the first real Windows install while the POSIX half worked, because two
-scripts are two implementations of one idea and only one of them had been
-run.
+Node.js is the only prerequisite. This used to be three `cargo` commands, and
+that was a mistake: this project had already published to npm precisely so
+that nobody would need a toolchain, then left the install path most people
+take building from source anyway. On Windows it failed outright with
+``linker `link.exe` not found`` — Visual Studio Build Tools, several
+gigabytes, to read an inbox pane.
 
 Confirm the install:
 
 ```bash
 herdr plugin list
-hrc --version
-hrc doctor
 ```
+
+The plugin registers a startup hook, a `workspace.focused` event hook, and an
+inbox action and pane. The pane is read-only: it shows what is waiting and
+who sent it, never an unapproved body.
 
 ### For local development
 
@@ -73,9 +68,11 @@ cargo install --path crates/hrc-cli --root . --locked --force
 herdr plugin link "$PWD"
 ```
 
-`herdr plugin link` does not run build commands, which is why the install is
-invoked by hand first. Re-run it after any change to the Rust sources. Skip
-the `cargo clean` step here — you want the build cache.
+This is where a source build belongs, and it is the one flow that needs a
+Rust toolchain. `herdr plugin link` does not run build commands, which is why
+the install is invoked by hand first; re-run it after any change to the Rust
+sources. Note that `plugin link` expects the executable at `bin/hrc`, which
+is what `--root .` writes.
 
 ### The CLI on its own, with no toolchain
 
