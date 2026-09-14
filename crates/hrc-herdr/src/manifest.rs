@@ -123,6 +123,24 @@ pub struct Manifest {
     pub panes: Vec<PaneEntry>,
 }
 
+/// The argv for one `cargo install` of the `hrc` binary.
+///
+/// `--locked` so an install builds the dependency versions this repository
+/// tested, and `--force` so reinstalling over an existing copy is an update
+/// rather than an error.
+fn cargo_install(extra: &[&str]) -> Vec<String> {
+    let mut command = vec![
+        "cargo".to_owned(),
+        "install".to_owned(),
+        "--path".to_owned(),
+        "crates/hrc-cli".to_owned(),
+        "--locked".to_owned(),
+        "--force".to_owned(),
+    ];
+    command.extend(extra.iter().map(|argument| (*argument).to_owned()));
+    command
+}
+
 /// The argv for one `hrc herdr ...` entry point.
 fn invoke(arguments: &[&str]) -> Vec<String> {
     let mut command = vec![EXECUTABLE.to_owned(), "herdr".to_owned()];
@@ -140,21 +158,45 @@ pub fn manifest() -> Manifest {
         description: "Secure asynchronous communication between independent Herdr installations."
             .to_owned(),
         platforms: vec!["linux".to_owned(), "macos".to_owned(), "windows".to_owned()],
+        // One flow on every platform, because `cargo` is the same program
+        // everywhere: same arguments, same profile, and it appends `.exe` to
+        // the installed name on Windows by itself.
+        //
+        // This replaced a pair of per-platform shell scripts, and the reason
+        // is worth keeping. The PowerShell half failed on the first real
+        // Windows install: `git describe` writes to standard error in a
+        // checkout with no tags, which is the ordinary case because Herdr
+        // installs from a commit, and Windows PowerShell turns a redirected
+        // native command's stderr into a terminating error. `cargo build`
+        // would have failed next for the same reason. Two scripts meant two
+        // implementations of one idea, only one of which anyone had run.
+        //
+        // Three steps rather than two because `cargo install --path` builds
+        // into the workspace's own `target` directory and leaves it there —
+        // around four hundred megabytes, inside the Herdr plugins folder, for
+        // as long as the plugin is installed. The install is what matters and
+        // the artifacts are not, so the last step reclaims them. Both
+        // binaries have already been copied out by then, and a reinstall
+        // rebuilds, which is the trade being made.
         build: vec![
+            // Into the plugin root, which is where `EXECUTABLE` points.
             Build {
-                command: vec!["sh".to_owned(), "herdr/build.sh".to_owned()],
-                platforms: Some(vec!["linux".to_owned(), "macos".to_owned()]),
+                command: cargo_install(&["--root", "."]),
+                platforms: None,
             },
+            // And onto the PATH, for `hrc doctor` in a terminal and for the
+            // agent skill's `hrc --help` discovery. Cargo's own bin directory
+            // rather than a guess at one: this step only runs where a Rust
+            // toolchain exists, and rustup puts that directory on the PATH,
+            // so it is the one place already known to work.
             Build {
-                command: vec![
-                    "powershell".to_owned(),
-                    "-NoProfile".to_owned(),
-                    "-ExecutionPolicy".to_owned(),
-                    "Bypass".to_owned(),
-                    "-File".to_owned(),
-                    "herdr/build.ps1".to_owned(),
-                ],
-                platforms: Some(vec!["windows".to_owned()]),
+                command: cargo_install(&[]),
+                platforms: None,
+            },
+            // Reclaims the build directory the two installs above filled.
+            Build {
+                command: vec!["cargo".to_owned(), "clean".to_owned()],
+                platforms: None,
             },
         ],
         startup: vec![Startup {

@@ -146,7 +146,15 @@ fn every_platform_is_one_herdr_names() {
         assert!(known.contains(&platform.as_str()), "unknown `{platform}`");
     }
 
-    let covered: Vec<&str> = manifest
+    // A step with no `platforms` runs everywhere, which is the whole point of
+    // the build being `cargo` and nothing else. This assertion used to require
+    // each platform to be named by some step, which was right while there was
+    // one script per platform and is the wrong question now: what matters is
+    // that every platform a person can install on has something that installs
+    // there, however that coverage is expressed.
+    let covers_everything = manifest.build.iter().any(|step| step.platforms.is_none());
+
+    let named: Vec<&str> = manifest
         .build
         .iter()
         .filter_map(|step| step.platforms.as_ref())
@@ -156,7 +164,7 @@ fn every_platform_is_one_herdr_names() {
 
     for platform in &manifest.platforms {
         assert!(
-            covered.contains(&platform.as_str()),
+            covers_everything || named.contains(&platform.as_str()),
             "`{platform}` is declared supported but no build step installs the binary there"
         );
     }

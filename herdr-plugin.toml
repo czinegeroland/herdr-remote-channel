@@ -14,12 +14,13 @@ description = "Secure asynchronous communication between independent Herdr insta
 platforms = ["linux", "macos", "windows"]
 
 [[build]]
-command = ["sh", "herdr/build.sh"]
-platforms = ["linux", "macos"]
+command = ["cargo", "install", "--path", "crates/hrc-cli", "--locked", "--force", "--root", "."]
 
 [[build]]
-command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "herdr/build.ps1"]
-platforms = ["windows"]
+command = ["cargo", "install", "--path", "crates/hrc-cli", "--locked", "--force"]
+
+[[build]]
+command = ["cargo", "clean"]
 
 [[startup]]
 command = ["bin/hrc", "herdr", "startup"]
