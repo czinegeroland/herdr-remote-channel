@@ -38,7 +38,7 @@ pub mod sidebar;
 
 pub use agent::LocalAgent;
 pub use event::{Event, Reaction};
-pub use inbox::{InboxRow, InboxView};
+pub use inbox::{InboxRow, InboxView, agent_view};
 pub use manifest::manifest;
 pub use notify::Notification;
 pub use pane::Pane;
