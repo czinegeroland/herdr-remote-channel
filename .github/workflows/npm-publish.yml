@@ -14,9 +14,18 @@ name: Publish to npm
 # verifies every archive against its published checksum and bundles the
 # executables into the packages, so npm serves the bytes under its own
 # integrity hash and no install ever fetches from GitHub.
+#
+# Triggered by the Release workflow finishing rather than by
+# `release: published`. That event never arrives: `cargo dist` creates the
+# release with `GITHUB_TOKEN`, and GitHub deliberately does not raise
+# workflow-triggering events for anything done with that token, to stop
+# workflows recursing. A `release:` trigger here looks correct and silently
+# never fires, which is how the first release reached GitHub with nothing
+# published to npm.
 on:
-  release:
-    types: [published]
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
   # So a failed publish can be retried without cutting another tag.
   workflow_dispatch:
     inputs:
@@ -36,6 +45,13 @@ jobs:
   publish:
     name: Publish to npm
     runs-on: ubuntu-latest
+    # Only for a Release run that succeeded, and only for a version tag: the
+    # Release workflow can also be dispatched by hand on a branch, and
+    # publishing whatever that produced would be wrong.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
     steps:
       - name: Check out the release
         uses: actions/checkout@v7
@@ -48,7 +64,9 @@ jobs:
       - name: Work out which tag to publish
         id: release
         env:
-          EVENT_TAG: ${{ github.event.release.tag_name }}
+          # `head_branch` on a workflow_run carries the ref the run was for,
+          # which for a tag-triggered Release run is the tag itself.
+          EVENT_TAG: ${{ github.event.workflow_run.head_branch }}
           INPUT_TAG: ${{ inputs.tag }}
         shell: bash
         run: |
@@ -85,8 +103,8 @@ jobs:
         run: |
           set -euo pipefail
           cd npm-dist/herdr-remote-channel
-          mkdir -p node_modules/@herdr-remote-channel
-          cp -r ../linux-x64 node_modules/@herdr-remote-channel/linux-x64
+          mkdir -p node_modules
+          cp -r ../linux-x64 node_modules/herdr-remote-channel-linux-x64
           test "$(node bin.js --version)" = "hrc ${{ steps.release.outputs.version }}"
           echo "the packaged shim runs the packaged binary"
 
@@ -103,7 +121,7 @@ jobs:
           for dir in npm-dist/*/; do
             name="$(basename "$dir")"
             [ "$name" = "herdr-remote-channel" ] && continue
-            echo "publishing @herdr-remote-channel/$name"
+            echo "publishing herdr-remote-channel-$name"
             npm publish --access public "$dir"
           done
 

@@ -22,8 +22,16 @@ import { execFileSync } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync, copyFileSync, rmSync, existsSync } from 'node:fs'
 import { basename, join } from 'node:path'
 
-const SCOPE = '@herdr-remote-channel'
 const ROOT_PACKAGE = 'herdr-remote-channel'
+
+// Platform packages are named `herdr-remote-channel-<platform>` rather than
+// living under an `@herdr-remote-channel` scope.
+//
+// A scope on npm is not a free-form namespace: it resolves to a user or an
+// organization, and publishing under one you do not own fails with a bare
+// `E404 Not Found` on the PUT, which reads like a missing package rather
+// than a permissions problem. The first real publish failed exactly there.
+// An unscoped name needs nothing to exist beforehand.
 
 // The four targets PRD section 13.2 requires, mapped to what npm calls them.
 const TARGETS = [
@@ -117,7 +125,7 @@ for (const platform of TARGETS) {
   copyFileSync(found[0], join(dir, platform.binary))
   rmSync(staging, { recursive: true, force: true })
 
-  const name = `${SCOPE}/${platform.suffix}`
+  const name = `${ROOT_PACKAGE}-${platform.suffix}`
   writeFileSync(
     join(dir, 'package.json'),
     `${JSON.stringify(

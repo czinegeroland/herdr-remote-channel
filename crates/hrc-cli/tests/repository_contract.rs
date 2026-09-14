@@ -279,3 +279,99 @@ fn the_npm_shim_and_its_builder_agree_on_the_platforms() {
         );
     }
 }
+
+/// The JavaScript in this repository with `//` comment lines dropped, so a
+/// check about emitted values cannot be satisfied or broken by prose.
+fn code_only(source: &str) -> String {
+    source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn the_npm_packages_are_named_without_a_scope() {
+    // The first real publish failed here. A scope on npm is not a free-form
+    // namespace: it resolves to a user or an organization, and publishing
+    // under one nobody owns fails with a bare `E404 Not Found` on the PUT,
+    // which reads like a missing package rather than a permissions problem.
+    //
+    // Unscoped names need nothing to exist beforehand. If a scope is wanted
+    // later it has to be one the publishing account actually owns.
+    //
+    // Both files explain this in comments, which mention the bad scope by
+    // name, so the check reads the code with comment lines removed. Asserting
+    // on the whole file would fail on its own documentation.
+    let builder = read("scripts/build-npm-packages.mjs");
+    let shim = read("npm/hrc/bin.js");
+
+    for text in [&builder, &shim] {
+        assert!(
+            !code_only(text).contains("@herdr-remote-channel"),
+            "`@herdr-remote-channel` is a scope nobody owns; publishing under \
+             it fails with E404"
+        );
+    }
+
+    assert!(
+        builder.contains("`${ROOT_PACKAGE}-${platform.suffix}`"),
+        "platform packages should be named from the root package"
+    );
+    assert!(
+        shim.contains("`herdr-remote-channel-${suffix}`"),
+        "the shim should resolve the same unscoped names the builder writes"
+    );
+}
+
+#[test]
+fn the_readme_does_not_send_anyone_to_npx_hrc() {
+    // `hrc` is an existing, unrelated package on npm owned by someone else,
+    // so `npx hrc` downloads and runs their code. The binary is still called
+    // `hrc` once installed; it is only the `npx` shorthand that is unsafe,
+    // and it is exactly what someone would guess.
+    let readme = read("README.md");
+
+    assert!(
+        !readme.contains("npx hrc@") && !readme.contains("npx hrc "),
+        "the README must not tell anyone to run `npx hrc`"
+    );
+    assert!(
+        readme.contains("npx herdr-remote-channel"),
+        "the README should give the full package name"
+    );
+    assert!(
+        readme.contains("runs someone else's code"),
+        "the README should say why the shorthand is unsafe, not just avoid it"
+    );
+}
+
+#[test]
+fn the_npm_publish_workflow_can_actually_be_triggered() {
+    // `on: release: published` looks right and never fires. `cargo dist`
+    // creates the release with `GITHUB_TOKEN`, and GitHub does not raise
+    // workflow-triggering events for anything done with that token — the
+    // recursion guard. The first release reached GitHub with nothing
+    // published to npm because of exactly this.
+    let workflow = read(".github/workflows/npm-publish.yml");
+
+    assert!(
+        !workflow.contains(
+            "release:
+    types:"
+        ),
+        "a `release:` trigger cannot fire for a release created by CI"
+    );
+    assert!(
+        workflow.contains("workflow_run:"),
+        "publishing should chain off the Release workflow completing"
+    );
+    assert!(
+        workflow.contains("workflow_dispatch:"),
+        "a failed publish should be retryable without cutting another tag"
+    );
+    assert!(
+        workflow.contains("conclusion == 'success'"),
+        "a failed Release run must not publish"
+    );
+}

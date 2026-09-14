@@ -40,7 +40,7 @@ if (!suffix) {
   process.exit(1)
 }
 
-const pkg = `@herdr-remote-channel/${suffix}`
+const pkg = `herdr-remote-channel-${suffix}`
 const binary = process.platform === 'win32' ? 'hrc.exe' : 'hrc'
 
 let resolved
