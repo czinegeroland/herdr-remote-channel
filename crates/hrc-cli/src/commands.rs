@@ -3671,6 +3671,9 @@ pub fn herdr_pane(context: &Context, pane: &str) -> Result<Value> {
         // Writing a message, so that saying something needs no other tool.
         hrc_herdr::Pane::Compose => review::compose(context),
 
+        // Getting a channel in the first place.
+        hrc_herdr::Pane::Setup => review::setup(context),
+
         hrc_herdr::Pane::Inbox => {
             let database = Database::open(context.paths.database())?;
             let channel = only_channel(&database)?;

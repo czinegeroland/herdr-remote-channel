@@ -56,7 +56,7 @@ herdr plugin list
 ```
 
 The plugin registers a startup hook, a `workspace.focused` event hook, an
-and four panes, each with an action of the same name:
+and five panes, each with an action of the same name:
 
 - **Remote channel inbox** — a split pane showing what has arrived, who sent
   it, and what is waiting on you. It never shows an unapproved body.
@@ -66,6 +66,8 @@ and four panes, each with an action of the same name:
 - **Remote channel join requests** — admit or refuse someone joining the
   channel, after comparing the safety phrase with them out of band.
 - **Remote channel compose** — write a note or a question and send it.
+- **Remote channel setup** — create a channel, invite someone, or redeem an
+  invite code. The code is masked as you type it and never echoed back.
 
 The review pane needs the daemon running (`hrc daemon`). Revealing a body
 takes a deliberate key, every decision takes a second confirming key, and the

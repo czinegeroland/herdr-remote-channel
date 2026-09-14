@@ -176,6 +176,7 @@ fn invoke(arguments: &[&str]) -> Vec<String> {
 fn pane_title(pane: crate::pane::Pane) -> String {
     match pane {
         crate::pane::Pane::Inbox => "Remote channel inbox".to_owned(),
+        crate::pane::Pane::Setup => "Remote channel setup".to_owned(),
         crate::pane::Pane::Compose => "Remote channel compose".to_owned(),
         crate::pane::Pane::Joins => "Remote channel join requests".to_owned(),
         crate::pane::Pane::Review => "Remote channel review".to_owned(),
@@ -260,7 +261,8 @@ pub fn manifest() -> Manifest {
                     // else. Deciding is meant to be the thing they are doing.
                     // Admitting a member is the same kind of decision as
                     // approving content, and gets the same modal treatment.
-                    crate::pane::Pane::Compose
+                    crate::pane::Pane::Setup
+                    | crate::pane::Pane::Compose
                     | crate::pane::Pane::Joins
                     | crate::pane::Pane::Review => "popup".to_owned(),
                 },
@@ -269,13 +271,15 @@ pub fn manifest() -> Manifest {
                 // schema does not define there.
                 width: match pane {
                     crate::pane::Pane::Inbox => None,
-                    crate::pane::Pane::Compose
+                    crate::pane::Pane::Setup
+                    | crate::pane::Pane::Compose
                     | crate::pane::Pane::Joins
                     | crate::pane::Pane::Review => Some("80%".to_owned()),
                 },
                 height: match pane {
                     crate::pane::Pane::Inbox => None,
-                    crate::pane::Pane::Compose
+                    crate::pane::Pane::Setup
+                    | crate::pane::Pane::Compose
                     | crate::pane::Pane::Joins
                     | crate::pane::Pane::Review => Some("80%".to_owned()),
                 },

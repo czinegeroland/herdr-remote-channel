@@ -23,7 +23,7 @@ use hrc_ipc::endpoint::{Endpoint, Interface};
 use hrc_storage::Database;
 use hrc_tui::{
     App, ComposeApp, ComposeOutcome, JoinApp, JoinOutcome, Outcome, PendingItem, PendingJoin,
-    Recipient,
+    Recipient, SetupApp, SetupOutcome,
 };
 use serde_json::{Value, json};
 
@@ -469,4 +469,58 @@ fn addressable(context: &Context) -> Result<Vec<Recipient>> {
                 .collect()
         })
         .unwrap_or_default())
+}
+
+/// Opens the channel setup screen.
+///
+/// Which steps it offers depends on what this installation already has. A
+/// step that can only fail is not offered: inviting needs a channel, and
+/// creating one is pointless when a channel already exists.
+pub fn setup(context: &Context) -> Result<Value> {
+    if !is_a_terminal() {
+        return Err(CliError::NotInteractive);
+    }
+
+    let mut screen = SetupApp::new(available_steps(context)?);
+    let outcome = hrc_tui::run(&mut screen).map_err(|source| CliError::Io {
+        action: "run the channel setup screen",
+        source,
+    })?;
+
+    // Each arm calls the same function the CLI does, so there is one
+    // implementation of what creating, inviting and joining mean.
+    match outcome {
+        SetupOutcome::CreateChannel { repo } => crate::commands::create(context, &repo, None),
+        SetupOutcome::CreateInvite { github_user } => {
+            crate::commands::invite_create(context, &github_user, DEFAULT_INVITE_LIFETIME)
+        }
+        SetupOutcome::Join { invite_code } => crate::commands::join(context, &invite_code),
+        SetupOutcome::Quit => Ok(json!({
+            "status": "ok",
+            "done": Value::Null,
+        })),
+    }
+}
+
+/// How long an invite issued from the setup screen stays usable.
+///
+/// The CLI makes this an argument. The screen does not ask, because a
+/// lifetime is a question most people cannot answer usefully at the moment
+/// they are trying to invite someone, and a day is long enough to pass a
+/// code along and short enough that a forgotten one lapses.
+const DEFAULT_INVITE_LIFETIME: &str = "24h";
+
+/// The setup steps that make sense for this installation right now.
+fn available_steps(context: &Context) -> Result<Vec<hrc_tui::SetupStep>> {
+    let database = Database::open(context.paths.database())?;
+    let has_channel = !database.channels()?.is_empty();
+
+    Ok(if has_channel {
+        // Joining again would mean a second channel, which the rest of the
+        // CLI does not support yet: `only_channel` refuses when there is
+        // more than one.
+        vec![hrc_tui::SetupStep::CreateInvite]
+    } else {
+        vec![hrc_tui::SetupStep::CreateChannel, hrc_tui::SetupStep::Join]
+    })
 }

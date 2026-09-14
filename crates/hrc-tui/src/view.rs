@@ -277,3 +277,72 @@ pub fn render_compose(frame: &mut Frame<'_>, app: &crate::compose::ComposeApp) {
         areas[2],
     );
 }
+
+/// Draws the channel setup screen.
+///
+/// The typed value comes from `displayed_input`, never from the buffer
+/// directly, so a secret cannot be echoed by a change here.
+pub fn render_setup(frame: &mut Frame<'_>, app: &crate::setup::SetupApp) {
+    use crate::setup::SetupFocus;
+
+    let areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(4),
+            Constraint::Length(5),
+            Constraint::Length(3),
+        ])
+        .split(frame.area());
+
+    let items: Vec<ListItem<'_>> = app
+        .steps()
+        .iter()
+        .enumerate()
+        .map(|(index, step)| {
+            let marker = if index == app.selected_index() {
+                "> "
+            } else {
+                "  "
+            };
+
+            ListItem::new(Line::from(vec![Span::raw(marker), Span::raw(step.title())]))
+        })
+        .collect();
+
+    let menu_title = match app.focus() {
+        SetupFocus::Menu => "Set up this channel (choosing)",
+        SetupFocus::Input => "Set up this channel",
+    };
+
+    frame.render_widget(
+        List::new(items).block(Block::default().borders(Borders::ALL).title(menu_title)),
+        areas[0],
+    );
+
+    let detail = match app.focus() {
+        SetupFocus::Input => vec![
+            Line::from(app.prompt()),
+            Line::from(""),
+            Line::from(Span::styled(
+                app.displayed_input(),
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+        ],
+        SetupFocus::Menu => vec![Line::from("Choose a step and press Enter.")],
+    };
+
+    frame.render_widget(
+        Paragraph::new(detail)
+            .block(Block::default().borders(Borders::ALL))
+            .wrap(Wrap { trim: false }),
+        areas[1],
+    );
+
+    let status = app.proposed().unwrap_or_else(|| app.status()).to_owned();
+    frame.render_widget(
+        Paragraph::new(status)
+            .block(Block::default().borders(Borders::ALL))
+            .wrap(Wrap { trim: false }),
+        areas[2],
+    );
+}

@@ -13,6 +13,9 @@ use serde::Serialize;
 pub enum Pane {
     /// The inbox, listing what has arrived and what awaits a decision.
     Inbox,
+    /// The channel setup screen: create a channel, invite someone, or
+    /// redeem an invite.
+    Setup,
     /// The composition screen, for writing a note or a question without
     /// leaving Herdr.
     Compose,
@@ -33,12 +36,19 @@ pub enum Pane {
 
 impl Pane {
     /// Every pane, in the order the manifest declares them.
-    pub const ALL: [Pane; 4] = [Pane::Inbox, Pane::Compose, Pane::Joins, Pane::Review];
+    pub const ALL: [Pane; 5] = [
+        Pane::Inbox,
+        Pane::Setup,
+        Pane::Compose,
+        Pane::Joins,
+        Pane::Review,
+    ];
 
     /// The name used on the command line and in the manifest.
     pub const fn as_str(self) -> &'static str {
         match self {
             Pane::Inbox => "inbox",
+            Pane::Setup => "setup",
             Pane::Compose => "compose",
             Pane::Joins => "joins",
             Pane::Review => "review",
