@@ -79,10 +79,19 @@ the `cargo clean` step here — you want the build cache.
 
 ### The CLI on its own, with no toolchain
 
-Once a release is tagged, the CLI is on npm and needs no Rust:
+The CLI is on npm and needs no Rust:
 
 ```bash
 npx herdr-remote-channel@latest --version
+```
+
+**Use the full package name.** `npx hrc` installs an unrelated package that
+already owns that name on npm and runs someone else's code. The executable is
+called `hrc` once installed — it is only the `npx` shorthand that is unsafe:
+
+```bash
+npm install -g herdr-remote-channel
+hrc --version
 ```
 
 The binary is not downloaded when you install. Each platform's executable is
