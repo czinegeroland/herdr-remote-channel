@@ -3597,13 +3597,15 @@ pub fn herdr_startup(context: &Context) -> Result<Value> {
 pub fn herdr_action(context: &Context, action: &str) -> Result<Value> {
     // Actions and panes are named separately in the manifest but the inbox
     // action and the inbox pane show the same thing, so they share a body.
-    match action {
-        "inbox" => herdr_pane(context, "inbox"),
-        "review" => herdr_pane(context, "review"),
-        "joins" => herdr_pane(context, "joins"),
-        other => Err(CliError::UnknownHerdrTarget {
+    // Every action opens the pane of the same name. They are declared
+    // separately in the manifest because the host offers them differently —
+    // a pane is placed, an action is invoked — but they show the same screen,
+    // so resolving through the pane parser keeps one list of what exists.
+    match hrc_herdr::Pane::parse(action) {
+        Some(pane) => herdr_pane(context, pane.as_str()),
+        None => Err(CliError::UnknownHerdrTarget {
             kind: "action",
-            name: other.to_owned(),
+            name: action.to_owned(),
         }),
     }
 }
@@ -3665,6 +3667,9 @@ pub fn herdr_pane(context: &Context, pane: &str) -> Result<Value> {
 
         // Membership approval, the other decision a human owns.
         hrc_herdr::Pane::Joins => review::review_joins(context),
+
+        // Writing a message, so that saying something needs no other tool.
+        hrc_herdr::Pane::Compose => review::compose(context),
 
         hrc_herdr::Pane::Inbox => {
             let database = Database::open(context.paths.database())?;

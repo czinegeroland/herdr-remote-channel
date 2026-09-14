@@ -195,3 +195,85 @@ pub fn render_joins(frame: &mut Frame<'_>, app: &crate::join::JoinApp) {
         areas[2],
     );
 }
+
+/// Draws the composition screen.
+///
+/// The focused half is named in its own border title rather than only
+/// highlighted, for the same reason the selection marker exists: a reader
+/// who cannot distinguish the highlight still has to know where their typing
+/// is going.
+pub fn render_compose(frame: &mut Frame<'_>, app: &crate::compose::ComposeApp) {
+    use crate::compose::ComposeFocus;
+
+    let areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(7),
+            Constraint::Min(4),
+            Constraint::Length(3),
+        ])
+        .split(frame.area());
+
+    let items: Vec<ListItem<'_>> = app
+        .recipients()
+        .iter()
+        .enumerate()
+        .map(|(index, recipient)| {
+            let marker = if index == app.selected_index() {
+                "> "
+            } else {
+                "  "
+            };
+
+            // Inactive members are spelled out rather than greyed, so the
+            // state survives a terminal without colour.
+            let state = if recipient.active { "" } else { "  [inactive]" };
+
+            ListItem::new(Line::from(vec![
+                Span::raw(marker),
+                Span::raw(recipient.principal_id.clone()),
+                Span::raw(state),
+            ]))
+        })
+        .collect();
+
+    let recipients_title = match app.focus() {
+        ComposeFocus::Recipient => "To (choosing)",
+        ComposeFocus::Body => "To",
+    };
+
+    frame.render_widget(
+        List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(recipients_title),
+        ),
+        areas[0],
+    );
+
+    let body_title = match app.focus() {
+        ComposeFocus::Body => format!("{} (writing)", app.kind().as_str()),
+        ComposeFocus::Recipient => app.kind().as_str().to_owned(),
+    };
+
+    let body = if app.body().is_empty() {
+        "Tab here and type.".to_owned()
+    } else {
+        app.body().to_owned()
+    };
+
+    frame.render_widget(
+        Paragraph::new(body)
+            .block(Block::default().borders(Borders::ALL).title(body_title))
+            .wrap(Wrap { trim: false }),
+        areas[1],
+    );
+
+    let status = app.proposed().unwrap_or_else(|| app.status()).to_owned();
+    frame.render_widget(
+        Paragraph::new(status)
+            .block(Block::default().borders(Borders::ALL))
+            .wrap(Wrap { trim: false }),
+        areas[2],
+    );
+}

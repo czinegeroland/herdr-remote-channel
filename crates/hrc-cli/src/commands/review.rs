@@ -21,7 +21,10 @@ use hrc_core::rpc::{TrustedRequest, WireDecision};
 use hrc_ipc::Client;
 use hrc_ipc::endpoint::{Endpoint, Interface};
 use hrc_storage::Database;
-use hrc_tui::{App, JoinApp, JoinOutcome, Outcome, PendingItem, PendingJoin};
+use hrc_tui::{
+    App, ComposeApp, ComposeOutcome, JoinApp, JoinOutcome, Outcome, PendingItem, PendingJoin,
+    Recipient,
+};
 use serde_json::{Value, json};
 
 use crate::commands::Context;
@@ -387,4 +390,83 @@ fn channel_label(context: &Context) -> Result<String> {
     let database = Database::open(context.paths.database())?;
     let channel = crate::commands::only_channel(&database)?;
     Ok(channel.local_name)
+}
+
+/// Opens the composition screen.
+///
+/// Sending is not a trusted-human operation, so this needs no authorization;
+/// it needs a terminal because it is a terminal interface. The refusal is the
+/// same one the approval screens give, which is a little strong for what this
+/// does, but a caller that wanted to send without a terminal already has
+/// `hrc send` and the agent-safe `draft` method.
+pub fn compose(context: &Context) -> Result<Value> {
+    if !is_a_terminal() {
+        return Err(CliError::NotInteractive);
+    }
+
+    let recipients = addressable(context)?;
+    if recipients.is_empty() {
+        return Ok(json!({
+            "status": "ok",
+            "recipients": 0,
+            "sent": Value::Null,
+        }));
+    }
+
+    let mut screen = ComposeApp::new(recipients);
+    let outcome = hrc_tui::run(&mut screen).map_err(|source| CliError::Io {
+        action: "run the composition screen",
+        source,
+    })?;
+
+    let ComposeOutcome::Send {
+        recipient,
+        kind,
+        text,
+    } = outcome
+    else {
+        return Ok(json!({
+            "status": "ok",
+            "sent": Value::Null,
+        }));
+    };
+
+    // The same functions the CLI uses, rather than a second publication
+    // path. A screen that composed its own envelopes would be a second place
+    // where the chain, the roster epoch and the expiry rules live.
+    match kind {
+        hrc_tui::ComposeKind::Note => crate::commands::send(context, &recipient, &text, None),
+        hrc_tui::ComposeKind::Question => crate::commands::ask(context, &recipient, &text, None),
+    }
+}
+
+/// Everyone in the roster this installation can write to.
+///
+/// The local principal is filtered out. It is in the roster, and leaving it
+/// in would make "send to myself" the preselected first entry on a screen
+/// where the first entry is preselected.
+fn addressable(context: &Context) -> Result<Vec<Recipient>> {
+    let listed = crate::commands::members(context)?;
+    let local = crate::commands::whoami(context)?;
+    let local_principal = local["signingKey"].as_str().unwrap_or_default();
+
+    Ok(listed["members"]
+        .as_array()
+        .map(|members| {
+            members
+                .iter()
+                .filter_map(|member| {
+                    let principal_id = member["principalId"].as_str()?;
+                    if principal_id == local_principal {
+                        return None;
+                    }
+
+                    Some(Recipient {
+                        principal_id: principal_id.to_owned(),
+                        active: member["active"].as_bool().unwrap_or(false),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default())
 }

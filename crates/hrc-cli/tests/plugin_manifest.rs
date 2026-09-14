@@ -368,3 +368,64 @@ fn the_approval_screen_is_a_modal_pane_of_its_own() {
         "a split pane has no popup size: {inbox}"
     );
 }
+
+#[test]
+fn every_pane_can_actually_be_asked_for() {
+    // A pane is placed by the host; an action is what a person reaches for.
+    // A pane with no action is a screen that exists and cannot be opened,
+    // which is exactly how this plugin shipped an approval interface nobody
+    // could reach: `hrc-tui` was written, tested, and depended on by nothing.
+    let manifest = hrc()
+        .args(["herdr", "manifest", "--json"])
+        .output()
+        .expect("the manifest command should run");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&manifest.stdout).expect("stdout should be JSON");
+
+    let actions: Vec<&str> = manifest["manifest"]["actions"]
+        .as_array()
+        .expect("an array of actions")
+        .iter()
+        .map(|action| action["id"].as_str().expect("an action id"))
+        .collect();
+
+    for pane in manifest["manifest"]["panes"]
+        .as_array()
+        .expect("an array of panes")
+    {
+        let id = pane["id"].as_str().expect("a pane id");
+        assert!(
+            actions.contains(&id),
+            "the `{id}` pane has no action, so nothing can open it: {actions:?}"
+        );
+    }
+}
+
+#[test]
+fn a_pane_and_its_action_agree_on_the_name() {
+    // Two names for one screen is a way to make a person think there are two.
+    let manifest = hrc()
+        .args(["herdr", "manifest", "--json"])
+        .output()
+        .expect("the manifest command should run");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&manifest.stdout).expect("stdout should be JSON");
+
+    for pane in manifest["manifest"]["panes"]
+        .as_array()
+        .expect("an array of panes")
+    {
+        let id = pane["id"].as_str().expect("a pane id");
+        let action = manifest["manifest"]["actions"]
+            .as_array()
+            .expect("an array of actions")
+            .iter()
+            .find(|action| action["id"] == id)
+            .unwrap_or_else(|| panic!("`{id}` should have an action"));
+
+        assert_eq!(
+            pane["title"], action["title"],
+            "the `{id}` pane and its action should be one screen"
+        );
+    }
+}
