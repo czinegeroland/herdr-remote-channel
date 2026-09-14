@@ -2827,6 +2827,23 @@ impl Broker for DaemonBroker {
         Ok(())
     }
 
+    fn publication_channel_name(&self) -> hrc_core::Result<String> {
+        let database = Database::open(self.context.paths.database())
+            .map_err(|error| hrc_core::CoreError::Transport(error.to_string()))?;
+        let channel = only_channel(&database)
+            .map_err(|error| hrc_core::CoreError::Transport(error.to_string()))?;
+
+        Ok(channel.local_name)
+    }
+
+    fn make_repository_public(
+        &mut self,
+        confirmed: &hrc_core::visibility::ConfirmedPublication,
+    ) -> hrc_core::Result<()> {
+        make_repository_public(&self.context, confirmed)
+            .map_err(|error| hrc_core::CoreError::Transport(error.to_string()))
+    }
+
     fn apply_trusted(&mut self, request: &TrustedRequest) -> hrc_core::Result<()> {
         let operation = match request {
             TrustedRequest::RemoveMember { principal_id } => ControlOperation::RemoveMember {
@@ -3378,6 +3395,78 @@ fn herdr_sidebar(context: &Context) -> Result<hrc_herdr::Sidebar> {
     // rather than inventing a duration. Wiring a real age is the work
     // `HRC-SYNC-003` evidence will have to cite when it lands.
     Ok(hrc_herdr::Sidebar::from_status(&statuses, unread, None))
+}
+
+/// Makes the channel's repository publicly readable (PRD requirement
+/// HRC-CH-004).
+///
+/// Only reachable with a [`ConfirmedPublication`], which cannot be built
+/// without the full section 16.4 disclosure and the typed phrase. The audit
+/// record is written *before* the change, because a publication that
+/// happened and was not recorded is worse than one recorded and then
+/// refused: the second is visible.
+///
+/// The change itself goes through `gh`, for the same reason everything else
+/// does — the user's authentication stays authoritative. When `gh` cannot do
+/// it, this says so and tells the human where to do it themselves rather
+/// than reporting a success that did not happen.
+fn make_repository_public(
+    context: &Context,
+    confirmed: &hrc_core::visibility::ConfirmedPublication,
+) -> Result<()> {
+    let database = Database::open(context.paths.database())?;
+    let channel = only_channel(&database)?;
+    let now = database.utc_now()?;
+
+    database.append_audit(
+        Some(&channel.channel_id),
+        None,
+        "repository_made_public",
+        None,
+        Some(&confirmed.audit_detail()),
+        &now,
+    )?;
+
+    let Some(remote) = hrc_transport_git::github::GitHubRemote::parse(&channel.transport_locator)
+    else {
+        return Err(CliError::PublicationUnavailable {
+            reason: format!(
+                "{} is not a GitHub repository, so HRC cannot change its visibility. \
+                 Change it with your provider; the confirmation is recorded.",
+                channel.transport_locator
+            ),
+        });
+    };
+
+    let output = ProcessCommand::new("gh")
+        .args([
+            "repo",
+            "edit",
+            &remote.slug(),
+            "--visibility",
+            "public",
+            "--accept-visibility-change-consequences",
+        ])
+        .output()
+        .map_err(|error| CliError::PublicationUnavailable {
+            reason: format!(
+                "could not run gh ({error}). Make {} public in the GitHub interface; \
+                 the confirmation is recorded.",
+                remote.slug()
+            ),
+        })?;
+
+    if !output.status.success() {
+        return Err(CliError::PublicationUnavailable {
+            reason: format!(
+                "gh refused to change the visibility of {}: {}",
+                remote.slug(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

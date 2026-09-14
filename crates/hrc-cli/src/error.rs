@@ -77,6 +77,14 @@ pub enum CliError {
     #[error("no channel is configured; run `hrc create` or `hrc join` first")]
     NoChannel,
 
+    /// The confirmation was recorded but the visibility change could not be
+    /// made from here.
+    #[error("{reason}")]
+    PublicationUnavailable {
+        /// What went wrong and what the human should do instead.
+        reason: String,
+    },
+
     /// A Herdr manifest named an action or pane this build does not have.
     #[error("`{name}` is not a Herdr {kind} this build provides")]
     UnknownHerdrTarget {
@@ -172,6 +180,7 @@ impl CliError {
             CliError::Entropy => "entropy_unavailable",
             CliError::NoChannel => "no_channel",
             CliError::AmbiguousChannel => "ambiguous_channel",
+            CliError::PublicationUnavailable { .. } => "publication_unavailable",
             CliError::UnknownHerdrTarget { .. } => "unknown_herdr_target",
             CliError::MalformedEvent { .. } => "malformed_event",
             CliError::ChannelNotPublished { .. } => "channel_not_published",
@@ -215,7 +224,8 @@ impl CliError {
             | CliError::Entropy
             | CliError::ChannelNotPublished { .. }
             | CliError::LocalDeviceNotInChannel
-            | CliError::InviteChannelMismatch { .. } => exit::FAILURE,
+            | CliError::InviteChannelMismatch { .. }
+            | CliError::PublicationUnavailable { .. } => exit::FAILURE,
         }
     }
 }

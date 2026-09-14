@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-14T02:40:00+02:00 |
+| Last updated | 2026-09-14T03:10:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -503,7 +503,7 @@ The Herdr plugin must expose:
 | HRC-CH-001 | Create a channel backed by a Git repository. | Must | Implemented | `crates/hrc-cli/src/commands.rs` `create` builds and signs genesis, publishes it as the root commit through `crates/hrc-transport-git`, and registers the channel locally; proven end to end against a real bare repository in `crates/hrc-cli/tests/command_contract.rs` |
 | HRC-CH-002 | Use a signed genesis object as the channel identity authority. | Must | Implemented | `crates/hrc-protocol/src/control.rs` derives the channel ID from the genesis payload, and `crates/hrc-cli/src/commands.rs` verifies its own genesis through `Roster::from_genesis` before publishing it |
 | HRC-CH-003 | Support private repositories by default. | Must | Implemented | `crates/hrc-cli/src/cli.rs` defaults `--visibility` to private, and `crates/hrc-cli/tests/command_contract.rs` proves private creation reaches ordinary work rather than the section 22.7 boundary |
-| HRC-CH-004 | Support public repositories after explicit risk confirmation. | Should | Approved | Pending |
+| HRC-CH-004 | Support public repositories after explicit risk confirmation. | Should | Implemented | `crates/hrc-core/src/visibility.rs` makes the section 16.4 disclosure a closed list of seven that a caller renders in full or not at all, and requires a typed phrase naming the specific channel, so confirming one teaches no keystrokes that confirm another. `ConfirmedPublication` has one constructor and private fields, so holding one means both gates were cleared. `crates/hrc-core/src/rpc.rs` enforces this in `dispatch_trusted` rather than in an interface, so a second interface cannot ship a weaker gate, and the operation stays unreachable from the agent-safe surface. `crates/hrc-cli/src/commands.rs` writes the audit record before making the change and reports where to do it by hand rather than claiming a success that did not happen. Tests prove `y`, `yes`, an empty line, a different channel's phrase, and a six-of-seven disclosure all publish nothing |
 | HRC-CH-005 | Create expiring, single-use invites. | Must | Implemented | `crates/hrc-crypto/src/enrollment.rs` generates, encodes, and validates expiring invites; `crates/hrc-core/src/roster.rs` tracks invite state from the control log so a second admission under one invite is rejected by every participant; `hrc invite create` publishes the authorizing control entry and returns the code once |
 | HRC-CH-006 | Generate separate principal and device identities. | Must | Implemented | `crates/hrc-crypto/src/store.rs` `PrincipalSecrets` is a distinct type with no encryption identity, and `hrc init` generates and stores both keys or neither |
 | HRC-CH-007 | Require explicit administrator approval for joins. | Must | Implemented | `crates/hrc-core/src/enrollment.rs`: `review_join` validates but admits nobody, and `admit` — the approval itself — refuses a signer who is not an active administrator; `hrc join pending` lists only requests that already validate, `hrc join approve` stays on the section 22.7 boundary, and admission is performed only by the daemon's trusted interface, proven by a test where the identical request succeeds on the trusted socket and is refused on the agent-safe one |
@@ -2551,7 +2551,7 @@ Every implementation PR must update this table.
 | Milestone | Completion | Current state | Last PR | Evidence / next step |
 |---|---:|---|---|---|
 | M0 Product and protocol | 85% | The section 21 adapter protocol now has its out-of-process JSON-RPC binding and its push half: `wait` crosses the boundary, and the conformance suite refuses an adapter whose push declaration disagrees with its behavior | Push-capable adapters | Obtain product-owner specification review, which is not an agent's to record |
-| M1 Secure foundation | 100% | Unchanged in substance; its continuous-integration evidence now reads Linux per change with Windows and macOS on demand, per decision DEC-049 | Continuous-integration cost | Run `cross-platform.yml` before a release and after any change touching paths, filesystem behavior, process handling, time, or line endings |
+| M1 Secure foundation | 100% | Adds the public-repository gate: the full section 16.4 disclosure and a typed phrase naming the channel, enforced in the trusted dispatcher rather than in any one interface | Public-repository confirmation | Replace the provisional OQ-008 wording with product-owner text |
 | M2 Git messaging | 100% | The GitHub optimization closes `AC-GIT-ADAPTER`: conditional head polling with ETags where it is available, and a byte-identical fallback to plain Git everywhere else | GitHub change-detection optimization | Add receipts over a published channel and end-to-end restart coverage |
 | M3 Herdr integration | 97% | Adds the release pipeline and both installers, with a clean-host fixture that installs and smoke-tests through the real installer with every language runtime removed from `PATH` | Release artifacts and install fixture | Cut a first tag so the published artifacts are proven, and add daemon mode to the clean-host smoke test |
 | M4 Context/delegation | 85% | Context drafts now snapshot checked source under a canonical absolute root; preview/send require trusted one-use authorization and inbound context shares the message quarantine lifecycle | Trusted context authorization and source integrity | Add delegation message exchange and its CLI surface |
@@ -2702,7 +2702,7 @@ OQ-001 was closed by decision DEC-031 and the passphrase key store.
 | OQ-005 | Which GitHub ruleset features are available on supported account plans? | TBD | M1 |
 | OQ-006 | What secret-scanning implementation is suitable for the first context release? | TBD | M4 |
 | OQ-007 | Should read receipts be enabled by default? | TBD | M2 |
-| OQ-008 | What public-repository warning and confirmation text is required? | TBD | M1 |
+| OQ-008 | What public-repository warning and confirmation text is required? | Mechanism implemented; wording still TBD and marked as provisional in `crates/hrc-core/src/visibility.rs`. A product owner replaces the seven strings and the phrase template; the tests assert structure rather than prose, so rewording breaks nothing | M1 |
 | OQ-009 | Should sent messages be encrypted to all of the sender's devices by default? | TBD | M1 |
 | OQ-010 | What is the first secondary transport used for adapter conformance? | TBD | M5 |
 | OQ-011 | Which harness runs the section 28.4 governance tests, given that the traceability validator is PowerShell and the rest of the suite is Rust? | TBD | M1 |
