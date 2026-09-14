@@ -212,13 +212,20 @@ host with no toolchain.
 
 ### Two operational things the next session must know
 
-**GitHub Actions is billable again as of pull request #51**, and the first
-real run immediately earned its keep: it caught a shutdown gap that had
-passed locally every time. Prefer CI over a local run where both are
-available. What follows is the local equivalent, still correct and still
-what to use when Actions is unavailable.
+**Actions is free now: the repository is public**, and standard
+GitHub-hosted runners carry no per-minute charge on public repositories.
+Prefer CI over a local run wherever both are available — it covers three
+platforms and a local run covers one. What follows is the local equivalent,
+still correct and still what to use when CI is unavailable.
 
-**Actions spending was exhausted from #42 to #50.** From pull request #42 onward every
+Two CI outages happened during this work and both were misread at first, so:
+a run that fails in seconds with `startup_failure` on *every* workflow is an
+Actions **permissions** problem (Settings, Actions, General), not billing.
+The way to tell them apart is a workflow with no `uses:` at all — if that one
+runs, the runners and the billing are fine and an action is being refused.
+
+**Actions spending was exhausted from #42 to #50,** while the repository was
+still private. From pull request #42 onward every
 job failed in seconds with no runner assigned — that signature is billing,
 not code. The user's instruction was to run the checks locally and merge on
 a clean pass, which is what the last several pull requests did. Since #38
@@ -241,10 +248,17 @@ missing ledger update, a requirement ID claimed without a row change, and
 example IDs mentioned in prose — each of which would otherwise have cost a
 CI cycle.
 
-**Windows and macOS have been unverified since #39.** Run
-`.github/workflows/cross-platform.yml` before cutting a release and after any
-change touching paths, filesystem behavior, process handling, time, or line
-endings. Windows has caught two real defects in this project.
+**Windows and macOS run on every pull request again** (decision DEC-056).
+They were Linux-only from #38 to #56 because the repository was private and
+billed; going public made standard runners free and the matrix came back,
+and `cross-platform.yml` is deleted rather than left to drift beside it.
+
+That gap cost something concrete, which is worth remembering rather than
+filing away: `herdr/build.ps1` shipped broken because Windows PowerShell
+turns a redirected native command's stderr into a terminating error. No pull
+request ran Windows, and PowerShell 7 relaxed that behaviour so it could not
+be reproduced locally either. Windows has now caught three real defects
+here.
 
 ### Four things a human has to decide
 
