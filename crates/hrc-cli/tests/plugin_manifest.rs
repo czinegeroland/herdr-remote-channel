@@ -100,9 +100,10 @@ fn every_command_the_manifest_names_is_a_subcommand_this_binary_accepts() {
     });
 
     for command in commands {
-        // The first element is the plugin-relative path to this same binary,
-        // which the test harness knows by another name.
-        let arguments = &command[1..];
+        // `node` and the plugin-relative launcher path come first; the rest
+        // is the `hrc herdr ...` invocation, which the test harness reaches
+        // through the binary directly.
+        let arguments = &command[2..];
 
         let output = hrc()
             .args(arguments)
@@ -119,23 +120,8 @@ fn every_command_the_manifest_names_is_a_subcommand_this_binary_accepts() {
     }
 }
 
-#[test]
-fn the_build_steps_are_the_same_on_every_platform() {
-    // The property that replaced a pair of per-platform shell scripts, and
-    // the reason it is asserted rather than assumed.
-    //
-    // The PowerShell half failed on the first real Windows install. `git
-    // describe` writes to standard error in a checkout with no tags — the
-    // ordinary case, because Herdr installs from a commit — and Windows
-    // PowerShell turns a redirected native command's stderr into a
-    // terminating error. `cargo build` would have failed next for the same
-    // reason. Neither could be reproduced on the PowerShell available to
-    // test with, because version 7 relaxed that behavior.
-    //
-    // Two scripts were two implementations of one idea, only one of which
-    // anyone had ever run. `cargo` is the same program on all three
-    // platforms, so a build step that is only `cargo` has nothing left to
-    // diverge.
+/// The build steps as argv arrays, read out of the generated manifest.
+fn build_steps() -> Vec<(Option<Vec<String>>, Vec<String>)> {
     let manifest = hrc()
         .args(["herdr", "manifest", "--json"])
         .output()
@@ -143,69 +129,89 @@ fn the_build_steps_are_the_same_on_every_platform() {
     let manifest: serde_json::Value =
         serde_json::from_slice(&manifest.stdout).expect("stdout should be JSON");
 
-    let steps = manifest["manifest"]["build"]
+    manifest["manifest"]["build"]
         .as_array()
-        .expect("an array of build steps");
+        .expect("an array of build steps")
+        .iter()
+        .map(|step| {
+            let platforms = step.get("platforms").and_then(|platforms| {
+                platforms.as_array().map(|platforms| {
+                    platforms
+                        .iter()
+                        .map(|platform| platform.as_str().expect("a platform").to_owned())
+                        .collect()
+                })
+            });
+            let command = step["command"]
+                .as_array()
+                .expect("an argv array")
+                .iter()
+                .map(|argument| argument.as_str().expect("an argv string").to_owned())
+                .collect();
+            (platforms, command)
+        })
+        .collect()
+}
+
+#[test]
+fn installing_the_plugin_compiles_nothing() {
+    // The property that matters, and the reason it is asserted rather than
+    // assumed. The build steps used to be `cargo`, and that contradicted the
+    // whole point of publishing the executable to npm: the install path most
+    // people take still needed a toolchain. It failed on the first real
+    // Windows install with `linker `link.exe` not found` — Visual Studio
+    // Build Tools, several gigabytes, to read an inbox pane.
+    //
+    // Making that build portable, which is what the previous version of this
+    // test asserted, was solving the wrong problem.
+    let steps = build_steps();
     assert!(
         !steps.is_empty(),
         "the plugin needs a build step to install"
     );
 
-    for step in steps {
-        assert!(
-            step.get("platforms").is_none_or(serde_json::Value::is_null),
-            "a build step restricted to some platforms is a second flow: {step}"
-        );
-
-        let command: Vec<&str> = step["command"]
-            .as_array()
-            .expect("an argv array")
-            .iter()
-            .map(|argument| argument.as_str().expect("an argv string"))
-            .collect();
-
-        assert_eq!(
-            command.first(),
-            Some(&"cargo"),
-            "a build step that runs an interpreter is a per-platform script \
-             by another name: {command:?}"
-        );
-
-        // `--locked` is what makes an install build the dependency versions
-        // this repository actually tested. Only the installing steps take it;
-        // the cleanup step is not an install.
-        if command.contains(&"install") {
+    for (_, command) in &steps {
+        for compiler in ["cargo", "rustc", "rustup", "cc", "gcc", "clang", "make"] {
             assert!(
-                command.contains(&"--locked"),
-                "a build step should install from the committed lockfile: {command:?}"
+                !command.iter().any(|argument| argument == compiler),
+                "a build step that compiles needs a toolchain: {command:?}"
             );
         }
-    }
 
-    // `cargo install --path` builds into the workspace's own `target`
-    // directory and leaves roughly four hundred megabytes there, inside the
-    // Herdr plugins folder, for as long as the plugin is installed. Measured,
-    // not assumed: 407.8 MiB on the run that produced this test.
-    let cleans = steps.iter().any(|step| {
-        step["command"]
-            .as_array()
-            .expect("an argv array")
-            .iter()
-            .any(|argument| argument == "clean")
-    });
-    assert!(
-        cleans,
-        "the build should reclaim its own artifacts: {steps:?}"
-    );
+        assert!(
+            command.iter().any(|argument| argument == "npm"),
+            "a build step should install the published executable: {command:?}"
+        );
+    }
 }
 
 #[test]
-fn one_build_step_installs_where_the_manifest_looks_and_one_onto_the_path() {
-    // The two copies are the install contract. The manifest invokes
-    // `bin/hrc` and cannot depend on PATH; a person's terminal and the agent
-    // skill's `hrc --help` discovery need `hrc` on PATH. A build that
-    // produced only one of them would half-work in a way nobody notices
-    // until they try the other.
+fn the_build_installs_exactly_the_version_the_manifest_declares() {
+    // A floating `latest` would let Herdr read one version's manifest and
+    // install another version's executable, so the entry points it
+    // registered and the binary answering them could disagree.
+    let manifest = hrc()
+        .args(["herdr", "manifest", "--json"])
+        .output()
+        .expect("the manifest command should run");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&manifest.stdout).expect("stdout should be JSON");
+    let version = manifest["manifest"]["version"].as_str().expect("a version");
+    let pinned = format!("herdr-remote-channel@{version}");
+
+    for (_, command) in build_steps() {
+        assert!(
+            command.contains(&pinned),
+            "a build step should pin `{pinned}`: {command:?}"
+        );
+    }
+}
+
+#[test]
+fn every_platform_the_plugin_claims_can_install_it() {
+    // A platform the manifest lists with no step that applies to it installs
+    // nothing and then fails at the first entry point, which is a worse
+    // failure than refusing to install at all.
     let manifest = hrc()
         .args(["herdr", "manifest", "--json"])
         .output()
@@ -213,38 +219,100 @@ fn one_build_step_installs_where_the_manifest_looks_and_one_onto_the_path() {
     let manifest: serde_json::Value =
         serde_json::from_slice(&manifest.stdout).expect("stdout should be JSON");
 
-    let commands: Vec<Vec<String>> = manifest["manifest"]["build"]
+    let steps = build_steps();
+
+    for platform in manifest["manifest"]["platforms"]
         .as_array()
-        .expect("an array of build steps")
+        .expect("an array of platforms")
+    {
+        let platform = platform.as_str().expect("a platform");
+        let applicable = steps
+            .iter()
+            .filter(|(platforms, _)| match platforms {
+                Some(platforms) => platforms.iter().any(|entry| entry == platform),
+                None => true,
+            })
+            .count();
+
+        assert_eq!(
+            applicable, 1,
+            "`{platform}` should have exactly one step that installs the executable"
+        );
+    }
+}
+
+#[test]
+fn the_platform_variants_differ_only_by_the_windows_process_wrapper() {
+    // The steps are split by platform, which is the shape that a pair of
+    // per-platform shell scripts also had — and that went badly once, so it
+    // is worth pinning down why this is not the same mistake.
+    //
+    // Two scripts were two implementations of one idea, and only one of them
+    // had ever been run. Here there is one command, and Windows prefixes it
+    // with `cmd /c` because `npm` is `npm.cmd` there and a bare
+    // `CreateProcess` does not find a `.cmd`. Strip the wrapper and the
+    // steps must be identical, which is what makes this one implementation.
+    let steps = build_steps();
+
+    let stripped: Vec<Vec<String>> = steps
         .iter()
-        .map(|step| {
-            step["command"]
-                .as_array()
-                .expect("an argv array")
-                .iter()
-                .map(|argument| argument.as_str().expect("an argv string").to_owned())
-                .collect()
+        .map(|(_, command)| match command.first().map(String::as_str) {
+            Some("cmd") => command[2..].to_vec(),
+            _ => command.clone(),
         })
         .collect();
 
-    // `cargo install --root .` writes to `./bin/`, which is exactly where
-    // `EXECUTABLE` points, and appends `.exe` there itself on Windows.
-    let into_plugin = commands
-        .iter()
-        .filter(|command| command.windows(2).any(|pair| pair == ["--root", "."]))
-        .count();
-    assert_eq!(
-        into_plugin, 1,
-        "exactly one step should install into the plugin root: {commands:?}"
-    );
+    for command in &stripped {
+        assert_eq!(
+            command, &stripped[0],
+            "the platform variants should be one command, not two: {stripped:?}"
+        );
+    }
+}
 
-    let onto_path = commands
-        .iter()
-        .filter(|command| command.iter().any(|argument| argument == "install"))
-        .filter(|command| !command.iter().any(|argument| argument == "--root"))
-        .count();
-    assert_eq!(
-        onto_path, 1,
-        "exactly one step should install onto the PATH: {commands:?}"
-    );
+#[test]
+fn the_entry_points_run_what_the_build_step_installed() {
+    // The build writes `node_modules`; the entry points launch out of it. If
+    // these two ever named different paths the plugin would install
+    // successfully and then fail at its first pane.
+    let manifest = hrc()
+        .args(["herdr", "manifest", "--json"])
+        .output()
+        .expect("the manifest command should run");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&manifest.stdout).expect("stdout should be JSON");
+
+    for section in ["startup", "actions", "events", "panes"] {
+        for entry in manifest["manifest"][section]
+            .as_array()
+            .expect("an array of entries")
+        {
+            let command: Vec<&str> = entry["command"]
+                .as_array()
+                .expect("an argv array")
+                .iter()
+                .map(|argument| argument.as_str().expect("an argv string"))
+                .collect();
+
+            // `node` rather than `node_modules/.bin/hrc`: that shim is
+            // `hrc.cmd` on Windows and a bare `CreateProcess` does not find
+            // a `.cmd`, while `node` is `node.exe` and resolves whichever
+            // way the host spawns a command.
+            assert_eq!(
+                command.first(),
+                Some(&"node"),
+                "an entry point should run through node: {command:?}"
+            );
+            assert!(
+                command
+                    .get(1)
+                    .is_some_and(|path| path.starts_with("node_modules/")),
+                "an entry point should launch what the build installed: {command:?}"
+            );
+            assert!(
+                !command[1].starts_with('/'),
+                "an entry point path must be relative to the plugin root: {command:?}"
+            );
+        }
+    }
 }
