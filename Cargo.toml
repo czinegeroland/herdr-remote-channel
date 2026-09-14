@@ -34,7 +34,13 @@ hrc-tui = { path = "crates/hrc-tui" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_jcs = "0.2"
+# Pinned exactly, not to a compatible range. Requirement HRC-TECH-005 asks
+# for a *pinned* RFC 8785 implementation because canonicalization is
+# consensus-critical: two peers that serialize the same payload differently
+# compute different digests and reject each other's signatures. A patch
+# release that changed one escaping decision would break every channel
+# silently, so the version moves only when someone re-runs the vectors.
+serde_jcs = "=0.2.0"
 sha2 = "0.11"
 base64 = "0.23"
 hex = "0.4"
