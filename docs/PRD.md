@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-14T03:45:00+02:00 |
+| Last updated | 2026-09-14T04:15:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -2174,7 +2174,7 @@ npx skills add <owner>/herdr-remote-channel `
 
 | ID | Requirement | Status | Evidence |
 |---|---|---|---|
-| HRC-SEC-001 | Private keys never leave their device. | In progress | `crates/hrc-crypto/src/store.rs` protects keys at rest with a passphrase and refuses to store them unprotected; the OS keychain backend is not implemented |
+| HRC-SEC-001 | Private keys never leave their device. | In progress | `crates/hrc-crypto/src/store.rs` protects keys at rest with a passphrase, refuses to store them unprotected, and never downgrades silently when a keychain is absent (decision DEC-031); `SigningKey` implements no `Serialize` and its `Debug` prints no material; `crates/hrc-core/src/message/tests.rs` proves no seed reaches a published message as raw, base64, or hex bytes while the message still opens. The `KeyStore` trait is the platform abstraction section 28 requires. Remaining: the OS keychain backend on Windows and macOS, which decision DEC-051 says is feasible and Linux is not. Whether the passphrase store alone satisfies this requirement is a product-owner call, not an agent's |
 | HRC-SEC-002 | Messages are encrypted to explicit active recipient devices. | Implemented | `crates/hrc-core/src/message.rs` selects recipients from the roster's active device set |
 | HRC-SEC-003 | Every message is authenticated by a valid sender-device signature. | Implemented | `crates/hrc-core/src/message.rs`: the signer is resolved from the roster and the signature verified before any field is trusted |
 | HRC-SEC-004 | Roster changes are signed and hash chained. | Implemented | `crates/hrc-core/src/roster.rs`; chain, sequence, epoch, and authority all enforced on apply |
@@ -2551,7 +2551,7 @@ Every implementation PR must update this table.
 | Milestone | Completion | Current state | Last PR | Evidence / next step |
 |---|---:|---|---|---|
 | M0 Product and protocol | 85% | The section 21 adapter protocol now has its out-of-process JSON-RPC binding and its push half: `wait` crosses the boundary, and the conformance suite refuses an adapter whose push declaration disagrees with its behavior | Push-capable adapters | Obtain product-owner specification review, which is not an agent's to record |
-| M1 Secure foundation | 100% | Adds the public-repository gate: the full section 16.4 disclosure and a typed phrase naming the channel, enforced in the trusted dispatcher rather than in any one interface | Public-repository confirmation | Replace the provisional OQ-008 wording with product-owner text |
+| M1 Secure foundation | 100% | Answers OQ-013 and proves the never-transmitted half of HRC-SEC-001: no key seed reaches a published message as raw, base64, or hex bytes | Key-material containment and OQ-013 | Product owner decides on DEC-051 and whether the passphrase store alone closes HRC-SEC-001 |
 | M2 Git messaging | 100% | The GitHub optimization closes `AC-GIT-ADAPTER`: conditional head polling with ETags where it is available, and a byte-identical fallback to plain Git everywhere else | GitHub change-detection optimization | Add receipts over a published channel and end-to-end restart coverage |
 | M3 Herdr integration | 97% | Adds the release pipeline and both installers, with a clean-host fixture that installs and smoke-tests through the real installer with every language runtime removed from `PATH` | Release artifacts and install fixture | Cut a first tag so the published artifacts are proven, and add daemon mode to the clean-host smoke test |
 | M4 Context/delegation | 95% | Patch and command-output items are now captured by HRC from a verified repository instead of being taken on the caller's word, and the environment and scrollback exclusions became an allowlist rather than a deny-list | HRC-controlled context capture | Add delegation message exchange and its CLI surface |
@@ -2686,6 +2686,7 @@ recorded either directly in this PRD or in a stable linked artifact.
 | DEC-019 | Protocol integers that must round-trip exactly and can exceed 2^53 - 1 are carried as JSON strings. | Accepted | RFC 8785 canonicalizes numbers as ECMAScript doubles, so a larger integer is silently rounded and the signed bytes change. Confirmed by `integers_beyond_the_double_safe_range_lose_precision` in `crates/hrc-protocol/tests/rfc8785_vectors.rs`. |
 | DEC-049 | Pull requests are validated on Linux only. Windows and macOS run in a manually triggered workflow rather than on every change. | Accepted | The repository is private, so Actions minutes are billed, and the platforms are not billed equally: Windows costs twice a Linux minute and macOS ten times one. A three-platform matrix on both the pull request and the merge was about two dollars a change, roughly two thirds of it macOS. Public Rust projects do run full matrices per pull request, but Actions is free for them. The cost of this choice is real and is accepted rather than denied: a platform-specific regression can reach `main`. Windows has caught two here — a ULID ordering bug at its clock resolution and a `#[cfg(unix)]` block that did not compile — so `.github/workflows/cross-platform.yml` is to be run before a release and after any change touching paths, filesystem behavior, process handling, time, or line endings. |
 | DEC-050 | Release builds pin an exact Rust toolchain version; everyday development stays on `stable`. | Accepted | Answers open question OQ-012. A released binary should be rebuildable from its tag, and `stable` moves, so the same tag built six months later is a different compiler and different codegen. Pinning makes the compiler part of the release's identity. Pinning `rust-toolchain.toml` instead would also freeze development, which costs new lints and fixes for no reproducibility gain, so the pin lives in `.github/workflows/release.yml` as `RUSTUP_TOOLCHAIN` — which takes precedence over that file — and bumping it is a reviewable change. A test asserts the release pin is an exact version and that `rust-toolchain.toml` still tracks the channel. |
+| DEC-051 | An OS keychain backend is feasible on Windows and macOS and not on Linux; the passphrase store remains the default on every platform. | Proposed | Answers open question OQ-013. Windows Credential Manager and the macOS Security framework are provided by the operating system and need no session daemon, so a `keyring`-backed store works there including headless. Linux has no equivalent: the Secret Service backend needs D-Bus, which headless hosts and CI lack, and the kernel keyutils backend is session-scoped, so a device key would vanish on logout and take channel membership with it — worse than a passphrase file, because the loss is silent. Making the keychain the default on two platforms and not the third would also mean two different recovery stories for the same product. Marked Proposed rather than Accepted: it changes where a private key lives, which is a product-owner decision. |
 
 ---
 
@@ -2706,7 +2707,7 @@ OQ-001 was closed by decision DEC-031 and the passphrase key store.
 | OQ-009 | Should sent messages be encrypted to all of the sender's devices by default? | TBD | M1 |
 | OQ-010 | What is the first secondary transport used for adapter conformance? | TBD | M5 |
 | OQ-011 | Which harness runs the section 28.4 governance tests, given that the traceability validator is PowerShell and the rest of the suite is Rust? | TBD | M1 |
-| OQ-013 | Which keychain crate and platform backends can be integrated without a runtime service that headless hosts and CI lack? The `keyring` crate's Linux backend requires a D-Bus secret service, which is unavailable in both. | TBD | M1 |
+| OQ-013 | Which keychain crate and platform backends can be integrated without a runtime service that headless hosts and CI lack? The `keyring` crate's Linux backend requires a D-Bus secret service, which is unavailable in both. | Answered by decision DEC-051: Windows and macOS can, Linux cannot, and the passphrase store stays the default everywhere. Adoption still needs a product-owner decision because it changes where a key lives on two platforms | M1 |
 | OQ-012 | Should release builds pin an exact Rust toolchain version instead of `stable`, so `cargo-dist` artifacts are reproducible? | Answered by decision DEC-050: yes for releases, no for development | M3 |
 
 ---

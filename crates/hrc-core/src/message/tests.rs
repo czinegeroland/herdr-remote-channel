@@ -674,3 +674,65 @@ fn opening_returns_quarantined_content_bound_to_its_ciphertext() {
         "two encryptions of the same message are distinct objects"
     );
 }
+
+#[test]
+fn no_private_key_material_reaches_a_published_message() {
+    // PRD requirement HRC-SEC-001: private keys never leave their device.
+    // The at-rest half is `crates/hrc-crypto/src/store.rs`; this is the
+    // other half, and the one an attacker actually sees. A signing key is
+    // used to sign and is never a thing to send, so the seed bytes must
+    // appear nowhere in what gets published — not in the envelope, not in
+    // the ciphertext, not in the canonical bytes a peer receives.
+    //
+    // The seeds here are deliberately long constant runs, which is the
+    // easiest possible pattern to find and therefore the strictest test: if
+    // key material were being serialized anywhere, this would catch it.
+    let (alice, bob, roster) = channel();
+
+    let ciphertext = seal(
+        &roster,
+        &alice.device_key,
+        alice.signer(),
+        note(&roster, &["bob"]),
+    )
+    .expect("sealing should succeed");
+
+    // Every seed this fixture built a key from.
+    let secrets: Vec<[u8; 32]> = vec![[1; 32], [101; 32], [2; 32], [102; 32]];
+
+    for seed in &secrets {
+        assert!(
+            !contains_window(&ciphertext, seed),
+            "raw key material appears in the published bytes"
+        );
+
+        // Also in the encodings a key would plausibly be serialized as, if
+        // some future field carried one by accident.
+        let base64 = canonical::encode_base64url(seed);
+        let hex: String = seed.iter().map(|byte| format!("{byte:02x}")).collect();
+        let rendered = String::from_utf8_lossy(&ciphertext);
+
+        assert!(
+            !rendered.contains(&base64),
+            "base64 key material appears in the published bytes"
+        );
+        assert!(
+            !rendered.contains(&hex),
+            "hex key material appears in the published bytes"
+        );
+    }
+
+    // The message still opens, so this is not passing because nothing was
+    // published.
+    let opened =
+        open(&roster, &bob.identity, &ciphertext, roster.epoch(), NOW).expect("bob should open it");
+    assert_eq!(opened.sender_principal, alice.id);
+}
+
+/// Whether `haystack` contains `needle` as a contiguous run.
+fn contains_window(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.len() >= needle.len()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}

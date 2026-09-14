@@ -21,9 +21,22 @@
 //!   age's scrypt recipient. It works everywhere, including headless
 //!   servers and CI, and it is fully implemented and tested.
 //! - An OS keychain backend is **not implemented yet**. Its place in the
-//!   design is the [`KeyStore`] trait; until it exists, HRC-SEC-001 is not
-//!   satisfied on platforms where the keychain is the expected home for a
-//!   secret.
+//!   design is the [`KeyStore`] trait, which is the platform abstraction PRD
+//!   section 28 requires.
+//!
+//! # Why there is no Linux keychain backend
+//!
+//! PRD open question OQ-013, answered in decision DEC-051. Windows
+//! Credential Manager and the macOS Security framework are provided by the
+//! operating system and need no session daemon, so a keychain-backed store
+//! is feasible there. Linux has no equivalent: the Secret Service backend
+//! needs D-Bus, which headless hosts and CI lack, and the kernel keyutils
+//! backend is session-scoped — a device key stored there vanishes on logout
+//! and takes channel membership with it. That is worse than a passphrase
+//! file, because the loss is silent.
+//!
+//! So the passphrase store stays the default everywhere rather than being
+//! the fallback on one platform out of three.
 
 use std::path::{Path, PathBuf};
 
