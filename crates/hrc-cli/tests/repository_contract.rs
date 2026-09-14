@@ -375,3 +375,54 @@ fn the_npm_publish_workflow_can_actually_be_triggered() {
         "a failed Release run must not publish"
     );
 }
+
+#[test]
+fn the_publish_step_never_hands_npm_a_bare_directory_path() {
+    // `npm publish npm-dist/herdr-remote-channel` does not publish that
+    // directory. npm reads a bare `a/b` argument as the GitHub shorthand
+    // `owner/repo` and went looking for
+    // `ssh://git@github.com/npm-dist/herdr-remote-channel.git`, which failed
+    // on a public key after the four platform packages had already gone out.
+    //
+    // A leading `./` makes it unambiguously a path. The platform packages
+    // only ever escaped this because the `npm-dist/*/` glob leaves a
+    // trailing slash on each match.
+    let workflow = read(".github/workflows/npm-publish.yml");
+
+    for line in workflow
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("npm publish"))
+    {
+        let argument = line
+            .split_whitespace()
+            .next_back()
+            .expect("a publish command has arguments");
+
+        assert!(
+            argument.starts_with("\"./") || argument.starts_with("./"),
+            "`{line}` gives npm a path it will read as `owner/repo`"
+        );
+    }
+}
+
+#[test]
+fn a_partly_published_release_can_be_retried() {
+    // npm creates each package separately and a published version is
+    // immutable, so a run that fails partway leaves some already published.
+    // The first real publish did exactly that: four platform packages
+    // landed, the root package failed. Without a skip, retrying that run
+    // aborts on the first package with `EPUBLISHCONFLICT` and the release
+    // can never be completed — which would make the `workflow_dispatch`
+    // retry this workflow offers useless precisely when it is needed.
+    let workflow = read(".github/workflows/npm-publish.yml");
+
+    assert!(
+        workflow.contains("npm view \"$name@$version\" version"),
+        "the publish step should check whether a version already exists"
+    );
+    assert!(
+        workflow.contains("is already published"),
+        "an existing version should be skipped rather than fail the run"
+    );
+}

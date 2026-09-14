@@ -116,14 +116,38 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Every path is written with a leading `./`. npm reads a bare `a/b`
+          # argument as the GitHub shorthand `owner/repo`, not as a directory,
+          # so `npm publish npm-dist/herdr-remote-channel` went looking for
+          # `ssh://git@github.com/npm-dist/herdr-remote-channel.git` and failed
+          # on a public key. The platform packages only escaped it because the
+          # `npm-dist/*/` glob leaves a trailing slash.
+          publish() {
+            local dir="$1"
+            local name version
+            name="$(node -p "require('./$dir/package.json').name")"
+            version="$(node -p "require('./$dir/package.json').version")"
+
+            # A publish is not all-or-nothing: npm creates each package
+            # separately, and a version, once created, is immutable. A run that
+            # fails partway therefore leaves some of these already published,
+            # and a plain retry would abort on the first one with
+            # `EPUBLISHCONFLICT`. Skipping what already exists is what makes
+            # the retry this workflow advertises actually work.
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version is already published"
+              return 0
+            fi
+
+            echo "publishing $name@$version"
+            npm publish --access public "./$dir"
+          }
+
           # Platform packages first. The root package depends on them, and an
           # `npm install` that resolved before they existed would fail.
           for dir in npm-dist/*/; do
-            name="$(basename "$dir")"
-            [ "$name" = "herdr-remote-channel" ] && continue
-            echo "publishing herdr-remote-channel-$name"
-            npm publish --access public "$dir"
+            [ "$(basename "$dir")" = "herdr-remote-channel" ] && continue
+            publish "${dir%/}"
           done
 
-          echo "publishing herdr-remote-channel"
-          npm publish --access public npm-dist/herdr-remote-channel
+          publish npm-dist/herdr-remote-channel
