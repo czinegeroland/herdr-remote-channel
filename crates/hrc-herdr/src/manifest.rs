@@ -145,17 +145,14 @@ pub struct Manifest {
 /// `--no-save` because the plugin root is not a package: the install needs
 /// `node_modules`, not a `package.json` describing it.
 fn npm_install(prefix: &[&str]) -> Vec<String> {
-    let mut command: Vec<String> = prefix.iter().map(|argument| (*argument).to_owned()).collect();
+    let mut command: Vec<String> = prefix
+        .iter()
+        .map(|argument| (*argument).to_owned())
+        .collect();
     command.extend(
-        [
-            "npm",
-            "install",
-            "--no-save",
-            "--no-audit",
-            "--no-fund",
-        ]
-        .into_iter()
-        .map(str::to_owned),
+        ["npm", "install", "--no-save", "--no-audit", "--no-fund"]
+            .into_iter()
+            .map(str::to_owned),
     );
     command.push(format!("{PACKAGE}@{}", env!("CARGO_PKG_VERSION")));
     command
@@ -163,11 +160,7 @@ fn npm_install(prefix: &[&str]) -> Vec<String> {
 
 /// The argv for one `hrc herdr ...` entry point.
 fn invoke(arguments: &[&str]) -> Vec<String> {
-    let mut command = vec![
-        "node".to_owned(),
-        LAUNCHER.to_owned(),
-        "herdr".to_owned(),
-    ];
+    let mut command = vec!["node".to_owned(), LAUNCHER.to_owned(), "herdr".to_owned()];
     command.extend(arguments.iter().map(|argument| (*argument).to_owned()));
     command
 }
