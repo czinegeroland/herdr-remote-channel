@@ -47,7 +47,7 @@ jobs:
       rust: ${{ steps.decide.outputs.rust }}
     steps:
       - name: Check out enough history to diff
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -90,7 +90,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the pull request
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install the pinned toolchain
         # Reads the exact version from `rust-toolchain.toml` (decision
@@ -130,7 +130,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the pull request
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install the pinned toolchain
         # Reads the exact version from `rust-toolchain.toml` (decision
