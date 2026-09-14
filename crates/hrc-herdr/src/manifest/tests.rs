@@ -10,11 +10,16 @@ fn every_entry_invokes_the_one_hrc_binary() {
     for command in manifest.commands() {
         assert_eq!(
             command.first().map(String::as_str),
-            Some(EXECUTABLE),
-            "`{command:?}` must run the plugin's own `hrc`"
+            Some("node"),
+            "`{command:?}` must run the launcher through node"
         );
         assert_eq!(
             command.get(1).map(String::as_str),
+            Some(LAUNCHER),
+            "`{command:?}` must run the plugin's own launcher"
+        );
+        assert_eq!(
+            command.get(2).map(String::as_str),
             Some("herdr"),
             "`{command:?}` must be an `hrc herdr ...` entry point"
         );
@@ -28,13 +33,70 @@ fn the_binary_is_resolved_from_the_plugin_root_rather_than_the_path() {
     // install prefix being on whatever PATH the host inherited, which is a
     // silent failure on a machine where it is not.
     assert!(
-        EXECUTABLE.contains('/'),
-        "`{EXECUTABLE}` would be looked up on PATH"
+        LAUNCHER.contains('/'),
+        "`{LAUNCHER}` would be looked up on PATH"
     );
     assert!(
-        !EXECUTABLE.starts_with('/'),
-        "`{EXECUTABLE}` must be relative to the plugin root"
+        !LAUNCHER.starts_with('/'),
+        "`{LAUNCHER}` must be relative to the plugin root"
     );
+}
+
+#[test]
+fn installing_the_plugin_needs_no_compiler() {
+    // The whole point of publishing the executable to npm was that nobody
+    // should need a toolchain. Building from source here contradicted that,
+    // and failed on the first real Windows install: the MSVC target wants
+    // Visual Studio Build Tools, a multi-gigabyte prerequisite to read an
+    // inbox pane. A source build belongs in `herdr plugin link`, not in
+    // `herdr plugin install`.
+    for step in &manifest().build {
+        let command = step.command.join(" ");
+        for compiler in ["cargo", "rustc", "rustup", "make", "cc", "gcc"] {
+            assert!(
+                !step.command.iter().any(|argument| argument == compiler),
+                "build step `{command}` needs a toolchain"
+            );
+        }
+        assert!(
+            step.command.iter().any(|argument| argument == "npm"),
+            "build step `{command}` should install the published executable"
+        );
+    }
+}
+
+#[test]
+fn the_installed_version_is_pinned_to_this_build() {
+    // A floating `latest` would let Herdr read one version's manifest and
+    // install a different version's executable, so the entry points it
+    // registered and the binary answering them could disagree.
+    let expected = format!("{PACKAGE}@{}", env!("CARGO_PKG_VERSION"));
+
+    for step in &manifest().build {
+        assert!(
+            step.command.contains(&expected),
+            "build step `{}` should pin `{expected}`",
+            step.command.join(" ")
+        );
+    }
+}
+
+#[test]
+fn every_platform_the_plugin_claims_has_a_build_step() {
+    // A platform listed with no step that applies to it installs nothing and
+    // then fails at the first entry point, which is a worse failure than
+    // refusing to install.
+    let manifest = manifest();
+
+    for platform in &manifest.platforms {
+        assert!(
+            manifest.build.iter().any(|step| match &step.platforms {
+                Some(platforms) => platforms.contains(platform),
+                None => true,
+            }),
+            "`{platform}` is claimed but nothing installs the executable there"
+        );
+    }
 }
 
 #[test]
@@ -42,7 +104,8 @@ fn the_manifest_declares_the_four_entry_points_the_prd_lists() {
     // PRD section 13.2: startup, action, event, and pane.
     let manifest = manifest();
 
-    let tail = |command: &[String]| command[1..].to_vec();
+    // `node`, then the launcher path, then the `hrc herdr ...` arguments.
+    let tail = |command: &[String]| command[2..].to_vec();
 
     assert_eq!(tail(&manifest.startup[0].command), ["herdr", "startup"]);
     assert_eq!(tail(&manifest.events[0].command), ["herdr", "event"]);

@@ -21,12 +21,19 @@
 
 use serde::Serialize;
 
-/// Where the plugin's own copy of the binary lives, relative to the plugin
-/// root that Herdr uses as the working directory.
+/// The npm package that carries the executable.
+pub const PACKAGE: &str = "herdr-remote-channel";
+
+/// The launcher the build step installs, relative to the plugin root that
+/// Herdr uses as the working directory.
 ///
-/// No `.exe` suffix: `CreateProcess` appends one on Windows when the program
-/// name carries no extension, and the build step writes `bin/hrc.exe` there.
-pub const EXECUTABLE: &str = "bin/hrc";
+/// Entry points run it as `node <this>` rather than executing it directly.
+/// `node` is `node.exe` on Windows, so it resolves however Herdr spawns a
+/// command; `node_modules/.bin/hrc` would be `hrc.cmd` there, which a bare
+/// `CreateProcess` does not find. The launcher itself selects the platform
+/// package npm installed and execs the real binary, passing arguments and
+/// the exit code straight through.
+pub const LAUNCHER: &str = "node_modules/herdr-remote-channel/bin.js";
 
 /// The Herdr release whose documented manifest schema this file targets.
 ///
@@ -123,27 +130,44 @@ pub struct Manifest {
     pub panes: Vec<PaneEntry>,
 }
 
-/// The argv for one `cargo install` of the `hrc` binary.
+/// The argv that installs this version's executable from npm.
 ///
-/// `--locked` so an install builds the dependency versions this repository
-/// tested, and `--force` so reinstalling over an existing copy is an update
-/// rather than an error.
-fn cargo_install(extra: &[&str]) -> Vec<String> {
-    let mut command = vec![
-        "cargo".to_owned(),
-        "install".to_owned(),
-        "--path".to_owned(),
-        "crates/hrc-cli".to_owned(),
-        "--locked".to_owned(),
-        "--force".to_owned(),
-    ];
-    command.extend(extra.iter().map(|argument| (*argument).to_owned()));
+/// `prefix` wraps the command for hosts that spawn a process directly rather
+/// than through a shell: on Windows `npm` is `npm.cmd`, which `CreateProcess`
+/// will not find, so the step goes through `cmd /c`. `cmd.exe` resolves under
+/// either spawning model, which is why this is written once with a wrapper
+/// instead of twice.
+///
+/// The version is pinned to this build's own, so the manifest Herdr read and
+/// the executable it installs are the same release rather than whatever
+/// `latest` happens to be at install time.
+///
+/// `--no-save` because the plugin root is not a package: the install needs
+/// `node_modules`, not a `package.json` describing it.
+fn npm_install(prefix: &[&str]) -> Vec<String> {
+    let mut command: Vec<String> = prefix.iter().map(|argument| (*argument).to_owned()).collect();
+    command.extend(
+        [
+            "npm",
+            "install",
+            "--no-save",
+            "--no-audit",
+            "--no-fund",
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
+    command.push(format!("{PACKAGE}@{}", env!("CARGO_PKG_VERSION")));
     command
 }
 
 /// The argv for one `hrc herdr ...` entry point.
 fn invoke(arguments: &[&str]) -> Vec<String> {
-    let mut command = vec![EXECUTABLE.to_owned(), "herdr".to_owned()];
+    let mut command = vec![
+        "node".to_owned(),
+        LAUNCHER.to_owned(),
+        "herdr".to_owned(),
+    ];
     command.extend(arguments.iter().map(|argument| (*argument).to_owned()));
     command
 }
@@ -158,45 +182,30 @@ pub fn manifest() -> Manifest {
         description: "Secure asynchronous communication between independent Herdr installations."
             .to_owned(),
         platforms: vec!["linux".to_owned(), "macos".to_owned(), "windows".to_owned()],
-        // One flow on every platform, because `cargo` is the same program
-        // everywhere: same arguments, same profile, and it appends `.exe` to
-        // the installed name on Windows by itself.
+        // Installing this plugin needs no compiler. The executable is
+        // published to npm, one package per platform carrying its own binary,
+        // and npm serves the bytes under its own integrity hash; every
+        // archive was checked against its published SHA-256 before it was
+        // packed. The install is a download and takes about a second.
         //
-        // This replaced a pair of per-platform shell scripts, and the reason
-        // is worth keeping. The PowerShell half failed on the first real
-        // Windows install: `git describe` writes to standard error in a
-        // checkout with no tags, which is the ordinary case because Herdr
-        // installs from a commit, and Windows PowerShell turns a redirected
-        // native command's stderr into a terminating error. `cargo build`
-        // would have failed next for the same reason. Two scripts meant two
-        // implementations of one idea, only one of which anyone had run.
-        //
-        // Three steps rather than two because `cargo install --path` builds
-        // into the workspace's own `target` directory and leaves it there —
-        // around four hundred megabytes, inside the Herdr plugins folder, for
-        // as long as the plugin is installed. The install is what matters and
-        // the artifacts are not, so the last step reclaims them. Both
-        // binaries have already been copied out by then, and a reinstall
-        // rebuilds, which is the trade being made.
+        // It used to be three `cargo` commands, and that was a mistake worth
+        // recording rather than quietly deleting. This project had already
+        // built the npm channel precisely so that no toolchain would be
+        // needed, and then left the one install path most people take
+        // building from source anyway. The two decisions contradicted each
+        // other. It failed on the first real Windows install with
+        // `linker `link.exe` not found`: the MSVC target needs Visual Studio
+        // Build Tools, which is a multi-gigabyte prerequisite to read an
+        // inbox pane. A source build belongs in the development flow
+        // (`herdr plugin link`), not in `herdr plugin install`.
         build: vec![
-            // Into the plugin root, which is where `EXECUTABLE` points.
             Build {
-                command: cargo_install(&["--root", "."]),
-                platforms: None,
+                command: npm_install(&["cmd", "/c"]),
+                platforms: Some(vec!["windows".to_owned()]),
             },
-            // And onto the PATH, for `hrc doctor` in a terminal and for the
-            // agent skill's `hrc --help` discovery. Cargo's own bin directory
-            // rather than a guess at one: this step only runs where a Rust
-            // toolchain exists, and rustup puts that directory on the PATH,
-            // so it is the one place already known to work.
             Build {
-                command: cargo_install(&[]),
-                platforms: None,
-            },
-            // Reclaims the build directory the two installs above filled.
-            Build {
-                command: vec!["cargo".to_owned(), "clean".to_owned()],
-                platforms: None,
+                command: npm_install(&[]),
+                platforms: Some(vec!["linux".to_owned(), "macos".to_owned()]),
             },
         ],
         startup: vec![Startup {
