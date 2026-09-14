@@ -352,7 +352,7 @@ fn publish_control(
 }
 
 /// The single channel this installation is configured for, if there is one.
-fn only_channel(database: &Database) -> Result<hrc_storage::ChannelRecord> {
+pub(crate) fn only_channel(database: &Database) -> Result<hrc_storage::ChannelRecord> {
     let mut channels = database.channels()?;
 
     match channels.len() {
@@ -2157,7 +2157,7 @@ fn time_from_rfc3339(value: &str) -> Option<i64> {
 }
 
 /// Renders seconds since the Unix epoch as an RFC 3339 UTC timestamp.
-fn rfc3339_from(seconds: i64) -> String {
+pub(crate) fn rfc3339_from(seconds: i64) -> String {
     let days = seconds.div_euclid(86_400);
     let remainder = seconds.rem_euclid(86_400);
     let (year, month, day) = civil_from_days(days);
@@ -3597,11 +3597,15 @@ pub fn herdr_startup(context: &Context) -> Result<Value> {
 pub fn herdr_action(context: &Context, action: &str) -> Result<Value> {
     // Actions and panes are named separately in the manifest but the inbox
     // action and the inbox pane show the same thing, so they share a body.
-    match action {
-        "inbox" => herdr_pane(context, "inbox"),
-        other => Err(CliError::UnknownHerdrTarget {
+    // Every action opens the pane of the same name. They are declared
+    // separately in the manifest because the host offers them differently —
+    // a pane is placed, an action is invoked — but they show the same screen,
+    // so resolving through the pane parser keeps one list of what exists.
+    match hrc_herdr::Pane::parse(action) {
+        Some(pane) => herdr_pane(context, pane.as_str()),
+        None => Err(CliError::UnknownHerdrTarget {
             kind: "action",
-            name: other.to_owned(),
+            name: action.to_owned(),
         }),
     }
 }
@@ -3656,6 +3660,20 @@ pub fn herdr_pane(context: &Context, pane: &str) -> Result<Value> {
     })?;
 
     match pane {
+        // The trusted approval screen. Herdr opens this as a session-modal
+        // popup, which is a real terminal, so the screen runs here rather
+        // than rendering rows for the host to print.
+        hrc_herdr::Pane::Review => review::review(context, None, &review::local_agent()),
+
+        // Membership approval, the other decision a human owns.
+        hrc_herdr::Pane::Joins => review::review_joins(context),
+
+        // Writing a message, so that saying something needs no other tool.
+        hrc_herdr::Pane::Compose => review::compose(context),
+
+        // Getting a channel in the first place.
+        hrc_herdr::Pane::Setup => review::setup(context),
+
         hrc_herdr::Pane::Inbox => {
             let database = Database::open(context.paths.database())?;
             let channel = only_channel(&database)?;
@@ -3802,6 +3820,8 @@ fn make_repository_public(
 
     Ok(())
 }
+
+pub mod review;
 
 #[cfg(test)]
 mod tests;

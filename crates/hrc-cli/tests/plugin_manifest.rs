@@ -316,3 +316,116 @@ fn the_entry_points_run_what_the_build_step_installed() {
         }
     }
 }
+
+#[test]
+fn the_approval_screen_is_a_modal_pane_of_its_own() {
+    // The approval screen is a separate pane from the inbox rather than a
+    // mode of it, because the two have opposite rules: the inbox is safe to
+    // leave on screen and never shows a body, and this one exists to show
+    // one. A pane that became either depending on a key press would make
+    // "is a quarantined body visible right now" a question about history
+    // rather than about which pane is open.
+    //
+    // It is a popup because Herdr popups are session-modal: they take every
+    // key, Escape included, and sit outside the tiled layout, so a revealed
+    // body cannot be left in a corner of the workspace while the human does
+    // something else.
+    let manifest = hrc()
+        .args(["herdr", "manifest", "--json"])
+        .output()
+        .expect("the manifest command should run");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&manifest.stdout).expect("stdout should be JSON");
+
+    let panes = manifest["manifest"]["panes"]
+        .as_array()
+        .expect("an array of panes");
+
+    let review = panes
+        .iter()
+        .find(|pane| pane["id"] == "review")
+        .expect("the plugin should offer an approval pane");
+
+    assert_eq!(
+        review["placement"], "popup",
+        "the approval screen should be session-modal"
+    );
+    assert!(
+        review["width"].is_string() && review["height"].is_string(),
+        "a popup needs a size: {review}"
+    );
+
+    let inbox = panes
+        .iter()
+        .find(|pane| pane["id"] == "inbox")
+        .expect("the plugin should still offer an inbox pane");
+    assert_eq!(
+        inbox["placement"], "split",
+        "the inbox is watched while working, not dismissed"
+    );
+    assert!(
+        inbox["width"].is_null(),
+        "a split pane has no popup size: {inbox}"
+    );
+}
+
+#[test]
+fn every_pane_can_actually_be_asked_for() {
+    // A pane is placed by the host; an action is what a person reaches for.
+    // A pane with no action is a screen that exists and cannot be opened,
+    // which is exactly how this plugin shipped an approval interface nobody
+    // could reach: `hrc-tui` was written, tested, and depended on by nothing.
+    let manifest = hrc()
+        .args(["herdr", "manifest", "--json"])
+        .output()
+        .expect("the manifest command should run");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&manifest.stdout).expect("stdout should be JSON");
+
+    let actions: Vec<&str> = manifest["manifest"]["actions"]
+        .as_array()
+        .expect("an array of actions")
+        .iter()
+        .map(|action| action["id"].as_str().expect("an action id"))
+        .collect();
+
+    for pane in manifest["manifest"]["panes"]
+        .as_array()
+        .expect("an array of panes")
+    {
+        let id = pane["id"].as_str().expect("a pane id");
+        assert!(
+            actions.contains(&id),
+            "the `{id}` pane has no action, so nothing can open it: {actions:?}"
+        );
+    }
+}
+
+#[test]
+fn a_pane_and_its_action_agree_on_the_name() {
+    // Two names for one screen is a way to make a person think there are two.
+    let manifest = hrc()
+        .args(["herdr", "manifest", "--json"])
+        .output()
+        .expect("the manifest command should run");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&manifest.stdout).expect("stdout should be JSON");
+
+    for pane in manifest["manifest"]["panes"]
+        .as_array()
+        .expect("an array of panes")
+    {
+        let id = pane["id"].as_str().expect("a pane id");
+        let action = manifest["manifest"]["actions"]
+            .as_array()
+            .expect("an array of actions")
+            .iter()
+            .find(|action| action["id"] == id)
+            .unwrap_or_else(|| panic!("`{id}` should have an action"));
+
+        assert_eq!(
+            pane["title"], action["title"],
+            "the `{id}` pane and its action should be one screen"
+        );
+    }
+}

@@ -13,16 +13,45 @@ use serde::Serialize;
 pub enum Pane {
     /// The inbox, listing what has arrived and what awaits a decision.
     Inbox,
+    /// The channel setup screen: create a channel, invite someone, or
+    /// redeem an invite.
+    Setup,
+    /// The composition screen, for writing a note or a question without
+    /// leaving Herdr.
+    Compose,
+    /// The membership approval screen, where a join request is checked
+    /// against its safety phrase and admitted or refused.
+    Joins,
+    /// The trusted approval screen, where a quarantined body may be read and
+    /// decided on.
+    ///
+    /// Separate from the inbox rather than a mode of it, because the two
+    /// panes have opposite rules: the inbox is safe to leave on screen and
+    /// never shows a body, while this one exists to show one. A pane that
+    /// could become either depending on a key press would make "is a body
+    /// visible right now" a question about history rather than about which
+    /// pane is open.
+    Review,
 }
 
 impl Pane {
     /// Every pane, in the order the manifest declares them.
-    pub const ALL: [Pane; 1] = [Pane::Inbox];
+    pub const ALL: [Pane; 5] = [
+        Pane::Inbox,
+        Pane::Setup,
+        Pane::Compose,
+        Pane::Joins,
+        Pane::Review,
+    ];
 
     /// The name used on the command line and in the manifest.
     pub const fn as_str(self) -> &'static str {
         match self {
             Pane::Inbox => "inbox",
+            Pane::Setup => "setup",
+            Pane::Compose => "compose",
+            Pane::Joins => "joins",
+            Pane::Review => "review",
         }
     }
 

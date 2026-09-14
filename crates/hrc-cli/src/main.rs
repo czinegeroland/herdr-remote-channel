@@ -133,6 +133,23 @@ impl From<CliError> for Failure {
 
 /// Runs a parsed command.
 fn run(cli: &Cli, _path: &str) -> std::result::Result<Value, Failure> {
+    // `hrc review` is the trusted human interface rather than a caller of
+    // it, so it is the one boundary command that can run here — and only
+    // with a person at the terminal. PRD section 22.7 refuses *direct
+    // non-interactive invocation*, which is the distinction: a pipe, a
+    // captured subprocess and an agent's tool call are all refused, and the
+    // refusal `commands::review` returns carries the same stable
+    // `authorization_required` code and exit status as the check below, so
+    // nothing scripting this can tell the two apart.
+    //
+    // `--json` never reaches here at all; it is rejected before dispatch.
+    if let Command::Review(args) = &cli.command {
+        let context = commands::Context::from_environment(Paths::resolve().map_err(Failure::from)?);
+        let agent = commands::review::local_agent();
+        return commands::review::review(&context, Some(&args.message_id), &agent)
+            .map_err(Failure::from);
+    }
+
     // The authorization boundary is checked before anything runs, so a
     // boundary command cannot do work and then be refused.
     if dispatch::requires_trusted_human(&cli.command) {

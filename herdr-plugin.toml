@@ -30,6 +30,30 @@ title = "Remote channel inbox"
 contexts = ["workspace", "pane"]
 command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "action", "inbox"]
 
+[[actions]]
+id = "setup"
+title = "Remote channel setup"
+contexts = ["workspace", "pane"]
+command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "action", "setup"]
+
+[[actions]]
+id = "compose"
+title = "Remote channel compose"
+contexts = ["workspace", "pane"]
+command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "action", "compose"]
+
+[[actions]]
+id = "joins"
+title = "Remote channel join requests"
+contexts = ["workspace", "pane"]
+command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "action", "joins"]
+
+[[actions]]
+id = "review"
+title = "Remote channel review"
+contexts = ["workspace", "pane"]
+command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "action", "review"]
+
 [[events]]
 on = "workspace.focused"
 command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "event"]
@@ -39,3 +63,35 @@ id = "inbox"
 title = "Remote channel inbox"
 placement = "split"
 command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "pane", "inbox"]
+
+[[panes]]
+id = "setup"
+title = "Remote channel setup"
+placement = "popup"
+width = "80%"
+height = "80%"
+command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "pane", "setup"]
+
+[[panes]]
+id = "compose"
+title = "Remote channel compose"
+placement = "popup"
+width = "80%"
+height = "80%"
+command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "pane", "compose"]
+
+[[panes]]
+id = "joins"
+title = "Remote channel join requests"
+placement = "popup"
+width = "80%"
+height = "80%"
+command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "pane", "joins"]
+
+[[panes]]
+id = "review"
+title = "Remote channel review"
+placement = "popup"
+width = "80%"
+height = "80%"
+command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "pane", "review"]

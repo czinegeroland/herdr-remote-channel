@@ -2946,3 +2946,100 @@ fn the_end_to_end_scenario_from_section_28_5() {
         "the refusal should name the missing recipient device: {refusal}"
     );
 }
+
+#[test]
+fn the_review_pane_refuses_a_captured_terminal() {
+    // The trusted approval screen is reachable two ways — `hrc review` and
+    // the Herdr pane — and both have to hold the same line. A captured
+    // subprocess is what an agent's tool call looks like, and it is exactly
+    // what PRD section 22.7 refuses by saying *non-interactive* invocation
+    // must fail.
+    //
+    // This is the pane half. Without it the boundary could be checked on one
+    // entry point and forgotten on the other, which is how the CLI would end
+    // up refusing what the plugin quietly allowed.
+    let (home, _remote) = channel_fixture();
+
+    let output = hrc_in(home.path())
+        .args(["herdr", "pane", "review"])
+        .output()
+        .expect("command should run");
+
+    assert_eq!(
+        output.status.code(),
+        Some(AUTHORIZATION_REQUIRED),
+        "the review pane must refuse without a human at the terminal"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "no content may reach standard output"
+    );
+}
+
+#[test]
+fn the_refusal_says_where_a_human_can_actually_approve() {
+    // A boundary that only says "no" leaves the person stuck, and the honest
+    // answer is short: open the pane, or run it in a real terminal. Saying so
+    // is what keeps the boundary from reading like a bug.
+    let (home, _remote) = channel_fixture();
+
+    let output = hrc_in(home.path())
+        .args(["review", "01ARZ3NDEKTSV4RRFFQ69G5FAV"])
+        .output()
+        .expect("command should run");
+
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+    assert!(
+        stderr.contains("Remote channel review") || stderr.contains("terminal"),
+        "the refusal should point somewhere a decision can be made: {stderr}"
+    );
+}
+
+#[test]
+fn the_membership_pane_refuses_a_captured_terminal_too() {
+    // Admitting a member is the other decision a human owns, and it has to
+    // hold the same line as message approval. A boundary enforced on one
+    // pane and forgotten on the other is how a channel ends up letting a
+    // script add members.
+    let (home, _remote) = channel_fixture();
+
+    let output = hrc_in(home.path())
+        .args(["herdr", "pane", "joins"])
+        .output()
+        .expect("command should run");
+
+    assert_eq!(
+        output.status.code(),
+        Some(AUTHORIZATION_REQUIRED),
+        "the membership pane must refuse without a human at the terminal"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "no content may reach standard output"
+    );
+}
+
+#[test]
+fn every_interactive_pane_refuses_a_captured_terminal() {
+    // All of these run a terminal interface, and three of them open the key
+    // store or publish to a channel. A captured subprocess is what an
+    // agent's tool call looks like; none of these screens should run for one.
+    let (home, _remote) = channel_fixture();
+
+    for pane in ["review", "joins", "compose", "setup"] {
+        let output = hrc_in(home.path())
+            .args(["herdr", "pane", pane])
+            .output()
+            .expect("command should run");
+
+        assert_eq!(
+            output.status.code(),
+            Some(AUTHORIZATION_REQUIRED),
+            "the `{pane}` pane must refuse without a human at the terminal"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "`{pane}` must not write to standard output"
+        );
+    }
+}

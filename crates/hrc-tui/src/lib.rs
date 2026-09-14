@@ -20,7 +20,17 @@
 #![warn(missing_docs)]
 
 pub mod app;
+pub mod compose;
+pub mod join;
+pub mod passphrase;
+pub mod run;
+pub mod setup;
 pub mod view;
 
 pub use app::{App, Focus, Outcome, PendingItem};
-pub use view::render;
+pub use compose::{ComposeApp, ComposeKind, ComposeOutcome, Recipient};
+pub use join::{JoinApp, JoinOutcome, PendingJoin};
+pub use passphrase::{PassphraseApp, PassphraseOutcome};
+pub use run::{Screen, run};
+pub use setup::{SetupApp, SetupOutcome, SetupStep};
+pub use view::{render, render_compose, render_joins, render_passphrase, render_setup};
