@@ -1,0 +1,41 @@
+# Dependency updates (public-repository hardening).
+#
+# Two ecosystems, because a supply-chain problem can arrive through either:
+# the crates this binary links, and the Actions that build and release it.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    # One pull request per security-relevant crate rather than a single
+    # sweeping bump: these are the dependencies that carry the product's
+    # cryptographic and canonicalization guarantees, and each deserves to be
+    # looked at on its own.
+    groups:
+      non-security-patches:
+        patterns: ["*"]
+        exclude-patterns:
+          - age
+          - ed25519-dalek
+          - serde_jcs
+          - sha2
+          - hmac
+          - rand_core
+          - secrecy
+          - zeroize
+        update-types: ["minor", "patch"]
+    # `serde_jcs` is pinned exactly on purpose (PRD requirement
+    # HRC-TECH-005): canonicalization is consensus-critical, and a patch that
+    # changed one escaping decision would break every channel silently. A
+    # bump has to be accompanied by re-running the cross-language vectors, so
+    # it must never arrive as an automatic update.
+    ignore:
+      - dependency-name: serde_jcs
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

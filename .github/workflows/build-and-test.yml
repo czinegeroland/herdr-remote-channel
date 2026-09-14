@@ -107,7 +107,7 @@ jobs:
       # replaced kept whole `target` directories that only grew, which on
       # Windows cost more to restore than the compile it saved.
       - name: Cache cargo build output
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: lint
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -142,7 +142,7 @@ jobs:
           cargo --version
 
       - name: Cache cargo build output
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: test
           save-if: ${{ github.ref == 'refs/heads/main' }}

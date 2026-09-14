@@ -1,6 +1,15 @@
-# Protect the product contract and its enforcement mechanism.
+# Every change needs the owner's review.
+#
+# On a public repository this is the rule that matters most: combined with a
+# ruleset requiring review from Code Owners, it means nothing reaches `main`
+# without @czinegeroland approving it, no matter who opened the pull request.
+* @czinegeroland
+
+# Listed again below so the intent survives a future narrowing of the line
+# above. These are the product contract and the machinery that enforces it;
+# a change to any of them changes what the project promises or who may
+# change it.
+/LICENSE @czinegeroland
+/SECURITY.md @czinegeroland
 /docs/PRD.md @czinegeroland
-/.github/pull_request_template.md @czinegeroland
-/.github/scripts/check-prd-traceability.ps1 @czinegeroland
-/.github/workflows/ @czinegeroland
-/.github/CODEOWNERS @czinegeroland
+/.github/ @czinegeroland
