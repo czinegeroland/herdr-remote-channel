@@ -180,6 +180,7 @@ fn pane_title(pane: crate::pane::Pane) -> String {
         crate::pane::Pane::Compose => "Remote channel compose".to_owned(),
         crate::pane::Pane::Context => "Remote channel context".to_owned(),
         crate::pane::Pane::Joins => "Remote channel join requests".to_owned(),
+        crate::pane::Pane::Members => "Remote channel members".to_owned(),
         crate::pane::Pane::Review => "Remote channel review".to_owned(),
     }
 }
@@ -266,6 +267,7 @@ pub fn manifest() -> Manifest {
                     | crate::pane::Pane::Compose
                     | crate::pane::Pane::Context
                     | crate::pane::Pane::Joins
+                    | crate::pane::Pane::Members
                     | crate::pane::Pane::Review => "popup".to_owned(),
                 },
                 // Sized only where the host reads it. A width on a split
@@ -277,6 +279,7 @@ pub fn manifest() -> Manifest {
                     | crate::pane::Pane::Compose
                     | crate::pane::Pane::Context
                     | crate::pane::Pane::Joins
+                    | crate::pane::Pane::Members
                     | crate::pane::Pane::Review => Some("80%".to_owned()),
                 },
                 height: match pane {
@@ -285,6 +288,7 @@ pub fn manifest() -> Manifest {
                     | crate::pane::Pane::Compose
                     | crate::pane::Pane::Context
                     | crate::pane::Pane::Joins
+                    | crate::pane::Pane::Members
                     | crate::pane::Pane::Review => Some("80%".to_owned()),
                 },
                 command: invoke(&["pane", pane.as_str()]),

@@ -50,6 +50,16 @@ pub struct Recipient {
     pub principal_id: String,
     /// Whether the roster still lists them as active.
     pub active: bool,
+    /// The message this would answer, when the target is a reply.
+    ///
+    /// A reply is not a separate screen, because it is the same act: text to
+    /// one person. What differs is that the thread is read from local state
+    /// rather than started fresh — a sender that could choose its own thread
+    /// could attach a reply to any conversation. So the choice is in this
+    /// list, and picking it fixes the recipient too.
+    pub in_reply_to: Option<String>,
+    /// A short description of what is being answered, for the list.
+    pub answering: Option<String>,
 }
 
 /// Which part of the screen has the keyboard.
@@ -72,6 +82,8 @@ pub enum ComposeOutcome {
         kind: ComposeKind,
         /// The text.
         text: String,
+        /// The message being answered, when this is a reply.
+        in_reply_to: Option<String>,
     },
     /// Leave without sending.
     Quit,
@@ -244,6 +256,7 @@ impl ComposeApp {
             recipient: recipient.principal_id.clone(),
             kind: self.kind,
             text: self.body.clone(),
+            in_reply_to: recipient.in_reply_to.clone(),
         })
     }
 
@@ -283,11 +296,17 @@ impl ComposeApp {
         // The recipient is named in full. Two principals can differ by a few
         // characters of base64, and this is the last point at which a human
         // can notice they picked the wrong one.
-        self.proposed = Some(format!(
-            "Send this {} to {}? [y/N]",
-            self.kind.as_str(),
-            recipient.principal_id
-        ));
+        self.proposed = Some(match &recipient.answering {
+            // An answer says which conversation it joins, because that is the
+            // part a person cannot verify afterwards by reading their own
+            // text back.
+            Some(answering) => format!("Reply to {} ({answering})? [y/N]", recipient.principal_id),
+            None => format!(
+                "Send this {} to {}? [y/N]",
+                self.kind.as_str(),
+                recipient.principal_id
+            ),
+        });
     }
 }
 

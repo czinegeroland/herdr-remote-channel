@@ -33,14 +33,20 @@ fn app() -> ComposeApp {
         Recipient {
             principal_id: "principal-alice".into(),
             active: true,
+            in_reply_to: None,
+            answering: None,
         },
         Recipient {
             principal_id: "principal-bob".into(),
             active: true,
+            in_reply_to: None,
+            answering: None,
         },
         Recipient {
             principal_id: "principal-gone".into(),
             active: false,
+            in_reply_to: None,
+            answering: None,
         },
     ])
 }
@@ -67,6 +73,7 @@ fn a_message_is_written_and_sent_to_the_selected_recipient() {
             recipient: "principal-bob".into(),
             kind: ComposeKind::Note,
             text: "hello".into(),
+            in_reply_to: None,
         })
     );
 }
@@ -157,6 +164,7 @@ fn the_kind_can_be_changed_before_sending() {
             recipient: "principal-alice".into(),
             kind: ComposeKind::Question,
             text: "does it work?".into(),
+            in_reply_to: None,
         })
     );
 }
@@ -178,5 +186,39 @@ fn a_key_release_neither_types_nor_confirms() {
     assert!(
         app.proposed().is_some(),
         "a release must not answer the confirmation"
+    );
+}
+
+#[test]
+fn a_reply_carries_the_thread_it_answers() {
+    // A reply is the same act as a note — text to one person — so it is a
+    // target in the same list rather than a screen of its own. What differs
+    // is that the thread comes from local state: a sender that could choose
+    // its own thread could attach a reply to any conversation.
+    let mut app = ComposeApp::new(vec![Recipient {
+        principal_id: "principal-alice".into(),
+        active: true,
+        in_reply_to: Some("01ARYZ6S41000000000000000A".into()),
+        answering: Some("question".into()),
+    }]);
+
+    write(&mut app, "yes it does");
+    app.on_key(control(KeyCode::Char('s')));
+
+    let prompt = app.proposed().expect("a proposal");
+    assert!(
+        prompt.contains("Reply to"),
+        "the confirmation should say it joins a conversation: {prompt}"
+    );
+    assert!(prompt.contains("question"), "{prompt}");
+
+    assert_eq!(
+        app.on_key(key(KeyCode::Char('y'))),
+        Some(ComposeOutcome::Send {
+            recipient: "principal-alice".into(),
+            kind: ComposeKind::Note,
+            text: "yes it does".into(),
+            in_reply_to: Some("01ARYZ6S41000000000000000A".into()),
+        })
     );
 }

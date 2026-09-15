@@ -3026,7 +3026,7 @@ fn every_interactive_pane_refuses_a_captured_terminal() {
     // agent's tool call looks like; none of these screens should run for one.
     let (home, _remote) = channel_fixture();
 
-    for pane in ["review", "joins", "compose", "context", "setup"] {
+    for pane in ["review", "joins", "members", "compose", "context", "setup"] {
         let output = hrc_in(home.path())
             .args(["herdr", "pane", pane])
             .output()
