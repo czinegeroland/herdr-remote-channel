@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-16T01:15:00+02:00 |
+| Last updated | 2026-09-16T02:05:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
@@ -522,8 +522,8 @@ The Herdr plugin must expose:
 | HRC-MSG-005 | Support message expiration. | Must | Implemented | `hrc send --expires` and `hrc ask --expires` resolve a lifetime to an absolute RFC 3339 expiry in the signed envelope; `crates/hrc-core/src/message.rs` refuses an expired message on open; `crates/hrc-storage/src/lib.rs` `sweep_expired` runs on every synchronization pass and daemon tick, moving a lapsed quarantined row to the `expired` disposition and dropping its plaintext while keeping the row, so it is displayed as expired and offers no decision (section 26) without deleting history (section 16.3). A decided message never lapses and a message kept in the inbox still does, both covered in `crates/hrc-storage/src/tests.rs` |
 | HRC-MSG-006 | Deduplicate at-least-once deliveries. | Must | Implemented | `crates/hrc-storage/src/lib.rs` `record_inbound` treats a repeat of the same message ID and ciphertext digest as ordinary traffic, and the same ID with a different digest as a substitution rather than a repeat |
 | HRC-MSG-007 | Preserve per-device message ordering. | Must | Implemented | `crates/hrc-storage/src/lib.rs` accepts a message only when it follows the last chain link recorded for its sender device, holds one whose predecessor has not arrived, releases held messages in sequence when the gap fills, and rejects a device that forks its own chain |
-| HRC-MSG-008 | Support structured task/delegation messages without execution. | Should | Implemented | `crates/hrc-protocol/src/delegation.rs` `TaskBody` carries a title, description, acceptance criteria, and a reference to context already shared, and a test asserts the shape exposes no command, script, argument, or environment field |
-| HRC-MSG-009 | Support progress and result messages. | Should | Implemented | `crates/hrc-protocol/src/delegation.rs` `ProgressBody` and `ResultBody`, with the lifecycle of section 18.4 in `DelegationState::may_precede` and party rules in `crates/hrc-core/src/delegation.rs` |
+| HRC-MSG-008 | Support structured task/delegation messages without execution. | Should | Implemented | `crates/hrc-protocol/src/delegation.rs` `TaskBody` carries a title, description, acceptance criteria, and a reference to context already shared, and a test asserts the shape exposes no command, script, argument, or environment field. `hrc delegate` publishes one over a real channel and `crates/hrc-cli/tests/command_contract.rs` proves it arrives quarantined with nothing acting on it, that an empty title or description is refused before publication, and that naming a context package neither requires holding one nor attaches it — disclosure stays with `hrc context send` and its own authorization (decision DEC-073) |
+| HRC-MSG-009 | Support progress and result messages. | Should | Implemented | `crates/hrc-protocol/src/delegation.rs` `ProgressBody` and `ResultBody`, with the lifecycle of section 18.4 in `DelegationState::may_precede` and party rules in `crates/hrc-core/src/delegation.rs`. The `task` that opens that lifecycle is now exchanged over a published channel by `hrc delegate` rather than existing only as a wire shape (decision DEC-073) |
 | HRC-MSG-010 | Retain a local audit record of communication decisions. | Must | Implemented | `crates/hrc-storage/src/lib.rs` keeps an append-only audit table, `crates/hrc-cli/src/commands.rs` surfaces it through `hrc audit`, and every prompt-gate decision is written through to it by the daemon broker |
 
 ### 12.3 Prompt gate
