@@ -281,7 +281,7 @@ mod tests {
             vec!["hrc", "init"],
             vec!["hrc", "send", "alice", "hello"],
             vec!["hrc", "herdr", "event"],
-            vec!["hrc", "delegate", "alice", "--title", "t"],
+            vec!["hrc", "delegate", "alice", "do the thing", "--title", "t"],
         ];
 
         for args in commands {
