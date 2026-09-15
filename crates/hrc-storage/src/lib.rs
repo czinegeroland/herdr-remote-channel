@@ -245,6 +245,22 @@ pub struct ContextDraft {
     pub manifest: Vec<u8>,
 }
 
+/// What this installation remembers about a message it sent.
+///
+/// Enough to judge a receipt and nothing more: who it was addressed to, which
+/// thread it belongs to, and what kind it was.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SentMessageFacts {
+    /// The message identifier.
+    pub message_id: String,
+    /// The thread it belongs to.
+    pub thread_id: String,
+    /// Its kind.
+    pub kind: String,
+    /// The devices it was encrypted to.
+    pub recipient_device_ids: Vec<String>,
+}
+
 /// One entry as the inbox reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboxEntry {
@@ -1394,6 +1410,95 @@ impl Database {
             });
         }
         Ok(())
+    }
+
+    /// Records what a sender must remember to judge a receipt later.
+    ///
+    /// `accept_receipt` refuses a report from a device that was never
+    /// addressed, and it can only do that against what this installation
+    /// actually sent. These facts are stored rather than read back out of the
+    /// published object on purpose: the published envelope is the sender's
+    /// own claim, and checking a receipt against whatever the transport holds
+    /// now would let a rewritten history validate its own receipts.
+    ///
+    /// Idempotent, because a resealed message is queued again and the facts
+    /// it carries do not change with the epoch.
+    pub fn record_sent_facts(
+        &mut self,
+        message_id: &str,
+        thread_id: &str,
+        kind: &str,
+        recipient_device_ids: &[String],
+    ) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+
+        let updated = transaction.execute(
+            "UPDATE outbox SET thread_id = ?2, kind = ?3 WHERE message_id = ?1",
+            params![message_id, thread_id, kind],
+        )?;
+
+        if updated == 0 {
+            return Err(StorageError::UnknownMessage {
+                message_id: message_id.to_owned(),
+            });
+        }
+
+        for device_id in recipient_device_ids {
+            transaction.execute(
+                "INSERT INTO outbox_recipient (message_id, device_id) VALUES (?1, ?2)
+                 ON CONFLICT (message_id, device_id) DO NOTHING",
+                params![message_id, device_id],
+            )?;
+        }
+
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// What this installation sent on one channel, for judging receipts.
+    ///
+    /// Only messages whose facts were recorded are returned. A row from
+    /// before migration 009 has no recipients, and treating an empty
+    /// recipient set as "everyone is allowed" would accept exactly the
+    /// reports this check exists to refuse.
+    pub fn sent_messages(&self, channel_id: &str) -> Result<Vec<SentMessageFacts>> {
+        let mut statement = self.connection.prepare(
+            "SELECT message_id, thread_id, kind FROM outbox
+             WHERE channel_id = ?1 AND thread_id IS NOT NULL AND kind IS NOT NULL",
+        )?;
+
+        let rows = statement
+            .query_map(params![channel_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let mut sent = Vec::with_capacity(rows.len());
+        for (message_id, thread_id, kind) in rows {
+            let mut devices = self
+                .connection
+                .prepare("SELECT device_id FROM outbox_recipient WHERE message_id = ?1")?;
+            let recipient_device_ids = devices
+                .query_map(params![&message_id], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+
+            if recipient_device_ids.is_empty() {
+                continue;
+            }
+
+            sent.push(SentMessageFacts {
+                message_id,
+                thread_id,
+                kind,
+                recipient_device_ids,
+            });
+        }
+
+        Ok(sent)
     }
 
     /// Atomically replaces stale ciphertext with bytes sealed for a newer roster.

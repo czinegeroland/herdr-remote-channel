@@ -3072,3 +3072,99 @@ fn the_context_pane_is_the_only_way_to_disclose_a_package() {
         );
     }
 }
+
+#[test]
+fn a_delivered_receipt_reaches_the_sender() {
+    // PRD section 18.2. Receipts were built and verified in `hrc-core` and
+    // wired to nothing: no sender published one and no receiver recorded one,
+    // so `delivered` never existed as observable state. That is what made
+    // `hrc wait --until delivered` impossible to implement.
+    //
+    // This drives both halves over a real published channel: Alice sends,
+    // Bob's synchronization accepts it and publishes a receipt, and Alice's
+    // next synchronization verifies and records it.
+    let (alice, _remote, bob, request_id) = pending_join_fixture();
+
+    let (mut daemon, _startup) = start_daemon(alice.path());
+    let admitted = daemon_call(
+        alice.path(),
+        Interface::TrustedHuman,
+        serde_json::json!({
+            "method": "approve_join",
+            "params": { "request_id": request_id },
+        }),
+    );
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    assert_eq!(admitted["status"], "ok", "{admitted}");
+
+    hrc_in(bob.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+
+    let members = hrc_in(alice.path())
+        .args(["members", "--json"])
+        .output()
+        .expect("command should run");
+    let members: Value = serde_json::from_slice(&members.stdout).expect("stdout should be JSON");
+    let alice_principal = principal_of(alice.path(), _remote.path());
+    let bob_principal = members["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .map(|member| member["principalId"].as_str().expect("a principal"))
+        .find(|principal| *principal != alice_principal)
+        .expect("Bob should be in the roster")
+        .to_owned();
+
+    let sent = hrc_in(alice.path())
+        .args(["send", &bob_principal, "does this arrive?", "--json"])
+        .output()
+        .expect("command should run");
+    let sent: Value = serde_json::from_slice(&sent.stdout).expect("stdout should be JSON");
+    let message_id = sent["messageId"].as_str().expect("a message id").to_owned();
+
+    hrc_in(alice.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+
+    // Bob accepts the message and, in the same pass, publishes the receipt.
+    hrc_in(bob.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+
+    // Alice picks it up and verifies it against what she actually sent.
+    hrc_in(alice.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+
+    let database = alice.path().join("state.sqlite");
+    let stored = hrc_storage::Database::open(&database).expect("the database should open");
+    let receipts = stored
+        .receipts_for(&message_id)
+        .expect("receipts should be readable");
+
+    assert!(
+        receipts.iter().any(|receipt| receipt.state == "delivered"),
+        "Alice should have recorded a delivered receipt for {message_id}: {receipts:?}"
+    );
+
+    // And the receipt itself is not something a human has to decide about.
+    let inbox = hrc_in(alice.path())
+        .args(["inbox", "--json"])
+        .output()
+        .expect("command should run");
+    let inbox: Value = serde_json::from_slice(&inbox.stdout).expect("stdout should be JSON");
+    assert!(
+        !inbox["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .any(|entry| entry["kind"] == "receipt"),
+        "a receipt must never reach the inbox: {inbox}"
+    );
+}
