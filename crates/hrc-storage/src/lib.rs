@@ -2519,17 +2519,23 @@ fn record_recipient_inbound(
     let mut link = message.chain_id.to_owned();
     let mut sequence = message.device_sequence;
     loop {
-        let Some((message_id, device_sequence, chain_id, is_receipt, is_expired)) =
-            next_recipient_held(
-                transaction,
-                message.channel_id,
-                message.sender_device,
-                recipient_device,
-                &link,
-            )?
+        let Some(held) = next_recipient_held(
+            transaction,
+            message.channel_id,
+            message.sender_device,
+            recipient_device,
+            &link,
+        )?
         else {
             break;
         };
+        let RecipientHeldLink {
+            message_id,
+            device_sequence,
+            chain_id,
+            is_receipt,
+            is_expired,
+        } = held;
         if device_sequence <= sequence {
             return Err(StorageError::InboundForked {
                 sender_device: message.sender_device.to_owned(),
@@ -2707,7 +2713,7 @@ fn next_recipient_held(
     sender_device: &str,
     recipient_device: &str,
     predecessor: &str,
-) -> Result<Option<(String, u64, String, bool, bool)>> {
+) -> Result<Option<RecipientHeldLink>> {
     transaction
         .query_row(
             "SELECT message_id, device_sequence, chain_id, is_receipt, is_expired
@@ -2716,17 +2722,25 @@ fn next_recipient_held(
                AND state = 'held' AND previous_chain_id = ?4",
             params![channel_id, sender_device, recipient_device, predecessor],
             |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get::<_, i64>(1)? as u64,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
+                Ok(RecipientHeldLink {
+                    message_id: row.get(0)?,
+                    device_sequence: row.get::<_, i64>(1)? as u64,
+                    chain_id: row.get(2)?,
+                    is_receipt: row.get(3)?,
+                    is_expired: row.get(4)?,
+                })
             },
         )
         .optional()
         .map_err(Into::into)
+}
+
+struct RecipientHeldLink {
+    message_id: String,
+    device_sequence: u64,
+    chain_id: String,
+    is_receipt: bool,
+    is_expired: bool,
 }
 
 fn held_message_by_id(
