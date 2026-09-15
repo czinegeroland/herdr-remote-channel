@@ -254,12 +254,29 @@ pub struct DelegateArgs {
     /// Recipient principal.
     #[arg(allow_hyphen_values = true)]
     pub recipient: String,
+    /// What is being asked for.
+    ///
+    /// Positional, like the message of `hrc send`. Section 22.4 sketches this
+    /// command with only `--title`, but `TaskBody` requires a description and
+    /// a receiver deciding whether to accept work needs more than a summary
+    /// line.
+    pub description: String,
     /// Short task title.
     #[arg(long, value_name = "TITLE")]
     pub title: String,
-    /// Context package to attach.
+    /// How the requester will judge the result. Repeatable.
+    #[arg(long = "criterion", value_name = "TEXT")]
+    pub criteria: Vec<String>,
+    /// A context package already shared, named by its identifier.
+    ///
+    /// Naming one discloses nothing: the package travels by `hrc context
+    /// send`, which is a trusted operation of its own. This only points at
+    /// something the recipient may already hold.
     #[arg(long, value_name = "ID")]
     pub context: Option<String>,
+    /// When the requester stops waiting, for example `7d`.
+    #[arg(long, value_name = "DURATION")]
+    pub due: Option<String>,
 }
 
 /// `hrc context ...`

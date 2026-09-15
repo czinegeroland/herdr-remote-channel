@@ -1624,6 +1624,69 @@ pub fn reply(context: &Context, message_id: &str, text: &str) -> Result<Value> {
     )
 }
 
+/// `hrc delegate`: ask someone to do something, without being able to make
+/// them.
+///
+/// The `task` kind is communication, never execution. `TaskBody` is proven to
+/// expose no command, script, argument or environment field, and nothing on
+/// the receiving side runs anything: a delegation arrives as a quarantined
+/// message like any other and waits for a human.
+///
+/// `--context` names a package rather than carrying one. Disclosure is `hrc
+/// context send`, which is a trusted operation with its own authorization, so
+/// pointing at a package a recipient may already hold stays on the agent-safe
+/// path where drafting a request belongs.
+pub fn delegate(
+    context: &Context,
+    recipient: &str,
+    title: &str,
+    description: &str,
+    criteria: &[String],
+    context_id: Option<&str>,
+    due: Option<&str>,
+) -> Result<Value> {
+    let due_by = match due {
+        Some(lifetime) => {
+            let database = Database::open(context.paths.database())?;
+            let now = database.utc_now()?;
+            Some(expiry_from(&now, lifetime)?)
+        }
+        None => None,
+    };
+
+    let body = hrc_protocol::delegation::TaskBody {
+        title: title.to_owned(),
+        description: description.to_owned(),
+        acceptance_criteria: criteria.to_vec(),
+        context_id: context_id.map(str::to_owned),
+        due_by,
+    };
+
+    // Validated here rather than left to the receiver. A task with an empty
+    // title or description is one nobody can act on, and finding that out
+    // after it is published to an append-only history helps no one.
+    body.validate()?;
+
+    let mut sent = compose_body(
+        context,
+        hrc_protocol::MessageKind::Task,
+        recipient,
+        serde_json::to_value(&body).map_err(|_| {
+            CliError::Core(hrc_core::CoreError::MalformedMessage {
+                reason: "the delegation body could not be serialized".into(),
+            })
+        })?,
+        None,
+        // The task's own `dueBy` is when the requester stops waiting, which
+        // is not the same as when the message should stop existing. Expiring
+        // the message would delete the request from the recipient's inbox.
+        None,
+    )?;
+
+    sent["title"] = Value::String(title.to_owned());
+    Ok(sent)
+}
+
 /// `hrc context draft`: keep an explicitly selected package locally.
 pub fn context_draft(
     context: &Context,
@@ -2201,6 +2264,220 @@ pub fn inbox(context: &Context, pending_only: bool) -> Result<Value> {
         "channelId": channel.channel_id,
         "entries": entries,
     }))
+}
+
+/// `hrc show`: everything known about one message, without disclosing a
+/// body nobody approved.
+///
+/// The rule is the same one the inbox and the plugin pane follow, and it is
+/// why this is not simply "print the message". An inbound body stays sealed
+/// until a human releases it through the trusted interface, so what this
+/// shows for a quarantined message is the agent-safe metadata and the reason
+/// the body is absent — never the body itself.
+///
+/// A message this installation sent is different in kind: the content was
+/// never quarantined, because it did not arrive from anyone. What matters
+/// there is where it got to, which is the outbox state and the receipts
+/// other devices published about it.
+pub fn show(context: &Context, message_id: &str) -> Result<Value> {
+    let database = Database::open(context.paths.database())?;
+    let channel = only_channel(&database)?;
+
+    let inbound = database
+        .inbox_entries(&channel.channel_id)?
+        .into_iter()
+        .find(|entry| entry.message_id == message_id);
+
+    if let Some(entry) = inbound {
+        // `released_content` returns something only for a decision that
+        // actually delivers. Keeping a message in the inbox and declining it
+        // are decisions too, and neither authorizes disclosure.
+        let released = released_content(&database, message_id)?;
+
+        return Ok(json!({
+            "status": "ok",
+            "messageId": entry.message_id,
+            "direction": "inbound",
+            "sender": entry.sender_principal,
+            "kind": entry.kind,
+            "threadId": entry.thread_id,
+            "inReplyTo": entry.in_reply_to,
+            "arrival": entry.arrival_sequence,
+            "expiresAt": entry.expires_at,
+            "disposition": entry.disposition,
+            "body": match released {
+                Some(text) => Value::String(text),
+                None => Value::Null,
+            },
+            "bodyWithheld": match entry.disposition.as_str() {
+                "quarantined" => Some("awaiting a decision in the trusted interface"),
+                "declined" => Some("declined"),
+                "expired" => Some("expired before a decision"),
+                _ => None,
+            },
+        }));
+    }
+
+    let Some(state) = database.outbox_state(message_id)? else {
+        return Err(CliError::NoSuchMessage {
+            message_id: message_id.to_owned(),
+        });
+    };
+
+    let receipts: Vec<Value> = database
+        .receipts_for(message_id)?
+        .into_iter()
+        .map(|receipt| {
+            json!({
+                "reporter": receipt.reporter_principal,
+                "device": receipt.reporter_device,
+                "state": receipt.state,
+                "rejectionCode": receipt.rejection_code,
+                "reportedAt": receipt.reported_at,
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "status": "ok",
+        "messageId": message_id,
+        "direction": "outbound",
+        "state": state.as_str(),
+        "receipts": receipts,
+    }))
+}
+
+/// `hrc wait`: block until a message reaches a state, or give up.
+///
+/// The states are the ones the rest of the system already records, not a new
+/// vocabulary: an outbound message reaches `published` in the outbox and then
+/// `delivered`, `read`, `accepted` or `rejected` when a recipient device says
+/// so, and an inbound message reaches a disposition when a human decides.
+///
+/// Each pass runs a real synchronization rather than only reading local
+/// state. Without one, waiting on a machine whose daemon is not running would
+/// block until the timeout no matter what the channel did — and section 17.1
+/// names explicit `hrc wait` as the reason a five-second poll exists.
+pub fn wait(
+    context: &Context,
+    message_id: &str,
+    until: Option<&str>,
+    timeout: Option<&str>,
+) -> Result<Value> {
+    const DEFAULT_STATE: &str = "delivered";
+    const DEFAULT_TIMEOUT_SECONDS: u64 = 300;
+
+    let wanted = until.unwrap_or(DEFAULT_STATE);
+    let limit = match timeout {
+        Some(value) => Duration::from_secs(parse_wait_timeout(value)?),
+        None => Duration::from_secs(DEFAULT_TIMEOUT_SECONDS),
+    };
+
+    // Section 17.1's explicit-wait interval, and the adapter's own minimum
+    // where that is longer: a provider's rate limit is a hard constraint and
+    // exceeding it throttles every channel the installation hosts.
+    let interval = {
+        let database = Database::open(context.paths.database())?;
+        let channel = only_channel(&database)?;
+        let transport = GitTransport::open(
+            context.paths.channel_transport(&channel.channel_id),
+            &channel.transport_locator,
+        )?;
+        let minimum =
+            Duration::from_secs(transport.capabilities().min_poll_interval_seconds as u64);
+        poll_interval(PollActivity::Waiting, minimum)
+    };
+
+    let started = std::time::Instant::now();
+
+    loop {
+        if let Some(state) = observed_state(context, message_id)?
+            && state == wanted
+        {
+            return Ok(json!({
+                "status": "ok",
+                "messageId": message_id,
+                "state": state,
+                "waitedSeconds": started.elapsed().as_secs(),
+            }));
+        }
+
+        if started.elapsed() >= limit {
+            // A timeout is not an error. The caller asked how things stand
+            // after a bounded wait, and "not yet" is an answer to that.
+            return Ok(json!({
+                "status": "ok",
+                "messageId": message_id,
+                "state": "timeout",
+                "waitedSeconds": started.elapsed().as_secs(),
+            }));
+        }
+
+        std::thread::sleep(interval);
+
+        // Failing to reach the transport is not a reason to stop waiting: the
+        // state may still arrive through a daemon running alongside this, and
+        // a caller that asked for a timeout asked to be told at the end of it.
+        let _ = sync_once(context);
+    }
+}
+
+/// The state a message is in now, in the vocabulary `hrc wait` accepts.
+///
+/// Receipts win over the outbox for an outbound message, because `published`
+/// is what this installation did and a receipt is what happened to it. The
+/// most advanced report is the one returned: a device that has read a message
+/// also received it, and reporting `delivered` after `read` would go
+/// backwards.
+fn observed_state(context: &Context, message_id: &str) -> Result<Option<String>> {
+    let database = Database::open(context.paths.database())?;
+    let channel = only_channel(&database)?;
+
+    if let Some(entry) = database
+        .inbox_entries(&channel.channel_id)?
+        .into_iter()
+        .find(|entry| entry.message_id == message_id)
+    {
+        return Ok(Some(entry.disposition));
+    }
+
+    let reported = database.receipts_for(message_id)?;
+    for state in ["rejected", "accepted", "read", "delivered"] {
+        if reported.iter().any(|receipt| receipt.state == state) {
+            return Ok(Some(state.to_owned()));
+        }
+    }
+
+    Ok(database
+        .outbox_state(message_id)?
+        .map(|state| state.as_str().to_owned()))
+}
+
+/// Parses `30s`, `5m`, or `2h` into seconds.
+///
+/// Separate from `parse_lifetime`, which governs invite and message expiry on
+/// the wire. That one deliberately has no seconds unit, because a lifetime
+/// measured in seconds is not a useful thing to publish; a wait measured in
+/// seconds is entirely reasonable.
+fn parse_wait_timeout(value: &str) -> Result<u64> {
+    let invalid = || CliError::InvalidLifetime {
+        value: value.to_owned(),
+    };
+
+    let value = value.trim();
+    let (digits, unit) = value.split_at(value.len().checked_sub(1).ok_or_else(invalid)?);
+    let amount: u64 = digits.parse().map_err(|_| invalid())?;
+
+    if amount == 0 {
+        return Err(invalid());
+    }
+
+    match unit {
+        "s" => Ok(amount),
+        "m" => Ok(amount * 60),
+        "h" => Ok(amount * 3_600),
+        _ => Err(invalid()),
+    }
 }
 
 /// `hrc thread`: one conversation in local arrival order.

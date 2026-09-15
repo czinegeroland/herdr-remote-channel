@@ -210,6 +210,24 @@ fn run(cli: &Cli, _path: &str) -> std::result::Result<Value, Failure> {
             }
         },
         Command::Inbox(args) => commands::inbox(&context, args.pending).map_err(Failure::from),
+        Command::Show(args) => commands::show(&context, &args.message_id).map_err(Failure::from),
+        Command::Delegate(args) => commands::delegate(
+            &context,
+            &args.recipient,
+            &args.title,
+            &args.description,
+            &args.criteria,
+            args.context.as_deref(),
+            args.due.as_deref(),
+        )
+        .map_err(Failure::from),
+        Command::Wait(args) => commands::wait(
+            &context,
+            &args.message_id,
+            args.until.as_deref(),
+            args.timeout.as_deref(),
+        )
+        .map_err(Failure::from),
         Command::Thread(args) => commands::thread(&context, &args.thread_id).map_err(Failure::from),
         Command::Join(join) => match (&join.invite_code, &join.action) {
             (Some(code), _) => commands::join(&context, code).map_err(Failure::from),
