@@ -950,7 +950,7 @@ fn stale_queued_ciphertext_waits_for_keys_then_reencrypts_for_the_new_roster() {
             message_id,
             &envelope.thread_id,
             &envelope.kind,
-            &[device_id.clone()],
+            std::slice::from_ref(&device_id),
         )
         .unwrap();
     drop(database);

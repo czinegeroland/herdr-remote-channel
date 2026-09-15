@@ -1344,7 +1344,7 @@ fn receive_messages(
                             // sender chain even if its report is invalid.
                             // Storage keeps it out of the inbox and therefore
                             // out of prompt-gate decisions and receipt replies.
-                            record_inbound_receipt(database, channel, &opened, now)?;
+                            record_inbound_receipt(database, channel, opened, now)?;
                         }
                         if let Some(reason) = malformed_context {
                             // A valid signature authenticates that this
@@ -1578,7 +1578,7 @@ fn compose_body(
                 Some(reservation.recipient_previous_chain_ids.clone());
             let reseal_plaintext = canonical::to_canonical_bytes(&envelope)?;
             let reseal_material =
-                hrc_crypto::encrypt_to(&[local_recipient.clone()], &reseal_plaintext)?;
+                hrc_crypto::encrypt_to(std::slice::from_ref(&local_recipient), &reseal_plaintext)?;
             let ciphertext = hrc_core::message::seal_with_predecessors(
                 &roster,
                 &device.signing_key(),
