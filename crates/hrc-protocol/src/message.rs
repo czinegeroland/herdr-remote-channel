@@ -12,6 +12,8 @@
 //! addressed. Git paths and commit metadata are never trusted as message
 //! metadata (section 18.0).
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::canonical;
@@ -30,6 +32,14 @@ pub const MAX_PLAINTEXT_BYTES: usize = 1024 * 1024;
 /// length to anyone who can see the repository — which, for a public
 /// channel, is everyone.
 const PADDING_BUCKETS: [usize; 6] = [1024, 4096, 16_384, 65_536, 262_144, MAX_PLAINTEXT_BYTES];
+
+/// The last message chain link observed by the sender for each recipient device.
+///
+/// The map is optional for wire compatibility with envelopes produced before
+/// recipient-scoped ordering was introduced. A present map is complete: its
+/// keys must exactly equal `recipientDeviceIds`, including a `null` value for
+/// a device that has no predecessor yet.
+pub type RecipientPredecessors = BTreeMap<String, Option<String>>;
 
 /// Where a message is addressed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,6 +103,13 @@ pub struct MessageEnvelope {
     /// The device set the sender encrypted to, and its commitment.
     #[serde(flatten)]
     pub recipients: RecipientDevices,
+    /// Per-recipient predecessor links for recipient-scoped ordering.
+    #[serde(
+        rename = "recipientPreviousChainIds",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub recipient_previous_chain_ids: Option<RecipientPredecessors>,
     /// Thread this message belongs to.
     #[serde(rename = "threadId")]
     pub thread_id: String,
@@ -137,6 +154,21 @@ impl MessageEnvelope {
 
         canonical::expect_hex_digest("channelId", &self.channel_id, 32)?;
         self.recipients.verify()?;
+        if let Some(predecessors) = &self.recipient_previous_chain_ids {
+            let keys = predecessors.keys().cloned().collect::<Vec<_>>();
+            if keys != self.recipients.device_ids {
+                return Err(ProtocolError::DerivedMismatch {
+                    field: "recipientPreviousChainIds",
+                });
+            }
+
+            for (device_id, predecessor) in predecessors {
+                canonical::expect_hex_digest("recipientPreviousChainIds", device_id, 32)?;
+                if let Some(predecessor) = predecessor {
+                    canonical::expect_hex_digest("recipientPreviousChainIds", predecessor, 32)?;
+                }
+            }
+        }
         crate::attachment::validate_attachments(&self.attachments)?;
 
         if self.message_id.is_empty() {
@@ -173,6 +205,16 @@ impl MessageEnvelope {
         self.expires_at
             .as_deref()
             .is_some_and(|expiry| expiry <= now)
+    }
+
+    /// Returns this recipient's predecessor when recipient ordering is present.
+    ///
+    /// The outer option distinguishes a legacy envelope with no recipient
+    /// ordering map from a new envelope whose entry is explicitly `null`.
+    pub fn recipient_predecessor(&self, device_id: &str) -> Option<Option<&str>> {
+        self.recipient_previous_chain_ids
+            .as_ref()
+            .map(|predecessors| predecessors.get(device_id).and_then(Option::as_deref))
     }
 }
 
@@ -218,6 +260,7 @@ mod tests {
                 endpoint: None,
             },
             recipients: RecipientDevices::new([device("a"), device("b")]).unwrap(),
+            recipient_previous_chain_ids: None,
             thread_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
             in_reply_to: None,
             kind: "note".into(),
@@ -242,6 +285,7 @@ mod tests {
         // PRD section 18.1 shows, not nested under a sub-object.
         assert!(value["recipientDeviceIds"].is_array());
         assert!(value["recipientDevicesHash"].is_string());
+        assert!(value.get("recipientPreviousChainIds").is_none());
         assert_eq!(value["kind"], "note");
 
         let decoded: MessageEnvelope = canonical::from_json_str(&encoded).unwrap();
@@ -268,6 +312,57 @@ mod tests {
         assert!(matches!(
             message.validate_shape().unwrap_err(),
             ProtocolError::DerivedMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn recipient_predecessors_round_trip_and_match_the_recipient_set() {
+        let mut message = envelope();
+        let previous = canonical::sha256_hex(b"previous");
+        message.recipient_previous_chain_ids = Some(BTreeMap::from([
+            (device("a"), None),
+            (device("b"), Some(previous.clone())),
+        ]));
+
+        message.validate_shape().unwrap();
+        assert_eq!(message.recipient_predecessor(&device("a")), Some(None));
+        assert_eq!(
+            message.recipient_predecessor(&device("b")),
+            Some(Some(previous.as_str()))
+        );
+
+        let encoded = canonical::to_canonical_json(&message).unwrap();
+        let decoded: MessageEnvelope = canonical::from_json_str(&encoded).unwrap();
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn recipient_predecessors_must_name_every_and_only_recipient() {
+        let mut message = envelope();
+        message.recipient_previous_chain_ids = Some(BTreeMap::from([(device("a"), None)]));
+
+        assert!(matches!(
+            message.validate_shape().unwrap_err(),
+            ProtocolError::DerivedMismatch {
+                field: "recipientPreviousChainIds"
+            }
+        ));
+    }
+
+    #[test]
+    fn recipient_predecessor_links_are_digests() {
+        let mut message = envelope();
+        message.recipient_previous_chain_ids = Some(BTreeMap::from([
+            (device("a"), None),
+            (device("b"), Some("not-a-chain-id".into())),
+        ]));
+
+        assert!(matches!(
+            message.validate_shape().unwrap_err(),
+            ProtocolError::Hex {
+                field: "recipientPreviousChainIds",
+                ..
+            }
         ));
     }
 

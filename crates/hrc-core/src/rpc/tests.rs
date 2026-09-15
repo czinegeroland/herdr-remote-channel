@@ -186,6 +186,7 @@ fn quarantined() -> QuarantinedMessage {
             b"device",
         )])
         .unwrap(),
+        recipient_previous_chain_ids: None,
         thread_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
         in_reply_to: None,
         kind: "question".into(),

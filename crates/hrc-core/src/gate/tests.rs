@@ -29,6 +29,7 @@ fn quarantined(kind: &str, endpoint: Option<&str>, ciphertext: &[u8]) -> Quarant
         },
         recipients: hrc_protocol::RecipientDevices::new([canonical::sha256_hex(b"device")])
             .unwrap(),
+        recipient_previous_chain_ids: None,
         thread_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
         in_reply_to: None,
         kind: kind.to_owned(),

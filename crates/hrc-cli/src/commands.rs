@@ -1059,25 +1059,14 @@ fn receive_for(
     let mut database = Database::open(context.paths.database())?;
     let received = receive_messages(&transport, &mut database, channel, identity.as_ref(), now)?;
 
-    // Only for what this pass accepted, so a message is reported once. A
-    // failure to report is not a failure to receive: the message is already
-    // recorded, and raising here would make an unreachable remote turn a
-    // successful receive into a failed synchronization.
-    if !received.is_empty() {
-        // A failure to report is not a failure to receive: the message is
-        // already recorded, and raising here would let an unreachable remote
-        // turn a successful receive into a failed synchronization.
-        let _ = publish_delivery_receipts(context, channel, &received, now);
-    }
-
     Ok(received)
 }
 
 /// Tells each sender that their messages arrived (PRD section 18.2).
 ///
-/// One receipt per sender rather than one per message, because that is what
-/// `ReceiptBody` is for and a channel that published a receipt per message
-/// would double its own traffic.
+/// Pending deliveries are recovered from durable inbox and audit records,
+/// then batched within the protocol's limit. A failed publication must not
+/// lose the obligation to report an already accepted message.
 ///
 /// Only `delivered` is reported here. `read` is a different claim — that a
 /// human opened it — and whether to make it the default is still open
@@ -1089,16 +1078,24 @@ fn receive_for(
 fn publish_delivery_receipts(
     context: &Context,
     channel: &hrc_storage::ChannelRecord,
-    received: &[String],
     now: &str,
 ) -> Result<()> {
     let database = Database::open(context.paths.database())?;
+    let reported: std::collections::HashSet<String> = database
+        .audit_entries(None)?
+        .into_iter()
+        .filter(|entry| {
+            entry.channel_id.as_deref() == Some(&channel.channel_id)
+                && entry.action == "delivery_receipt_queued"
+        })
+        .filter_map(|entry| entry.message_id)
+        .collect();
 
     let mut by_sender: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
 
     for entry in database.inbox_entries(&channel.channel_id)? {
-        if received.contains(&entry.message_id) {
+        if entry.disposition != "expired" && !reported.contains(&entry.message_id) {
             by_sender
                 .entry(entry.sender_principal)
                 .or_default()
@@ -1107,27 +1104,35 @@ fn publish_delivery_receipts(
     }
 
     for (sender, message_ids) in by_sender {
-        let body = hrc_core::receipt::build_receipt(
-            message_ids,
-            hrc_protocol::ReceiptState::Delivered,
-            now,
-        )?;
+        for batch in message_ids.chunks(hrc_protocol::receipt::MAX_REFERENCED_MESSAGES) {
+            let body = hrc_core::receipt::build_receipt(
+                batch.iter().cloned(),
+                hrc_protocol::ReceiptState::Delivered,
+                now,
+            )?;
+            let body = canonical::to_canonical_json(&body)?;
+            compose_body(
+                context,
+                hrc_protocol::MessageKind::Receipt,
+                &sender,
+                canonical::from_json_str(&body)?,
+                None,
+                None,
+            )?;
 
-        // A receipt body that will not serialize is a bug here rather than
-        // anything the sender did, and there is nothing useful to report to
-        // them about it, so this pass simply skips that sender.
-        let Ok(body) = serde_json::to_value(&body) else {
-            continue;
-        };
-
-        compose_body(
-            context,
-            hrc_protocol::MessageKind::Receipt,
-            &sender,
-            body,
-            None,
-            None,
-        )?;
+            // A crash before these markers may repeat a report, which the
+            // receiver deduplicates. Marking before queueing could lose it.
+            for message_id in batch {
+                database.append_audit(
+                    Some(&channel.channel_id),
+                    Some(message_id),
+                    "delivery_receipt_queued",
+                    None,
+                    None,
+                    now,
+                )?;
+            }
+        }
     }
 
     Ok(())
@@ -1151,6 +1156,10 @@ fn receive_messages(
 ) -> Result<Vec<String>> {
     let mut roster: Option<Roster> = None;
     let mut received = Vec::new();
+    // Rebuild the roster from genesis on every receive pass. The receive
+    // cursor decides whether a pass is necessary, but resuming the transport
+    // walk at an arbitrary data commit would leave `roster` empty until the
+    // next control object and silently skip intervening ciphertext.
     let mut cursor = None;
 
     loop {
@@ -1194,11 +1203,31 @@ fn receive_messages(
                         // an error: it was addressed to someone else, and a
                         // channel member seeing ciphertext they are not a
                         // recipient of is the ordinary case.
-                        let Ok(opened) =
-                            hrc_core::message::open(roster, identity, &bytes, roster.epoch(), now)
-                        else {
+                        let Ok(opened) = hrc_core::message::open_for_ordering(
+                            roster,
+                            identity,
+                            &bytes,
+                            roster.epoch(),
+                            now,
+                        ) else {
                             continue;
                         };
+                        let expired = opened.is_expired();
+                        let opened = opened.message();
+                        let local_recipient = roster
+                            .devices()
+                            .find(|device| {
+                                device.encryption_recipient == identity.recipient().to_string()
+                            })
+                            .map(|device| device.device_id.as_str());
+                        let recipient_previous_chain_id = local_recipient
+                            .and_then(|device_id| opened.envelope.recipient_predecessor(device_id))
+                            .flatten();
+                        let recipient_device = opened
+                            .envelope
+                            .recipient_previous_chain_ids
+                            .as_ref()
+                            .and(local_recipient);
 
                         let is_receipt =
                             opened.envelope.kind == hrc_protocol::MessageKind::Receipt.as_str();
@@ -1228,7 +1257,12 @@ fn receive_messages(
                         // the pending content. It owns the context lifecycle:
                         // trusted approval reveals/delivers this exact body,
                         // while agent-safe views never receive it.
-                        let body = if received_context.is_some() || malformed_context.is_some() {
+                        let body = if received_context.is_some()
+                            || malformed_context.is_some()
+                            || !matches!(
+                                opened.envelope.kind.as_str(),
+                                "note" | "question" | "answer"
+                            ) {
                             canonical::to_canonical_json(&opened.envelope.body)?
                         } else {
                             opened
@@ -1262,6 +1296,8 @@ fn receive_messages(
                                 device_sequence: opened.envelope.device_sequence,
                                 chain_id: &chain_id,
                                 previous_chain_id: opened.envelope.previous_chain_id.as_deref(),
+                                recipient_device,
+                                recipient_previous_chain_id,
                                 kind,
                                 thread_id: Some(&opened.envelope.thread_id),
                                 in_reply_to: opened.envelope.in_reply_to.as_deref(),
@@ -1272,6 +1308,7 @@ fn receive_messages(
                                 ciphertext_sha256: &opened.ciphertext_sha256,
                                 created_at: &opened.envelope.created_at,
                                 expires_at: opened.envelope.expires_at.as_deref(),
+                                expired,
                                 attachment_count: u32::try_from(opened.envelope.attachments.len())
                                     .unwrap_or(u32::MAX),
                                 attachment_bytes: opened.envelope.attachments.iter().fold(
@@ -1297,9 +1334,12 @@ fn receive_messages(
                             hrc_storage::InboundOutcome::ReceiptAccepted { released } => {
                                 received.extend(released);
                             }
+                            hrc_storage::InboundOutcome::ExpiredAccepted { released } => {
+                                received.extend(released);
+                            }
                             _ => {}
                         }
-                        if is_receipt {
+                        if is_receipt && !expired {
                             // A receipt's authenticated link must advance the
                             // sender chain even if its report is invalid.
                             // Storage keeps it out of the inbox and therefore
@@ -1324,14 +1364,19 @@ fn receive_messages(
             }
         }
 
+        cursor = page.cursor;
         if !page.more {
             break;
         }
-        cursor = page.cursor;
     }
 
     if let Some(roster) = roster {
         database.set_roster_progress(&channel.channel_id, roster.epoch(), roster.sequence())?;
+    }
+    if identity.is_some()
+        && let Some(cursor) = cursor
+    {
+        database.set_receive_cursor(&channel.channel_id, &cursor)?;
     }
 
     Ok(received)
@@ -1486,22 +1531,13 @@ fn compose_body(
 
     let payload_hash = canonical::canonical_sha256_hex(&body)?;
 
-    let reservation = database.allocate_outgoing(
-        &channel.channel_id,
-        &device_id,
-        &message_id,
-        roster.epoch(),
-        &payload_hash,
-        &now,
-    )?;
-
     let envelope = MessageEnvelope {
         version: hrc_protocol::PROTOCOL_VERSION,
         channel_id: channel.channel_id.clone(),
         roster_epoch: roster.epoch(),
         message_id: message_id.clone(),
-        device_sequence: reservation.device_sequence,
-        previous_chain_id: reservation.previous_chain_id.clone(),
+        device_sequence: 0,
+        previous_chain_id: None,
         created_at: now.clone(),
         expires_at: expires_at.clone(),
         to: hrc_protocol::Addressing {
@@ -1509,6 +1545,7 @@ fn compose_body(
             endpoint,
         },
         recipients: hrc_protocol::RecipientDevices::new([device_id.clone()])?,
+        recipient_previous_chain_ids: None,
         thread_id: thread_id.clone(),
         in_reply_to,
         kind: kind.as_str().to_owned(),
@@ -1518,37 +1555,50 @@ fn compose_body(
         padding: String::new(),
     };
 
-    let reseal_plaintext = canonical::to_canonical_bytes(&envelope)?;
-    let reseal_material =
-        hrc_crypto::encrypt_to(&[device.device_identity()?.recipient()], &reseal_plaintext)?;
-    // Derived before sealing and stored, because `accept_receipt` refuses a
-    // report from a device that was never addressed and can only do that
-    // against the sender's own record. Reading it back out of the published
-    // object instead would check a receipt against whatever the transport
-    // currently holds, so a rewritten history could validate its own
-    // receipts. `seal` performs the same derivation for the encryption, which
-    // is why this calls the same function rather than reimplementing it.
     let addressed: Vec<String> = hrc_core::message::intended_recipients(&roster, &envelope)?
         .into_iter()
         .map(|device| device.device_id.clone())
         .collect();
-
-    let ciphertext = hrc_core::message::seal(
-        &roster,
-        &device.signing_key(),
-        Signer {
-            principal_id: principal.signing_key().verifying_key().to_base64url(),
-            device_id: device_id.clone(),
+    let local_recipient = device.device_identity()?.recipient();
+    database.compose_outgoing(
+        &channel.channel_id,
+        &device_id,
+        &message_id,
+        roster.epoch(),
+        &payload_hash,
+        &thread_id,
+        kind.as_str(),
+        &addressed,
+        &now,
+        |reservation| {
+            let mut envelope = envelope.clone();
+            envelope.device_sequence = reservation.device_sequence;
+            envelope.previous_chain_id = reservation.previous_chain_id.clone();
+            envelope.recipient_previous_chain_ids =
+                Some(reservation.recipient_previous_chain_ids.clone());
+            let reseal_plaintext = canonical::to_canonical_bytes(&envelope)?;
+            let reseal_material =
+                hrc_crypto::encrypt_to(&[local_recipient.clone()], &reseal_plaintext)?;
+            let ciphertext = hrc_core::message::seal_with_predecessors(
+                &roster,
+                &device.signing_key(),
+                Signer {
+                    principal_id: principal.signing_key().verifying_key().to_base64url(),
+                    device_id: device_id.clone(),
+                },
+                envelope,
+                reservation.recipient_previous_chain_ids.clone(),
+            )?;
+            Ok::<_, CliError>(hrc_storage::OutgoingBuild {
+                ciphertext,
+                reseal_material,
+            })
         },
-        envelope,
     )?;
-
-    database.queue_outgoing_resealable(&message_id, &ciphertext, Some(&reseal_material), &now)?;
-    database.record_sent_facts(&message_id, &thread_id, kind.as_str(), &addressed)?;
 
     let outcomes = publish_pending_outgoing(
         &mut transport,
-        &database,
+        &mut database,
         &channel.channel_id,
         Some(&device),
         5,
@@ -2398,9 +2448,7 @@ pub fn wait(
     let started = std::time::Instant::now();
 
     loop {
-        if let Some(state) = observed_state(context, message_id)?
-            && state == wanted
-        {
+        if let Some(state) = reached_state(context, message_id, wanted)? {
             return Ok(json!({
                 "status": "ok",
                 "messageId": message_id,
@@ -2420,12 +2468,25 @@ pub fn wait(
             }));
         }
 
-        std::thread::sleep(interval);
+        std::thread::sleep(interval.min(limit.saturating_sub(started.elapsed())));
+        if started.elapsed() >= limit {
+            continue;
+        }
 
         // Failing to reach the transport is not a reason to stop waiting: the
         // state may still arrive through a daemon running alongside this, and
         // a caller that asked for a timeout asked to be told at the end of it.
-        let _ = sync_once(context);
+        if let Err(error) = sync_once(context) {
+            let database = Database::open(context.paths.database())?;
+            database.append_audit(
+                None,
+                Some(message_id),
+                "wait_sync_failed",
+                None,
+                Some(&error.to_string()),
+                &database.utc_now()?,
+            )?;
+        }
     }
 }
 
@@ -2436,28 +2497,60 @@ pub fn wait(
 /// most advanced report is the one returned: a device that has read a message
 /// also received it, and reporting `delivered` after `read` would go
 /// backwards.
-fn observed_state(context: &Context, message_id: &str) -> Result<Option<String>> {
+fn reached_state(context: &Context, message_id: &str, wanted: &str) -> Result<Option<String>> {
     let database = Database::open(context.paths.database())?;
     let channel = only_channel(&database)?;
+    let mut observed = Vec::new();
 
     if let Some(entry) = database
         .inbox_entries(&channel.channel_id)?
         .into_iter()
         .find(|entry| entry.message_id == message_id)
     {
-        return Ok(Some(entry.disposition));
+        observed.push(entry.disposition);
     }
 
     let reported = database.receipts_for(message_id)?;
     for state in ["rejected", "accepted", "read", "delivered"] {
         if reported.iter().any(|receipt| receipt.state == state) {
-            return Ok(Some(state.to_owned()));
+            observed.push(state.to_owned());
         }
     }
 
-    Ok(database
-        .outbox_state(message_id)?
-        .map(|state| state.as_str().to_owned()))
+    if let Some(state) = database.outbox_state(message_id)? {
+        observed.push(state.as_str().to_owned());
+    }
+    Ok(observed
+        .iter()
+        .any(|state| state_reaches(state, wanted))
+        .then(|| observed.into_iter().next())
+        .flatten())
+}
+
+fn state_reaches(observed: &str, wanted: &str) -> bool {
+    if observed == wanted {
+        return true;
+    }
+    match wanted {
+        "reserved" => matches!(
+            observed,
+            "queued" | "publishing" | "published" | "delivered" | "read" | "accepted" | "rejected"
+        ),
+        "queued" => matches!(
+            observed,
+            "publishing" | "published" | "delivered" | "read" | "accepted" | "rejected"
+        ),
+        "publishing" | "published" => {
+            matches!(
+                observed,
+                "published" | "delivered" | "read" | "accepted" | "rejected"
+            )
+        }
+        "delivered" => matches!(observed, "read" | "accepted"),
+        "read" => observed == "accepted",
+        "quarantined" => matches!(observed, "approved" | "edited" | "declined" | "expired"),
+        _ => false,
+    }
 }
 
 /// Parses `30s`, `5m`, or `2h` into seconds.
@@ -2472,7 +2565,9 @@ fn parse_wait_timeout(value: &str) -> Result<u64> {
     };
 
     let value = value.trim();
-    let (digits, unit) = value.split_at(value.len().checked_sub(1).ok_or_else(invalid)?);
+    let (digits, unit) = value
+        .split_at_checked(value.len().checked_sub(1).ok_or_else(invalid)?)
+        .ok_or_else(invalid)?;
     let amount: u64 = digits.parse().map_err(|_| invalid())?;
 
     if amount == 0 {
@@ -2481,8 +2576,8 @@ fn parse_wait_timeout(value: &str) -> Result<u64> {
 
     match unit {
         "s" => Ok(amount),
-        "m" => Ok(amount * 60),
-        "h" => Ok(amount * 3_600),
+        "m" => amount.checked_mul(60).ok_or_else(invalid),
+        "h" => amount.checked_mul(3_600).ok_or_else(invalid),
         _ => Err(invalid()),
     }
 }
@@ -2822,7 +2917,7 @@ pub fn audit(context: &Context, since: Option<&str>) -> Result<Value> {
 
 /// `hrc sync --once`: run one synchronization pass for every configured channel.
 pub fn sync_once(context: &Context) -> Result<Value> {
-    let database = Database::open(context.paths.database())?;
+    let mut database = Database::open(context.paths.database())?;
     let now = database.utc_now()?;
 
     // Reap before fetching. A message that lapsed while this installation
@@ -2832,7 +2927,7 @@ pub fn sync_once(context: &Context) -> Result<Value> {
 
     let mut channels = Vec::new();
     for channel in database.channels()? {
-        channels.push(sync_git_channel(context, &database, &channel, &now)?);
+        channels.push(sync_git_channel(context, &mut database, &channel, &now)?);
     }
 
     Ok(json!({
@@ -2868,14 +2963,14 @@ fn sweep_expired(database: &Database, now: &str) -> Result<Vec<String>> {
 
 /// `hrc daemon`: stay resident and keep synchronizing in the background.
 pub fn daemon_tick(context: &Context) -> Result<Value> {
-    let database = Database::open(context.paths.database())?;
+    let mut database = Database::open(context.paths.database())?;
     let now = database.utc_now()?;
     let expired = sweep_expired(&database, &now)?;
     let mut channels = Vec::new();
     let mut healthy = true;
 
     for channel in database.channels()? {
-        match sync_git_channel(context, &database, &channel, &now) {
+        match sync_git_channel(context, &mut database, &channel, &now) {
             Ok(value) => channels.push(value),
             Err(error) => {
                 healthy = false;
@@ -3308,6 +3403,7 @@ impl DaemonBroker {
                         recipients: hrc_protocol::RecipientDevices::new([row
                             .sender_device
                             .clone()])?,
+                        recipient_previous_chain_ids: None,
                         thread_id: String::new(),
                         in_reply_to: None,
                         kind: row.kind,
@@ -3653,7 +3749,7 @@ fn format_audit_entry(entry: &hrc_storage::AuditEntry) -> String {
 
 fn sync_git_channel(
     context: &Context,
-    database: &Database,
+    database: &mut Database,
     channel: &hrc_storage::ChannelRecord,
     now: &str,
 ) -> Result<Value> {
@@ -3689,8 +3785,6 @@ fn sync_git_channel(
         Err(hrc_transport::TransportError::NoSuchGroup) => None,
         Err(error) => return Err(error.into()),
     };
-    let local_missing = local_head.is_none();
-
     if remote_head.is_none() {
         let error = hrc_core::CoreError::Transport(
             "the remote channel branch disappeared after registration".into(),
@@ -3716,7 +3810,7 @@ fn sync_git_channel(
         validate_trusted_cursor(&transport, database, channel, now)?;
     }
 
-    let received = if remote_changed || local_missing {
+    let received = if channel.receive_cursor != remote_head {
         receive_for(context, channel, now).map_err(|error| {
             halt_if_received_history_is_invalid(database, &channel.channel_id, error, now)
         })?
@@ -3757,6 +3851,34 @@ fn sync_git_channel(
         now,
     )?;
 
+    let receipt_error = if context.passphrase.is_some() {
+        match publish_delivery_receipts(context, channel, now) {
+            Ok(()) => None,
+            Err(error) => {
+                let detail = error.to_string();
+                database.append_audit(
+                    Some(&channel.channel_id),
+                    None,
+                    "delivery_receipt_deferred",
+                    None,
+                    Some(&detail),
+                    now,
+                )?;
+                Some(detail)
+            }
+        }
+    } else {
+        None
+    };
+    let final_cursor = transport.open_group()?.revision;
+    if let Some(cursor) = final_cursor.as_deref() {
+        // Locally published commits are trusted history too. Recording the
+        // final local head makes a later remote rollback of our own message
+        // or receipt visible even when the remote lands exactly on the
+        // cursor that preceded that publication.
+        database.set_sync_cursor(&channel.channel_id, cursor)?;
+    }
+
     let published_messages = published
         .iter()
         .flat_map(|outcome| outcome.published.iter().cloned())
@@ -3784,13 +3906,14 @@ fn sync_git_channel(
         "fetchedControlObjects": fetch.as_ref().map(|outcome| outcome.control_objects).unwrap_or(0),
         "fetchedMessageObjects": fetch.as_ref().map(|outcome| outcome.message_objects).unwrap_or(0),
         "receivedMessages": received,
-        "cursor": fetch.and_then(|outcome| outcome.cursor),
+        "receiptError": receipt_error,
+        "cursor": final_cursor.or_else(|| fetch.and_then(|outcome| outcome.cursor)),
     }))
 }
 
 fn publish_pending_outgoing(
     transport: &mut GitTransport,
-    database: &Database,
+    database: &mut Database,
     channel_id: &str,
     device: Option<&DeviceSecrets>,
     max_attempts: u32,
@@ -3830,7 +3953,7 @@ fn publish_pending_outgoing(
 
 fn publish_outgoing(
     transport: &mut GitTransport,
-    database: &Database,
+    database: &mut Database,
     channel_id: &str,
     mut outgoing: PendingOutgoing,
     device: Option<&DeviceSecrets>,
@@ -3846,7 +3969,7 @@ fn publish_outgoing(
         database,
         channel_id,
         &message_id,
-        |transport| {
+        |transport, database| {
             let channel = database.channel(channel_id)?.ok_or_else(|| {
                 hrc_core::CoreError::UnknownChannelState {
                     channel_id: channel_id.to_owned(),
@@ -3904,7 +4027,7 @@ fn publish_outgoing(
                 });
             }
 
-            if outgoing.roster_epoch < roster.epoch() {
+            if outgoing.roster_epoch < roster.epoch() || outgoing.recipient_order_stale {
                 let Some(device) = device else {
                     return Ok(hrc_core::sync::PreparedPublication::Defer);
                 };
@@ -3917,21 +4040,51 @@ fn publish_outgoing(
                     return Ok(hrc_core::sync::PreparedPublication::Defer);
                 }
 
-                let ciphertext = hrc_core::message::reseal_outgoing(
-                    &roster,
-                    &device.device_identity()?,
-                    &device.signing_key(),
-                    &outgoing,
-                )?;
-                database.replace_outgoing_ciphertext(
+                let material = outgoing.reseal_material.as_deref().ok_or_else(|| {
+                    hrc_core::CoreError::OutboxMessageMismatch {
+                        message_id: outgoing.message_id.clone(),
+                        field: "re-encryption material",
+                    }
+                })?;
+                let identity = device.device_identity()?;
+                let plaintext = identity.decrypt(material)?;
+                let envelope: MessageEnvelope =
+                    canonical::from_json_str(std::str::from_utf8(&plaintext).map_err(|_| {
+                        hrc_core::CoreError::MalformedMessage {
+                            reason: "protected outbox material is not UTF-8".into(),
+                        }
+                    })?)?;
+                let recipients = hrc_core::message::intended_recipients(&roster, &envelope)?
+                    .into_iter()
+                    .map(|recipient| recipient.device_id.clone())
+                    .collect::<Vec<_>>();
+                let mut replacement = None;
+                database.reseal_outgoing(
                     &outgoing.message_id,
                     outgoing.roster_epoch,
                     roster.epoch(),
-                    &ciphertext,
+                    &recipients,
                     now,
+                    |stored, predecessors| {
+                        let ciphertext = hrc_core::message::reseal_outgoing_with_predecessors(
+                            &roster,
+                            &identity,
+                            &device.signing_key(),
+                            stored,
+                            predecessors.clone(),
+                        )?;
+                        replacement = Some(ciphertext.clone());
+                        Ok::<_, hrc_core::CoreError>(ciphertext)
+                    },
                 )?;
+                let ciphertext =
+                    replacement.ok_or_else(|| hrc_core::CoreError::OutboxMessageMismatch {
+                        message_id: outgoing.message_id.clone(),
+                        field: "replacement ciphertext",
+                    })?;
                 outgoing.roster_epoch = roster.epoch();
                 outgoing.ciphertext = ciphertext;
+                outgoing.recipient_order_stale = false;
                 known_ciphertexts.push(outgoing.ciphertext.clone());
             }
 

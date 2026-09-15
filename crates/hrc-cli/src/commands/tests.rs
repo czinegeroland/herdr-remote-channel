@@ -50,6 +50,326 @@ fn message(name: &str) -> PublishObject {
     }
 }
 
+fn messaging_home() -> (tempfile::TempDir, Context, String, String) {
+    let (directory, context) = home();
+    let identity = init(&context).unwrap();
+    let remote = directory.path().join("remote.git");
+    bare_remote(&remote);
+    let channel = create(&context, remote.to_str().unwrap(), Some("Test channel")).unwrap();
+    (
+        directory,
+        context,
+        channel["channelId"].as_str().unwrap().to_owned(),
+        identity["principalKey"].as_str().unwrap().to_owned(),
+    )
+}
+
+fn admitted_peer(admin: &Context, root: &Path, name: &str) -> (Context, String) {
+    let context = Context {
+        paths: Paths::at(root.join(name)),
+        passphrase: admin.passphrase.clone(),
+    };
+    let identity = init(&context).unwrap();
+    let invite = invite_create(admin, name, "24h").unwrap();
+    let joined = join(&context, invite["inviteCode"].as_str().unwrap()).unwrap();
+    admit_join(admin, joined["requestId"].as_str().unwrap()).unwrap();
+    (
+        context,
+        identity["principalKey"].as_str().unwrap().to_owned(),
+    )
+}
+
+#[test]
+fn a_successful_send_after_a_refusal_still_arrives() {
+    let (_directory, context, channel_id, principal) = messaging_home();
+    assert!(send(&context, "not-a-member", "invalid recipient", None).is_err());
+    assert!(
+        send(
+            &context,
+            &format!("{principal}/INVALID"),
+            "invalid endpoint",
+            None
+        )
+        .is_err()
+    );
+
+    let sent = send(&context, &principal, "the next valid message", None).unwrap();
+    sync_once(&context).unwrap();
+    let database = Database::open(context.paths.database()).unwrap();
+    let entries = database.inbox_entries(&channel_id).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].message_id, sent["messageId"].as_str().unwrap());
+    assert!(database.held_inbound(&channel_id).unwrap().is_empty());
+}
+
+#[test]
+fn private_conversations_and_receipts_do_not_block_other_recipients() {
+    let (directory, alice, channel_id, alice_id) = messaging_home();
+    let (bob, bob_id) = admitted_peer(&alice, directory.path(), "bob");
+    let (carol, carol_id) = admitted_peer(&alice, directory.path(), "carol");
+
+    let first = send(&alice, &bob_id, "only Bob can read this", None).unwrap();
+    let middle = send(&alice, &carol_id, "only Carol can read this", None).unwrap();
+    let last = send(&alice, &bob_id, "Bob receives this too", None).unwrap();
+    sync_once(&bob).unwrap();
+    sync_once(&carol).unwrap();
+    sync_once(&alice).unwrap();
+
+    let bob_db = Database::open(bob.paths.database()).unwrap();
+    let bob_entries = bob_db.inbox_entries(&channel_id).unwrap();
+    assert_eq!(
+        bob_entries
+            .iter()
+            .map(|entry| entry.message_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            first["messageId"].as_str().unwrap(),
+            last["messageId"].as_str().unwrap()
+        ]
+    );
+    let carol_db = Database::open(carol.paths.database()).unwrap();
+    let carol_entries = carol_db.inbox_entries(&channel_id).unwrap();
+    assert_eq!(carol_entries.len(), 1);
+    assert_eq!(
+        carol_entries[0].message_id,
+        middle["messageId"].as_str().unwrap()
+    );
+
+    // Bob already sent Alice a receipt. Carol must not need to decrypt it.
+    let cross = send(&bob, &carol_id, "a new conversation after a receipt", None).unwrap();
+    sync_once(&carol).unwrap();
+    assert!(
+        carol_db
+            .inbox_entries(&channel_id)
+            .unwrap()
+            .iter()
+            .any(|entry| entry.message_id == cross["messageId"].as_str().unwrap()),
+        "Carol inbox: {:?}; held: {:?}",
+        carol_db.inbox_entries(&channel_id).unwrap(),
+        carol_db.held_inbound(&channel_id).unwrap()
+    );
+    assert!(carol_db.held_inbound(&channel_id).unwrap().is_empty());
+    assert!(bob_db.held_inbound(&channel_id).unwrap().is_empty());
+    let alice_db = Database::open(alice.paths.database()).unwrap();
+    for sent in [&first, &middle, &last] {
+        assert!(
+            !alice_db
+                .receipts_for(sent["messageId"].as_str().unwrap())
+                .unwrap()
+                .is_empty()
+        );
+    }
+    assert_ne!(alice_id, bob_id);
+}
+
+#[test]
+fn unlocking_receives_downloaded_messages_without_another_remote_commit() {
+    let (_directory, context, channel_id, principal) = messaging_home();
+    let sent = send(&context, &principal, "arrived while locked", None).unwrap();
+    let locked = Context {
+        paths: context.paths.clone(),
+        passphrase: None,
+    };
+    sync_once(&locked).unwrap();
+    let database = Database::open(context.paths.database()).unwrap();
+    assert!(database.inbox_entries(&channel_id).unwrap().is_empty());
+
+    let unlocked = sync_once(&context).unwrap();
+    assert_eq!(unlocked["channels"][0]["remoteChanged"], false);
+    let entries = database.inbox_entries(&channel_id).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].message_id, sent["messageId"].as_str().unwrap());
+}
+
+#[test]
+fn an_expired_predecessor_does_not_hide_the_next_live_message() {
+    let (_directory, context, channel_id, principal) = messaging_home();
+    let expired = send(&context, &principal, "no longer actionable", Some("1m")).unwrap();
+    let live = send(&context, &principal, "still actionable", None).unwrap();
+    let mut database = Database::open(context.paths.database()).unwrap();
+    let channel = database.channel(&channel_id).unwrap().unwrap();
+    let now = expiry_from(&database.utc_now().unwrap(), "2m").unwrap();
+    let transport = GitTransport::open(
+        context.paths.channel_transport(&channel_id),
+        &channel.transport_locator,
+    )
+    .unwrap();
+    let device: DeviceSecrets = context.key_store().unwrap().load(DEVICE_KEY_NAME).unwrap();
+    receive_messages(
+        &transport,
+        &mut database,
+        &channel,
+        Some(&device.device_identity().unwrap()),
+        &now,
+    )
+    .unwrap();
+    database.sweep_expired(&now).unwrap();
+
+    let entries = database.inbox_entries(&channel_id).unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(
+        entries[0].message_id,
+        expired["messageId"].as_str().unwrap()
+    );
+    assert_eq!(entries[0].disposition, "expired");
+    assert_eq!(entries[1].message_id, live["messageId"].as_str().unwrap());
+    assert_eq!(entries[1].disposition, "quarantined");
+    let pending = database.pending_inbound().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].body.contains("still actionable"));
+}
+
+#[test]
+fn delegation_content_survives_trusted_preview_and_approved_delivery() {
+    let (_directory, context, _channel_id, principal) = messaging_home();
+    let sent = delegate(
+        &context,
+        &principal,
+        "Review the retry logic",
+        "Confirm that retries stop after a minute",
+        &["Retries are bounded".into()],
+        Some("ctx-already-shared"),
+        None,
+    )
+    .unwrap();
+    let message_id = sent["messageId"].as_str().unwrap();
+    sync_once(&context).unwrap();
+    assert!(show(&context, message_id).unwrap()["body"].is_null());
+    let ledger = Mutex::new(hrc_core::rpc::ContextAuthorizationLedger::new());
+    let preview = handle_trusted_request(
+        &context,
+        &ledger,
+        TrustedRequest::PreviewPending {
+            message_id: message_id.to_owned(),
+        },
+    );
+    assert_eq!(preview["status"], "ok", "{preview}");
+    let body: Value = canonical::from_json_str(preview["body"].as_str().unwrap()).unwrap();
+    assert_eq!(body["title"], "Review the retry logic");
+    assert_eq!(
+        body["description"],
+        "Confirm that retries stop after a minute"
+    );
+    assert_eq!(body["acceptanceCriteria"][0], "Retries are bounded");
+    assert_eq!(body["contextId"], "ctx-already-shared");
+
+    let approved = handle_trusted_request(
+        &context,
+        &ledger,
+        TrustedRequest::Approve {
+            message_id: message_id.to_owned(),
+            decision: hrc_core::rpc::WireDecision::DeliverToAgent {
+                agent: "reviewer".into(),
+            },
+            expires_at: "2099-01-01T00:00:00Z".into(),
+        },
+    );
+    assert_eq!(approved["status"], "ok", "{approved}");
+    let shown = show(&context, message_id).unwrap();
+    let delivered = shown["body"].as_str().unwrap();
+    assert!(delivered.contains("Review the retry logic"));
+    assert!(delivered.contains("Confirm that retries stop after a minute"));
+    assert!(delivered.contains("Retries are bounded"));
+}
+
+#[test]
+fn wait_returns_the_advanced_report_when_earlier_milestones_are_reached() {
+    let (_directory, context, channel_id, principal) = messaging_home();
+    let sent = send(
+        &context,
+        &principal,
+        "a message with advanced receipts",
+        None,
+    )
+    .unwrap();
+    let message_id = sent["messageId"].as_str().unwrap();
+    let database = Database::open(context.paths.database()).unwrap();
+    let now = database.utc_now().unwrap();
+    for state in ["delivered", "read", "accepted"] {
+        database
+            .record_receipt(
+                &channel_id,
+                &hrc_storage::RecordedReceipt {
+                    message_id: message_id.into(),
+                    reporter_principal: principal.clone(),
+                    reporter_device: "reporting-device".into(),
+                    state: state.into(),
+                    rejection_code: None,
+                    reported_at: now.clone(),
+                },
+                &now,
+            )
+            .unwrap();
+        for wanted in ["published", "delivered"] {
+            let waited = wait(&context, message_id, Some(wanted), Some("1s")).unwrap();
+            assert_eq!(waited["state"], state);
+        }
+    }
+    assert!(!state_reaches("rejected", "accepted"));
+    assert!(!state_reaches("rejected", "delivered"));
+    assert!(!state_reaches("declined", "approved"));
+    assert!(!state_reaches("published", "delivered"));
+}
+
+#[test]
+fn wait_timeouts_are_bounded_and_malformed_durations_do_not_panic() {
+    let (_directory, context, _channel_id, principal) = messaging_home();
+    let sent = send(&context, &principal, "not yet accepted", None).unwrap();
+    let started = std::time::Instant::now();
+    let waited = wait(
+        &context,
+        sent["messageId"].as_str().unwrap(),
+        Some("accepted"),
+        Some("1s"),
+    )
+    .unwrap();
+    assert_eq!(waited["state"], "timeout");
+    assert!(started.elapsed() < Duration::from_secs(3));
+    for value in [
+        "1\u{00e9}",
+        "18446744073709551615h",
+        "18446744073709551615m",
+        "0s",
+    ] {
+        assert!(parse_wait_timeout(value).is_err(), "{value}");
+    }
+}
+
+#[test]
+fn a_failed_receipt_is_retried_without_redelivering_the_message() {
+    let (directory, context, channel_id, principal) = messaging_home();
+    let sent = send(
+        &context,
+        &principal,
+        "receipt must survive a failed attempt",
+        None,
+    )
+    .unwrap();
+    let database = Database::open(context.paths.database()).unwrap();
+    let channel = database.channel(&channel_id).unwrap().unwrap();
+    let now = database.utc_now().unwrap();
+    receive_for(&context, &channel, &now).unwrap();
+
+    let remote = directory.path().join("remote.git");
+    let offline = directory.path().join("offline.git");
+    std::fs::rename(&remote, &offline).unwrap();
+    assert!(publish_delivery_receipts(&context, &channel, &now).is_err());
+    std::fs::rename(&offline, &remote).unwrap();
+    sync_once(&context).unwrap();
+    sync_once(&context).unwrap();
+    assert_eq!(database.inbox_entries(&channel_id).unwrap().len(), 1);
+    assert!(
+        !database
+            .receipts_for(sent["messageId"].as_str().unwrap())
+            .unwrap()
+            .is_empty(),
+        "sent facts: {:?}; held: {:?}; audit: {:?}",
+        database.sent_messages(&channel_id).unwrap(),
+        database.held_inbound(&channel_id).unwrap(),
+        database.audit_entries(None).unwrap()
+    );
+}
+
 #[test]
 fn init_creates_keys_and_state() {
     let (_directory, context) = home();
@@ -70,6 +390,101 @@ fn init_creates_keys_and_state() {
 
     assert!(context.paths.database().is_file());
     assert!(context.paths.keys().is_dir());
+}
+
+#[test]
+fn a_backlog_larger_than_one_receipt_is_reported_completely() {
+    let (_directory, context, channel_id, principal) = messaging_home();
+    let mut database = Database::open(context.paths.database()).unwrap();
+    let channel = database.channel(&channel_id).unwrap().unwrap();
+    let now = database.utc_now().unwrap();
+    let transport = GitTransport::open(
+        context.paths.channel_transport(&channel_id),
+        &channel.transport_locator,
+    )
+    .unwrap();
+    let (roster, _) = load_roster(&transport, &channel_id).unwrap();
+    let device: DeviceSecrets = context.key_store().unwrap().load(DEVICE_KEY_NAME).unwrap();
+    let device_id = local_device_id(&roster, &device).unwrap();
+    let count = hrc_protocol::receipt::MAX_REFERENCED_MESSAGES + 1;
+    let mut previous = None;
+    let mut expected = std::collections::BTreeSet::new();
+    for sequence in 1..=count {
+        let message_id = format!("backlog-{sequence}");
+        let chain_id =
+            hrc_storage::chain_id_for(&channel_id, &device_id, sequence as u64, &message_id)
+                .unwrap();
+        database
+            .record_inbound(
+                &hrc_storage::InboundMessage {
+                    channel_id: &channel_id,
+                    message_id: &message_id,
+                    sender_principal: &principal,
+                    sender_device: &device_id,
+                    device_sequence: sequence as u64,
+                    chain_id: &chain_id,
+                    previous_chain_id: previous.as_deref(),
+                    recipient_device: None,
+                    recipient_previous_chain_id: None,
+                    kind: "note",
+                    thread_id: Some(&message_id),
+                    in_reply_to: None,
+                    roster_epoch: roster.epoch(),
+                    endpoint: None,
+                    ciphertext_bytes: 1,
+                    plaintext_bytes: 1,
+                    ciphertext_sha256: &message_id,
+                    created_at: &now,
+                    expires_at: None,
+                    expired: false,
+                    attachment_count: 0,
+                    attachment_bytes: 0,
+                    prompt_request: false,
+                    body: b"message already accepted",
+                    ciphertext: b"ciphertext already verified",
+                    context: None,
+                },
+                &now,
+            )
+            .unwrap();
+        expected.insert(message_id);
+        previous = Some(chain_id);
+    }
+
+    publish_delivery_receipts(&context, &channel, &now).unwrap();
+    let mut reported = std::collections::BTreeSet::new();
+    let mut receipts = 0;
+    let identity = device.device_identity().unwrap();
+    for publication in transport.fetch(None, 100).unwrap().publications {
+        for object in publication.objects {
+            if object.class != ObjectClass::Message {
+                continue;
+            }
+            let bytes = transport.get_object(&object.name, &object.sha256).unwrap();
+            let opened =
+                hrc_core::message::open(&roster, &identity, &bytes, roster.epoch(), &now).unwrap();
+            assert_eq!(opened.envelope.kind, "receipt");
+            let receipt: hrc_protocol::receipt::ReceiptBody =
+                serde_json::from_value(opened.envelope.body).unwrap();
+            receipt.validate().unwrap();
+            assert!(
+                receipt.referenced_message_ids.len()
+                    <= hrc_protocol::receipt::MAX_REFERENCED_MESSAGES
+            );
+            for message_id in receipt.referenced_message_ids {
+                assert!(
+                    reported.insert(message_id),
+                    "a batch repeated an identifier"
+                );
+            }
+            receipts += 1;
+        }
+    }
+    assert_eq!(receipts, 2);
+    assert_eq!(reported, expected);
+    let head = transport.remote_head().unwrap();
+    publish_delivery_receipts(&context, &channel, &now).unwrap();
+    assert_eq!(transport.remote_head().unwrap(), head);
 }
 
 #[test]
@@ -498,6 +913,7 @@ fn stale_queued_ciphertext_waits_for_keys_then_reencrypts_for_the_new_roster() {
             endpoint: Some("reviewer".into()),
         },
         recipients: hrc_protocol::RecipientDevices::new([device_id.clone()]).unwrap(),
+        recipient_previous_chain_ids: None,
         thread_id: "thread-before-epoch-change".into(),
         in_reply_to: Some("earlier-message".into()),
         kind: hrc_protocol::MessageKind::Note.as_str().into(),
@@ -527,6 +943,14 @@ fn stale_queued_ciphertext_waits_for_keys_then_reencrypts_for_the_new_roster() {
             &old_ciphertext,
             Some(&reseal_material),
             created_at,
+        )
+        .unwrap();
+    database
+        .record_sent_facts(
+            message_id,
+            &envelope.thread_id,
+            &envelope.kind,
+            &[device_id.clone()],
         )
         .unwrap();
     drop(database);
@@ -614,6 +1038,29 @@ fn stale_queued_ciphertext_waits_for_keys_then_reencrypts_for_the_new_roster() {
     assert_eq!(
         canonical::canonical_sha256_hex(&opened.envelope.body).unwrap(),
         payload_hash
+    );
+
+    sync_once(&joiner).unwrap();
+    sync_once(&context).unwrap();
+    let database = Database::open(context.paths.database()).unwrap();
+    let new_device_id = local_device_id(&new_roster, &joiner_device).unwrap();
+    assert!(
+        database
+            .sent_messages(&channel_id)
+            .unwrap()
+            .iter()
+            .find(|sent| sent.message_id == message_id)
+            .unwrap()
+            .recipient_device_ids
+            .contains(&new_device_id)
+    );
+    assert!(
+        database.receipts_for(message_id).unwrap().iter()
+            .any(|receipt| receipt.reporter_device == new_device_id && receipt.state == "delivered"),
+        "the newly addressed device's real receipt must be accepted after resealing; sent facts: {:?}; held: {:?}; audit: {:?}",
+        database.sent_messages(&channel_id).unwrap(),
+        database.held_inbound(&channel_id).unwrap(),
+        database.audit_entries(None).unwrap()
     );
 }
 

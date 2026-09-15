@@ -36,6 +36,7 @@ fn receipt_from(device: &str) -> QuarantinedMessage {
         },
         recipients: hrc_protocol::RecipientDevices::new([canonical::sha256_hex(b"alice-device")])
             .unwrap(),
+        recipient_previous_chain_ids: None,
         thread_id: THREAD.into(),
         in_reply_to: None,
         kind: "receipt".into(),

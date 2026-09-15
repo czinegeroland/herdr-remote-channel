@@ -11,6 +11,10 @@ const CHANNEL: &str = "channel-1";
 const DEVICE: &str = "device-1";
 const NOW: &str = "2026-09-13T00:00:00Z";
 
+fn recipient(seed: &str) -> String {
+    canonical::sha256_hex(seed.as_bytes())
+}
+
 /// A database with one registered channel.
 fn database() -> Database {
     let database = Database::open_in_memory().unwrap();
@@ -144,6 +148,7 @@ fn channel_state_round_trips() {
     assert_eq!(record.roster_epoch, 0);
     assert_eq!(record.control_sequence, 0);
     assert_eq!(record.sync_cursor, None);
+    assert_eq!(record.receive_cursor, None);
     assert_eq!(record.halted_reason, None);
 }
 
@@ -152,11 +157,13 @@ fn roster_progress_and_cursor_are_persisted() {
     let database = database();
     database.set_roster_progress(CHANNEL, 4, 9).unwrap();
     database.set_sync_cursor(CHANNEL, "commit-abc").unwrap();
+    database.set_receive_cursor(CHANNEL, "commit-body").unwrap();
 
     let record = database.channel(CHANNEL).unwrap().unwrap();
     assert_eq!(record.roster_epoch, 4);
     assert_eq!(record.control_sequence, 9);
     assert_eq!(record.sync_cursor.as_deref(), Some("commit-abc"));
+    assert_eq!(record.receive_cursor.as_deref(), Some("commit-body"));
 }
 
 #[test]
@@ -340,6 +347,76 @@ fn concurrent_callers_never_receive_the_same_sequence() {
 }
 
 #[test]
+fn concurrent_atomic_composes_form_one_recipient_chain() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite");
+    {
+        let database = Database::open(&path).unwrap();
+        database
+            .insert_channel(CHANNEL, "git", "owner/channel", "Test channel", NOW)
+            .unwrap();
+    }
+
+    const PER_THREAD: usize = 10;
+    const THREADS: usize = 4;
+    let recipient = recipient("alice");
+    let reservations = std::thread::scope(|scope| {
+        let handles = (0..THREADS)
+            .map(|thread| {
+                let path = path.clone();
+                let recipient = recipient.clone();
+                scope.spawn(move || {
+                    let mut database = Database::open(path).unwrap();
+                    (0..PER_THREAD)
+                        .map(|index| {
+                            let message_id = format!("atomic-{thread}-{index}");
+                            database
+                                .compose_outgoing::<StorageError, _>(
+                                    CHANNEL,
+                                    DEVICE,
+                                    &message_id,
+                                    1,
+                                    "payload",
+                                    "thread",
+                                    "note",
+                                    std::slice::from_ref(&recipient),
+                                    NOW,
+                                    |_| {
+                                        Ok(OutgoingBuild {
+                                            ciphertext: b"ciphertext".to_vec(),
+                                            reseal_material: b"protected".to_vec(),
+                                        })
+                                    },
+                                )
+                                .unwrap()
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>();
+
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+
+    let mut reservations = reservations;
+    reservations.sort_by_key(|reservation| reservation.device_sequence);
+    assert_eq!(reservations.len(), THREADS * PER_THREAD);
+    for (index, reservation) in reservations.iter().enumerate() {
+        assert_eq!(reservation.device_sequence, index as u64 + 1);
+        let expected = index
+            .checked_sub(1)
+            .map(|previous| reservations[previous].chain_id.as_str());
+        assert_eq!(
+            reservation.recipient_previous_chain_ids[&recipient].as_deref(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn a_reservation_survives_reopening_the_database() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.sqlite");
@@ -411,6 +488,375 @@ fn recovery_leaves_queued_messages_alone() {
 }
 
 #[test]
+fn failed_atomic_compose_rolls_back_the_sequence_and_outbox() {
+    let mut database = database();
+    let recipients = vec![recipient("alice")];
+
+    let failed = database.compose_outgoing::<StorageError, _>(
+        CHANNEL,
+        DEVICE,
+        "msg-bad",
+        1,
+        "payload",
+        "thread-1",
+        "note",
+        &recipients,
+        NOW,
+        |_| {
+            Err(StorageError::UnknownMessage {
+                message_id: "builder rejected the message".into(),
+            })
+        },
+    );
+    assert!(failed.is_err());
+    assert!(database.pending_outgoing(CHANNEL).unwrap().is_empty());
+
+    let reservation = database
+        .compose_outgoing::<StorageError, _>(
+            CHANNEL,
+            DEVICE,
+            "msg-good",
+            1,
+            "payload",
+            "thread-1",
+            "note",
+            &recipients,
+            NOW,
+            |_| {
+                Ok(OutgoingBuild {
+                    ciphertext: b"ciphertext".to_vec(),
+                    reseal_material: b"protected".to_vec(),
+                })
+            },
+        )
+        .unwrap();
+
+    assert_eq!(reservation.device_sequence, 1);
+    assert_eq!(reservation.previous_chain_id, None);
+    assert_eq!(
+        reservation.recipient_previous_chain_ids[&recipients[0]],
+        None
+    );
+}
+
+#[test]
+fn recipient_predecessors_skip_messages_for_other_devices() {
+    let mut database = database();
+    let alice = recipient("alice");
+    let bob = recipient("bob");
+
+    let first = database
+        .compose_outgoing::<StorageError, _>(
+            CHANNEL,
+            DEVICE,
+            "msg-a-1",
+            1,
+            "payload-a-1",
+            "thread-a",
+            "note",
+            std::slice::from_ref(&alice),
+            NOW,
+            |_| {
+                Ok(OutgoingBuild {
+                    ciphertext: b"a1".to_vec(),
+                    reseal_material: b"a1-protected".to_vec(),
+                })
+            },
+        )
+        .unwrap();
+    let second = database
+        .compose_outgoing::<StorageError, _>(
+            CHANNEL,
+            DEVICE,
+            "msg-b",
+            1,
+            "payload-b",
+            "thread-b",
+            "receipt",
+            std::slice::from_ref(&bob),
+            NOW,
+            |_| {
+                Ok(OutgoingBuild {
+                    ciphertext: b"b".to_vec(),
+                    reseal_material: b"b-protected".to_vec(),
+                })
+            },
+        )
+        .unwrap();
+    let third = database
+        .compose_outgoing::<StorageError, _>(
+            CHANNEL,
+            DEVICE,
+            "msg-a-2",
+            1,
+            "payload-a-2",
+            "thread-a",
+            "note",
+            std::slice::from_ref(&alice),
+            NOW,
+            |_| {
+                Ok(OutgoingBuild {
+                    ciphertext: b"a2".to_vec(),
+                    reseal_material: b"a2-protected".to_vec(),
+                })
+            },
+        )
+        .unwrap();
+
+    assert_eq!(first.recipient_previous_chain_ids[&alice], None);
+    assert_eq!(second.recipient_previous_chain_ids[&bob], None);
+    assert_eq!(
+        third.recipient_previous_chain_ids[&alice].as_deref(),
+        Some(first.chain_id.as_str())
+    );
+    assert_eq!(
+        third.previous_chain_id.as_deref(),
+        Some(second.chain_id.as_str()),
+        "the global authenticated chain remains intact"
+    );
+}
+
+#[test]
+fn a_burned_legacy_reservation_is_not_a_new_message_predecessor() {
+    let mut database = database();
+    let burned = database
+        .allocate_outgoing(CHANNEL, DEVICE, "legacy-gap", 1, "payload", NOW)
+        .unwrap();
+    database.recover_reservations(CHANNEL, NOW).unwrap();
+
+    let recipient = recipient("alice");
+    let next = database
+        .compose_outgoing::<StorageError, _>(
+            CHANNEL,
+            DEVICE,
+            "msg-2",
+            1,
+            "payload",
+            "thread",
+            "note",
+            std::slice::from_ref(&recipient),
+            NOW,
+            |_| {
+                Ok(OutgoingBuild {
+                    ciphertext: b"ciphertext".to_vec(),
+                    reseal_material: b"protected".to_vec(),
+                })
+            },
+        )
+        .unwrap();
+
+    assert_eq!(next.device_sequence, burned.device_sequence + 1);
+    assert_eq!(next.previous_chain_id, None);
+    assert_eq!(next.recipient_previous_chain_ids[&recipient], None);
+}
+
+#[test]
+fn reseal_replaces_recipients_and_recomputes_their_predecessors() {
+    let mut database = database();
+    let alice = recipient("alice");
+    let bob = recipient("bob");
+    let carol = recipient("carol");
+
+    let first = database
+        .compose_outgoing::<StorageError, _>(
+            CHANNEL,
+            DEVICE,
+            "msg-b",
+            1,
+            "payload-b",
+            "thread-b",
+            "note",
+            std::slice::from_ref(&bob),
+            NOW,
+            |_| {
+                Ok(OutgoingBuild {
+                    ciphertext: b"first".to_vec(),
+                    reseal_material: b"first-protected".to_vec(),
+                })
+            },
+        )
+        .unwrap();
+    database
+        .compose_outgoing::<StorageError, _>(
+            CHANNEL,
+            DEVICE,
+            "msg-stale",
+            1,
+            "payload-stale",
+            "thread-stale",
+            "note",
+            std::slice::from_ref(&alice),
+            NOW,
+            |_| {
+                Ok(OutgoingBuild {
+                    ciphertext: b"stale".to_vec(),
+                    reseal_material: b"stale-protected".to_vec(),
+                })
+            },
+        )
+        .unwrap();
+    database
+        .compose_outgoing::<StorageError, _>(
+            CHANNEL,
+            DEVICE,
+            "msg-later",
+            2,
+            "payload-later",
+            "thread-later",
+            "note",
+            std::slice::from_ref(&bob),
+            NOW,
+            |_| {
+                Ok(OutgoingBuild {
+                    ciphertext: b"later".to_vec(),
+                    reseal_material: b"later-protected".to_vec(),
+                })
+            },
+        )
+        .unwrap();
+
+    database
+        .reseal_outgoing::<StorageError, _>(
+            "msg-stale",
+            1,
+            2,
+            &[bob.clone(), carol.clone()],
+            NOW,
+            |_, predecessors| {
+                assert_eq!(predecessors[&bob].as_deref(), Some(first.chain_id.as_str()));
+                assert_eq!(predecessors[&carol], None);
+                Ok(b"fresh".to_vec())
+            },
+        )
+        .unwrap();
+
+    let pending = database.pending_outgoing_records(CHANNEL).unwrap();
+    let stale = pending
+        .iter()
+        .find(|record| record.message_id == "msg-stale")
+        .unwrap();
+    assert_eq!(stale.roster_epoch, 2);
+    assert_eq!(stale.ciphertext, b"fresh");
+    assert!(!stale.recipient_order_stale);
+    assert!(
+        pending
+            .iter()
+            .find(|record| record.message_id == "msg-later")
+            .unwrap()
+            .recipient_order_stale,
+        "a later ciphertext must be rebuilt after an earlier recipient set changes"
+    );
+
+    let facts = database.sent_messages(CHANNEL).unwrap();
+    let stale = facts
+        .iter()
+        .find(|facts| facts.message_id == "msg-stale")
+        .unwrap();
+    let mut expected = vec![bob, carol];
+    expected.sort();
+    assert_eq!(stale.recipient_device_ids, expected);
+}
+
+#[test]
+fn failed_reseal_preserves_ciphertext_epoch_and_recipient_facts() {
+    let mut database = database();
+    let alice = recipient("alice");
+    let bob = recipient("bob");
+    database
+        .compose_outgoing::<StorageError, _>(
+            CHANNEL,
+            DEVICE,
+            "msg-1",
+            1,
+            "payload",
+            "thread",
+            "note",
+            std::slice::from_ref(&alice),
+            NOW,
+            |_| {
+                Ok(OutgoingBuild {
+                    ciphertext: b"old".to_vec(),
+                    reseal_material: b"protected".to_vec(),
+                })
+            },
+        )
+        .unwrap();
+
+    let result = database.reseal_outgoing::<StorageError, _>(
+        "msg-1",
+        1,
+        2,
+        std::slice::from_ref(&bob),
+        NOW,
+        |_, _| {
+            Err(StorageError::UnknownMessage {
+                message_id: "builder failed".into(),
+            })
+        },
+    );
+    assert!(result.is_err());
+
+    let pending = database.pending_outgoing_records(CHANNEL).unwrap();
+    assert_eq!(pending[0].roster_epoch, 1);
+    assert_eq!(pending[0].ciphertext, b"old");
+    let facts = database.sent_messages(CHANNEL).unwrap();
+    assert_eq!(facts[0].recipient_device_ids, vec![alice]);
+}
+
+#[test]
+fn recipient_predecessors_survive_reopening() {
+    let directory = tempfile::tempdir().unwrap();
+    let alice = recipient("alice");
+    let first = {
+        let mut database = file_database(&directory);
+        database
+            .compose_outgoing::<StorageError, _>(
+                CHANNEL,
+                DEVICE,
+                "msg-1",
+                1,
+                "payload-1",
+                "thread",
+                "note",
+                std::slice::from_ref(&alice),
+                NOW,
+                |_| {
+                    Ok(OutgoingBuild {
+                        ciphertext: b"one".to_vec(),
+                        reseal_material: b"one-protected".to_vec(),
+                    })
+                },
+            )
+            .unwrap()
+    };
+
+    let mut reopened = file_database(&directory);
+    let second = reopened
+        .compose_outgoing::<StorageError, _>(
+            CHANNEL,
+            DEVICE,
+            "msg-2",
+            1,
+            "payload-2",
+            "thread",
+            "note",
+            std::slice::from_ref(&alice),
+            NOW,
+            |_| {
+                Ok(OutgoingBuild {
+                    ciphertext: b"two".to_vec(),
+                    reseal_material: b"two-protected".to_vec(),
+                })
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        second.recipient_previous_chain_ids[&alice].as_deref(),
+        Some(first.chain_id.as_str())
+    );
+}
+
+#[test]
 fn pending_outgoing_records_include_ciphertext_and_created_at() {
     let mut database = database();
     let reservation = database
@@ -435,6 +881,7 @@ fn pending_outgoing_records_include_ciphertext_and_created_at() {
         records[0].reseal_material.as_deref(),
         Some(b"protected-envelope".as_slice())
     );
+    assert!(!records[0].recipient_order_stale);
 }
 
 #[test]
@@ -715,6 +1162,8 @@ impl Arrival {
             device_sequence: self.device_sequence,
             chain_id: &self.chain_id,
             previous_chain_id: self.previous_chain_id.as_deref(),
+            recipient_device: None,
+            recipient_previous_chain_id: None,
             kind: "note",
             thread_id: self.thread_id.as_deref(),
             in_reply_to: self.in_reply_to.as_deref(),
@@ -725,6 +1174,7 @@ impl Arrival {
             ciphertext_sha256: &self.digest,
             created_at: NOW,
             expires_at: None,
+            expired: false,
             attachment_count: 0,
             attachment_bytes: 0,
             prompt_request: false,
@@ -1074,6 +1524,8 @@ fn two_sender_devices_have_independent_chains() {
         device_sequence: 1,
         chain_id: &other_chain,
         previous_chain_id: None,
+        recipient_device: None,
+        recipient_previous_chain_id: None,
         kind: "note",
         thread_id: Some("thread-1"),
         in_reply_to: None,
@@ -1084,6 +1536,7 @@ fn two_sender_devices_have_independent_chains() {
         ciphertext_sha256: "other-digest",
         created_at: NOW,
         expires_at: None,
+        expired: false,
         attachment_count: 0,
         attachment_bytes: 0,
         prompt_request: false,
@@ -1095,6 +1548,285 @@ fn two_sender_devices_have_independent_chains() {
     let outcome = database.record_inbound(&other, NOW).unwrap();
     assert!(matches!(outcome, InboundOutcome::Accepted { .. }));
     assert_eq!(database.inbox_entries(CHANNEL).unwrap().len(), 2);
+}
+
+fn recipient_message<'a>(
+    arrival: &'a Arrival,
+    recipient_device: &'a str,
+    recipient_previous_chain_id: Option<&'a str>,
+) -> InboundMessage<'a> {
+    InboundMessage {
+        recipient_device: Some(recipient_device),
+        recipient_previous_chain_id,
+        ..arrival.message()
+    }
+}
+
+#[test]
+fn recipient_ordering_accepts_a_b_a_without_waiting_for_b() {
+    let mut database = database();
+    let local = recipient("local");
+    let first = arrival(1);
+    let third = arrival(3);
+
+    assert!(matches!(
+        database
+            .record_inbound(&recipient_message(&first, &local, None), NOW)
+            .unwrap(),
+        InboundOutcome::Accepted { .. }
+    ));
+    assert!(matches!(
+        database
+            .record_inbound(
+                &recipient_message(&third, &local, Some(&first.chain_id)),
+                NOW
+            )
+            .unwrap(),
+        InboundOutcome::Accepted { .. }
+    ));
+    assert!(database.held_inbound(CHANNEL).unwrap().is_empty());
+    assert_eq!(
+        database
+            .inbox_entries(CHANNEL)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.message_id)
+            .collect::<Vec<_>>(),
+        vec!["msg-1", "msg-3"]
+    );
+}
+
+#[test]
+fn a_new_recipient_device_starts_its_own_ordering_scope() {
+    let mut database = database();
+    let new_device = recipient("new-device");
+    let later = arrival(7);
+
+    let outcome = database
+        .record_inbound(&recipient_message(&later, &new_device, None), NOW)
+        .unwrap();
+    assert!(matches!(outcome, InboundOutcome::Accepted { .. }));
+}
+
+#[test]
+fn recipient_ordering_rejects_a_second_successor_for_one_link() {
+    let mut database = database();
+    let local = recipient("local");
+    let first = arrival(1);
+    let second = arrival(2);
+    let third = arrival(3);
+
+    database
+        .record_inbound(&recipient_message(&first, &local, None), NOW)
+        .unwrap();
+    database
+        .record_inbound(
+            &recipient_message(&second, &local, Some(&first.chain_id)),
+            NOW,
+        )
+        .unwrap();
+
+    let error = database
+        .record_inbound(
+            &recipient_message(&third, &local, Some(&first.chain_id)),
+            NOW,
+        )
+        .unwrap_err();
+    assert!(matches!(error, StorageError::InboundForked { .. }));
+}
+
+#[test]
+fn recipient_ordering_rejects_a_sequence_regression() {
+    let mut database = database();
+    let local = recipient("local");
+    let first = arrival(3);
+    let regressed = arrival(2);
+
+    database
+        .record_inbound(&recipient_message(&first, &local, None), NOW)
+        .unwrap();
+    let error = database
+        .record_inbound(
+            &recipient_message(&regressed, &local, Some(&first.chain_id)),
+            NOW,
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, StorageError::InboundForked { .. }));
+}
+
+#[test]
+fn recipient_ordering_detects_a_held_sequence_regression_on_release() {
+    let mut database = database();
+    let local = recipient("local");
+    let predecessor = arrival(3);
+    let regressed = arrival(2);
+
+    assert!(matches!(
+        database
+            .record_inbound(
+                &recipient_message(&regressed, &local, Some(&predecessor.chain_id)),
+                NOW
+            )
+            .unwrap(),
+        InboundOutcome::Held { .. }
+    ));
+    let error = database
+        .record_inbound(&recipient_message(&predecessor, &local, None), NOW)
+        .unwrap_err();
+
+    assert!(matches!(error, StorageError::InboundForked { .. }));
+}
+
+#[test]
+fn recipient_ordering_holds_and_releases_across_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let local = recipient("local");
+    let first = arrival(1);
+    let second = arrival(2);
+
+    {
+        let mut database = file_database(&directory);
+        assert!(matches!(
+            database
+                .record_inbound(
+                    &recipient_message(&second, &local, Some(&first.chain_id)),
+                    NOW
+                )
+                .unwrap(),
+            InboundOutcome::Held { .. }
+        ));
+    }
+
+    let mut database = file_database(&directory);
+    let outcome = database
+        .record_inbound(&recipient_message(&first, &local, None), NOW)
+        .unwrap();
+    assert_eq!(
+        outcome,
+        InboundOutcome::Accepted {
+            arrival_sequence: 1,
+            released: vec!["msg-2".into()]
+        }
+    );
+    assert!(database.held_inbound(CHANNEL).unwrap().is_empty());
+}
+
+#[test]
+fn an_expired_predecessor_advances_recipient_ordering_without_becoming_actionable() {
+    let mut database = database();
+    let local = recipient("local");
+    let first = arrival(1);
+    let second = arrival(2);
+    let expired = InboundMessage {
+        expired: true,
+        body: b"",
+        ..recipient_message(&first, &local, None)
+    };
+
+    assert_eq!(
+        database.record_inbound(&expired, NOW).unwrap(),
+        InboundOutcome::ExpiredAccepted {
+            released: Vec::new()
+        }
+    );
+    assert!(database.pending_inbound().unwrap().is_empty());
+    let entry = database.inbox_entries(CHANNEL).unwrap().pop().unwrap();
+    assert_eq!(entry.disposition, "expired");
+
+    assert!(matches!(
+        database
+            .record_inbound(
+                &recipient_message(&second, &local, Some(&first.chain_id)),
+                NOW
+            )
+            .unwrap(),
+        InboundOutcome::Accepted { .. }
+    ));
+    assert_eq!(database.pending_inbound().unwrap().len(), 1);
+}
+
+#[test]
+fn a_held_message_that_expires_is_not_released_as_actionable() {
+    let mut database = database();
+    let local = recipient("local");
+    let first = arrival(1);
+    let second = arrival(2);
+    let held = InboundMessage {
+        expires_at: Some("2026-09-14T00:00:00Z"),
+        ..recipient_message(&second, &local, Some(&first.chain_id))
+    };
+
+    assert!(matches!(
+        database.record_inbound(&held, NOW).unwrap(),
+        InboundOutcome::Held { .. }
+    ));
+    assert_eq!(
+        database
+            .sweep_expired("2026-09-15T00:00:00Z")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        database
+            .record_inbound(&recipient_message(&first, &local, None), NOW)
+            .unwrap(),
+        InboundOutcome::Accepted {
+            arrival_sequence: 1,
+            released: Vec::new()
+        }
+    );
+    let pending = database.pending_inbound().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].message_id, first.message_id);
+}
+
+#[test]
+fn receipts_and_human_messages_share_recipient_ordering_without_global_gaps() {
+    let mut database = database();
+    let local = recipient("local");
+    let first = arrival(1);
+    let third = arrival(3);
+    let receipt = InboundMessage {
+        kind: "receipt",
+        ..recipient_message(&first, &local, None)
+    };
+
+    assert_eq!(
+        database.record_inbound(&receipt, NOW).unwrap(),
+        InboundOutcome::ReceiptAccepted {
+            released: Vec::new()
+        }
+    );
+    assert!(matches!(
+        database
+            .record_inbound(
+                &recipient_message(&third, &local, Some(&first.chain_id)),
+                NOW
+            )
+            .unwrap(),
+        InboundOutcome::Accepted { .. }
+    ));
+    assert_eq!(database.inbox_entries(CHANNEL).unwrap().len(), 1);
+}
+
+#[test]
+fn recipient_ordering_bootstraps_from_an_accepted_legacy_link() {
+    let mut database = database();
+    let local = recipient("local");
+    let first = arrival(1);
+    let third = arrival(3);
+
+    database.record_inbound(&first.message(), NOW).unwrap();
+    let outcome = database
+        .record_inbound(
+            &recipient_message(&third, &local, Some(&first.chain_id)),
+            NOW,
+        )
+        .unwrap();
+
+    assert!(matches!(outcome, InboundOutcome::Accepted { .. }));
 }
 
 // --- Receipts (PRD sections 18.2 and 18.3) ---

@@ -20,10 +20,12 @@
 pub mod error;
 pub mod schema;
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use hrc_protocol::canonical;
-use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
+use hrc_protocol::message::RecipientPredecessors;
+use rusqlite::{Connection, OptionalExtension as _, Transaction, TransactionBehavior, params};
 
 pub use error::{Result, StorageError};
 
@@ -44,6 +46,17 @@ pub struct OutgoingReservation {
     pub previous_chain_id: Option<String>,
     /// Roster epoch the message will be encrypted for.
     pub roster_epoch: u64,
+    /// Last durable chain link addressed to each recipient device.
+    pub recipient_previous_chain_ids: RecipientPredecessors,
+}
+
+/// Ciphertext and protected logical material produced inside an outbox transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutgoingBuild {
+    /// Ciphertext ready for transport publication.
+    pub ciphertext: Vec<u8>,
+    /// Logical envelope encrypted only to the local sending device.
+    pub reseal_material: Vec<u8>,
 }
 
 /// One queued outbox entry ready for publication.
@@ -69,6 +82,8 @@ pub struct PendingOutgoing {
     pub ciphertext: Vec<u8>,
     /// Locally encrypted logical envelope used only when re-encryption is required.
     pub reseal_material: Option<Vec<u8>>,
+    /// Whether an earlier recipient-set change invalidated this message's map.
+    pub recipient_order_stale: bool,
 }
 
 /// State of an outbox record.
@@ -133,6 +148,8 @@ pub struct ChannelRecord {
     pub control_sequence: u64,
     /// Last fully processed transport revision.
     pub sync_cursor: Option<String>,
+    /// Last transport revision whose message bodies were received locally.
+    pub receive_cursor: Option<String>,
     /// Why synchronization is halted, when it is.
     pub halted_reason: Option<String>,
 }
@@ -166,6 +183,11 @@ pub enum InboundOutcome {
         /// Human messages released by this receipt, in chain order.
         released: Vec<String>,
     },
+    /// An authenticated expired message advanced ordering without becoming actionable.
+    ExpiredAccepted {
+        /// Non-expired human messages released by this link, in chain order.
+        released: Vec<String>,
+    },
     /// Already accepted, byte for byte. At-least-once delivery is normal.
     Duplicate,
     /// Held: its predecessor from this sender device has not arrived.
@@ -192,6 +214,14 @@ pub struct InboundMessage<'a> {
     pub chain_id: &'a str,
     /// The link it claims to follow, or `None` for a device's first message.
     pub previous_chain_id: Option<&'a str>,
+    /// Local recipient device selecting recipient-scoped ordering.
+    ///
+    /// `None` selects the legacy global predecessor carried by older
+    /// envelopes. `Some` uses the separate recipient-ordering tables.
+    pub recipient_device: Option<&'a str>,
+    /// The predecessor carried for `recipient_device`, including `None` for
+    /// that recipient's first message.
+    pub recipient_previous_chain_id: Option<&'a str>,
     /// Enumerated kind, or `unsupported`.
     pub kind: &'a str,
     /// Thread it belongs to.
@@ -212,6 +242,8 @@ pub struct InboundMessage<'a> {
     pub created_at: &'a str,
     /// Sender-declared expiry.
     pub expires_at: Option<&'a str>,
+    /// Whether core authenticated the message but classified it as expired.
+    pub expired: bool,
     /// How many attachments the signed envelope declared.
     pub attachment_count: u32,
     /// Total declared ciphertext size of those attachments.
@@ -511,7 +543,8 @@ impl Database {
         self.connection
             .query_row(
                 "SELECT channel_id, transport_kind, transport_locator, local_name,
-                        roster_epoch, control_sequence, sync_cursor, halted_reason
+                        roster_epoch, control_sequence, sync_cursor, receive_cursor,
+                        halted_reason
                  FROM channel WHERE channel_id = ?1",
                 params![channel_id],
                 |row| {
@@ -523,7 +556,8 @@ impl Database {
                         roster_epoch: row.get::<_, i64>(4)? as u64,
                         control_sequence: row.get::<_, i64>(5)? as u64,
                         sync_cursor: row.get(6)?,
-                        halted_reason: row.get(7)?,
+                        receive_cursor: row.get(7)?,
+                        halted_reason: row.get(8)?,
                     })
                 },
             )
@@ -549,6 +583,19 @@ impl Database {
     pub fn set_sync_cursor(&self, channel_id: &str, cursor: &str) -> Result<()> {
         let updated = self.connection.execute(
             "UPDATE channel SET sync_cursor = ?2 WHERE channel_id = ?1",
+            params![channel_id, cursor],
+        )?;
+        Self::expect_one(updated, channel_id)
+    }
+
+    /// Advances the durable cursor for locally received message bodies.
+    ///
+    /// This is deliberately independent of the transport cursor: locked
+    /// synchronization may validate and cache transport history without
+    /// claiming that encrypted message bodies were processed.
+    pub fn set_receive_cursor(&self, channel_id: &str, cursor: &str) -> Result<()> {
+        let updated = self.connection.execute(
+            "UPDATE channel SET receive_cursor = ?2 WHERE channel_id = ?1",
             params![channel_id, cursor],
         )?;
         Self::expect_one(updated, channel_id)
@@ -598,49 +645,13 @@ impl Database {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-        let exists: bool = transaction
-            .query_row(
-                "SELECT 1 FROM channel WHERE channel_id = ?1",
-                params![channel_id],
-                |_| Ok(true),
-            )
-            .optional()?
-            .unwrap_or(false);
-        if !exists {
-            return Err(StorageError::UnknownChannel {
-                channel_id: channel_id.to_owned(),
-            });
-        }
-
-        // Take the write lock on the sequence row and read the previous
-        // chain ID in the same statement, so no other writer can interleave.
-        transaction.execute(
-            "INSERT INTO device_sequence (channel_id, device_id, last_sequence, last_chain_id)
-             VALUES (?1, ?2, 0, NULL)
-             ON CONFLICT (channel_id, device_id) DO NOTHING",
-            params![channel_id, device_id],
-        )?;
-
-        let (device_sequence, previous_chain_id) = transaction.query_row(
-            "UPDATE device_sequence SET last_sequence = last_sequence + 1
-             WHERE channel_id = ?1 AND device_id = ?2
-             RETURNING last_sequence, last_chain_id",
-            params![channel_id, device_id],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)? as u64,
-                    row.get::<_, Option<String>>(1)?,
-                ))
-            },
-        )?;
+        ensure_channel(&transaction, channel_id)?;
+        let (device_sequence, previous_chain_id) =
+            increment_device_sequence(&transaction, channel_id, device_id)?;
 
         let chain_id = chain_id_for(channel_id, device_id, device_sequence, message_id)?;
 
-        transaction.execute(
-            "UPDATE device_sequence SET last_chain_id = ?3
-             WHERE channel_id = ?1 AND device_id = ?2",
-            params![channel_id, device_id, chain_id],
-        )?;
+        set_last_allocated_chain(&transaction, channel_id, device_id, &chain_id)?;
 
         transaction.execute(
             "INSERT INTO outbox (
@@ -668,7 +679,112 @@ impl Database {
             chain_id,
             previous_chain_id,
             roster_epoch,
+            recipient_previous_chain_ids: BTreeMap::new(),
         })
+    }
+
+    /// Allocates, builds, and queues one outgoing message atomically.
+    ///
+    /// The builder runs while an immediate transaction holds the writer lock.
+    /// If recipient validation, sealing, or protected-material construction
+    /// fails, the sequence allocation, per-recipient predecessor selection,
+    /// outbox row, and recipient facts all roll back together.
+    #[allow(clippy::too_many_arguments)]
+    pub fn compose_outgoing<E, F>(
+        &mut self,
+        channel_id: &str,
+        device_id: &str,
+        message_id: &str,
+        roster_epoch: u64,
+        payload_hash: &str,
+        thread_id: &str,
+        kind: &str,
+        recipient_device_ids: &[String],
+        now: &str,
+        build: F,
+    ) -> std::result::Result<OutgoingReservation, E>
+    where
+        E: From<StorageError>,
+        F: FnOnce(&OutgoingReservation) -> std::result::Result<OutgoingBuild, E>,
+    {
+        let recipients = hrc_protocol::RecipientDevices::new(recipient_device_ids.to_vec())
+            .map_err(StorageError::from)
+            .map_err(E::from)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::from)
+            .map_err(E::from)?;
+
+        ensure_channel(&transaction, channel_id).map_err(E::from)?;
+        let (device_sequence, _) =
+            increment_device_sequence(&transaction, channel_id, device_id).map_err(E::from)?;
+
+        // New recipient-ordered messages never link through a legacy
+        // reservation that may later be burned as a gap.
+        let previous_chain_id =
+            latest_publishable_chain(&transaction, channel_id, device_id, device_sequence)
+                .map_err(E::from)?;
+        let chain_id =
+            chain_id_for(channel_id, device_id, device_sequence, message_id).map_err(E::from)?;
+        let recipient_previous_chain_ids = recipient_predecessors_for(
+            &transaction,
+            channel_id,
+            device_id,
+            device_sequence,
+            &recipients.device_ids,
+        )
+        .map_err(E::from)?;
+
+        let reservation = OutgoingReservation {
+            message_id: message_id.to_owned(),
+            device_sequence,
+            chain_id,
+            previous_chain_id,
+            roster_epoch,
+            recipient_previous_chain_ids,
+        };
+        let built = build(&reservation)?;
+
+        transaction
+            .execute(
+                "INSERT INTO outbox (
+                     message_id, channel_id, device_id, device_sequence, chain_id,
+                     previous_chain_id, roster_epoch, payload_hash, ciphertext,
+                     reseal_material, thread_id, kind, state, created_at, updated_at
+                 ) VALUES (
+                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                     'queued', ?13, ?13
+                 )",
+                params![
+                    &reservation.message_id,
+                    channel_id,
+                    device_id,
+                    reservation.device_sequence as i64,
+                    &reservation.chain_id,
+                    reservation.previous_chain_id.as_deref(),
+                    roster_epoch as i64,
+                    payload_hash,
+                    &built.ciphertext,
+                    &built.reseal_material,
+                    thread_id,
+                    kind,
+                    now,
+                ],
+            )
+            .map_err(StorageError::from)
+            .map_err(E::from)?;
+
+        replace_recipient_facts(&transaction, message_id, &recipients.device_ids)
+            .map_err(E::from)?;
+        set_last_allocated_chain(&transaction, channel_id, device_id, &reservation.chain_id)
+            .map_err(E::from)?;
+
+        transaction
+            .commit()
+            .map_err(StorageError::from)
+            .map_err(E::from)?;
+        Ok(reservation)
     }
 
     /// Records an arriving message, deciding whether it is new, a repeat, or
@@ -715,6 +831,9 @@ impl Database {
                 "SELECT ciphertext_sha256 FROM inbox WHERE message_id = ?1 AND channel_id = ?2
                  UNION ALL
                  SELECT ciphertext_sha256 FROM inbound_receipt_link
+                 WHERE message_id = ?1 AND channel_id = ?2
+                 UNION ALL
+                 SELECT ciphertext_sha256 FROM inbound_recipient_link
                  WHERE message_id = ?1 AND channel_id = ?2",
                 params![message.message_id, message.channel_id],
                 |row| row.get::<_, Option<String>>(0),
@@ -741,6 +860,9 @@ impl Database {
                  WHERE channel_id = ?1 AND sender_device = ?2 AND device_sequence = ?3
                  UNION ALL
                  SELECT message_id FROM inbound_receipt_link
+                 WHERE channel_id = ?1 AND sender_device = ?2 AND device_sequence = ?3
+                 UNION ALL
+                 SELECT message_id FROM inbound_recipient_link
                  WHERE channel_id = ?1 AND sender_device = ?2 AND device_sequence = ?3",
                 params![
                     message.channel_id,
@@ -758,6 +880,35 @@ impl Database {
                 existing: other,
                 arriving: message.message_id.to_owned(),
             });
+        }
+
+        let chain_taken: Option<String> = transaction
+            .query_row(
+                "SELECT message_id FROM inbox
+                 WHERE channel_id = ?1 AND chain_id = ?2
+                 UNION ALL
+                 SELECT message_id FROM inbound_receipt_link
+                 WHERE channel_id = ?1 AND chain_id = ?2
+                 UNION ALL
+                 SELECT message_id FROM inbound_recipient_link
+                 WHERE channel_id = ?1 AND chain_id = ?2",
+                params![message.channel_id, message.chain_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(other) = chain_taken {
+            return Err(StorageError::InboundForked {
+                sender_device: message.sender_device.to_owned(),
+                device_sequence: message.device_sequence,
+                existing: other,
+                arriving: message.message_id.to_owned(),
+            });
+        }
+
+        if let Some(recipient_device) = message.recipient_device {
+            let outcome = record_recipient_inbound(&transaction, message, recipient_device, now)?;
+            transaction.commit()?;
+            return Ok(outcome);
         }
 
         let head: Option<(u64, String)> = transaction
@@ -867,6 +1018,8 @@ impl Database {
                 device_sequence: next.device_sequence,
                 chain_id: &next.chain_id,
                 previous_chain_id: next.previous_chain_id.as_deref(),
+                recipient_device: None,
+                recipient_previous_chain_id: None,
                 kind: &next.kind,
                 thread_id: next.thread_id.as_deref(),
                 in_reply_to: next.in_reply_to.as_deref(),
@@ -877,6 +1030,7 @@ impl Database {
                 ciphertext_sha256: &next.ciphertext_sha256,
                 created_at: &next.created_at,
                 expires_at: next.expires_at.as_deref(),
+                expired: next.disposition == "expired",
                 attachment_count: next.attachment_count,
                 attachment_bytes: next.attachment_bytes,
                 prompt_request: next.prompt_request,
@@ -886,7 +1040,9 @@ impl Database {
             };
 
             insert_accepted(&transaction, &waiting, now)?;
-            released.push(next.message_id.clone());
+            if next.disposition != "expired" {
+                released.push(next.message_id.clone());
+            }
             sequence = next.device_sequence;
             link = next.chain_id;
         }
@@ -907,12 +1063,14 @@ impl Database {
 
         transaction.commit()?;
 
-        Ok(match arrival_sequence {
-            Some(arrival_sequence) => InboundOutcome::Accepted {
+        Ok(match (arrival_sequence, message.expired) {
+            (Some(_), true) => InboundOutcome::ExpiredAccepted { released },
+            (Some(arrival_sequence), false) => InboundOutcome::Accepted {
                 arrival_sequence,
                 released,
             },
-            None => InboundOutcome::ReceiptAccepted { released },
+            (None, true) => InboundOutcome::ExpiredAccepted { released },
+            (None, false) => InboundOutcome::ReceiptAccepted { released },
         })
     }
 
@@ -1157,7 +1315,12 @@ impl Database {
     /// Messages held because their predecessor has not arrived.
     pub fn held_inbound(&self, channel_id: &str) -> Result<Vec<String>> {
         let mut statement = self.connection.prepare(
-            "SELECT message_id FROM inbound_hold WHERE channel_id = ?1
+            "SELECT message_id, sender_device, device_sequence
+             FROM inbound_hold WHERE channel_id = ?1
+             UNION ALL
+             SELECT message_id, sender_device, device_sequence
+             FROM inbound_recipient_link
+             WHERE channel_id = ?1 AND state = 'held'
              ORDER BY sender_device, device_sequence",
         )?;
         let rows = statement.query_map(params![channel_id], |row| row.get::<_, String>(0))?;
@@ -1192,10 +1355,9 @@ impl Database {
             let mut statement = self.connection.prepare(
                 "SELECT message_id FROM inbox
                  WHERE disposition = 'quarantined'
-                   AND arrival_sequence IS NOT NULL
                    AND expires_at IS NOT NULL
                    AND expires_at <= ?1
-                 ORDER BY arrival_sequence",
+                 ORDER BY COALESCE(arrival_sequence, 9223372036854775807), message_id",
             )?;
             let rows = statement.query_map(params![now], |row| row.get::<_, String>(0))?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
@@ -1208,7 +1370,6 @@ impl Database {
         self.connection.execute(
             "UPDATE inbox SET disposition = 'expired', body = NULL
              WHERE disposition = 'quarantined'
-               AND arrival_sequence IS NOT NULL
                AND expires_at IS NOT NULL
                AND expires_at <= ?1",
             params![now],
@@ -1535,9 +1696,10 @@ impl Database {
 
         let mut sent = Vec::with_capacity(rows.len());
         for (message_id, thread_id, kind) in rows {
-            let mut devices = self
-                .connection
-                .prepare("SELECT device_id FROM outbox_recipient WHERE message_id = ?1")?;
+            let mut devices = self.connection.prepare(
+                "SELECT device_id FROM outbox_recipient
+                     WHERE message_id = ?1 ORDER BY device_id",
+            )?;
             let recipient_device_ids = devices
                 .query_map(params![&message_id], |row| row.get::<_, String>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1588,6 +1750,98 @@ impl Database {
                 message_id: message_id.to_owned(),
             });
         }
+        Ok(())
+    }
+
+    /// Rebuilds stale ciphertext and replaces its exact recipient facts atomically.
+    ///
+    /// The predecessor map is computed from earlier queued or published
+    /// messages, never from the stale envelope. The builder runs inside the
+    /// transaction so a failure preserves the old epoch, bytes, and recipient
+    /// rows as one consistent snapshot.
+    pub fn reseal_outgoing<E, F>(
+        &mut self,
+        message_id: &str,
+        expected_epoch: u64,
+        roster_epoch: u64,
+        recipient_device_ids: &[String],
+        now: &str,
+        build: F,
+    ) -> std::result::Result<(), E>
+    where
+        E: From<StorageError>,
+        F: FnOnce(&PendingOutgoing, &RecipientPredecessors) -> std::result::Result<Vec<u8>, E>,
+    {
+        let recipients = hrc_protocol::RecipientDevices::new(recipient_device_ids.to_vec())
+            .map_err(StorageError::from)
+            .map_err(E::from)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::from)
+            .map_err(E::from)?;
+
+        let outgoing = pending_outgoing_in_transaction(&transaction, message_id)
+            .map_err(E::from)?
+            .filter(|outgoing| outgoing.roster_epoch == expected_epoch)
+            .ok_or_else(|| {
+                E::from(StorageError::UnknownMessage {
+                    message_id: message_id.to_owned(),
+                })
+            })?;
+        let channel_id = outgoing_channel(&transaction, message_id).map_err(E::from)?;
+        let predecessors = recipient_predecessors_for(
+            &transaction,
+            &channel_id,
+            &outgoing.device_id,
+            outgoing.device_sequence,
+            &recipients.device_ids,
+        )
+        .map_err(E::from)?;
+        let ciphertext = build(&outgoing, &predecessors)?;
+
+        let updated = transaction
+            .execute(
+                "UPDATE outbox
+                 SET roster_epoch = ?3, ciphertext = ?4, recipient_order_stale = 0,
+                     updated_at = ?5
+                 WHERE message_id = ?1 AND roster_epoch = ?2
+                   AND state IN ('queued', 'publishing')",
+                params![
+                    message_id,
+                    expected_epoch as i64,
+                    roster_epoch as i64,
+                    ciphertext,
+                    now
+                ],
+            )
+            .map_err(StorageError::from)
+            .map_err(E::from)?;
+        if updated == 0 {
+            return Err(E::from(StorageError::UnknownMessage {
+                message_id: message_id.to_owned(),
+            }));
+        }
+
+        replace_recipient_facts(&transaction, message_id, &recipients.device_ids)
+            .map_err(E::from)?;
+        transaction
+            .execute(
+                "UPDATE outbox SET recipient_order_stale = 1
+                 WHERE channel_id = ?1 AND device_id = ?2 AND device_sequence > ?3
+                   AND state IN ('queued', 'publishing')",
+                params![
+                    channel_id,
+                    &outgoing.device_id,
+                    outgoing.device_sequence as i64
+                ],
+            )
+            .map_err(StorageError::from)
+            .map_err(E::from)?;
+        transaction
+            .commit()
+            .map_err(StorageError::from)
+            .map_err(E::from)?;
         Ok(())
     }
 
@@ -1642,7 +1896,7 @@ impl Database {
         let mut statement = self.connection.prepare(
             "SELECT message_id, device_id, device_sequence, chain_id,
                     previous_chain_id, roster_epoch, payload_hash, created_at,
-                    ciphertext, reseal_material
+                    ciphertext, reseal_material, recipient_order_stale
              FROM outbox
              WHERE channel_id = ?1 AND state IN ('queued', 'publishing')
              ORDER BY device_sequence",
@@ -1659,6 +1913,7 @@ impl Database {
                 created_at: row.get(7)?,
                 ciphertext: row.get(8)?,
                 reseal_material: row.get(9)?,
+                recipient_order_stale: row.get(10)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -1698,7 +1953,8 @@ impl Database {
     pub fn channels(&self) -> Result<Vec<ChannelRecord>> {
         let mut statement = self.connection.prepare(
             "SELECT channel_id, transport_kind, transport_locator, local_name,
-                    roster_epoch, control_sequence, sync_cursor, halted_reason
+                    roster_epoch, control_sequence, sync_cursor, receive_cursor,
+                    halted_reason
              FROM channel ORDER BY created_at, channel_id",
         )?;
 
@@ -1711,7 +1967,8 @@ impl Database {
                 roster_epoch: row.get::<_, i64>(4)? as u64,
                 control_sequence: row.get::<_, i64>(5)? as u64,
                 sync_cursor: row.get(6)?,
-                halted_reason: row.get(7)?,
+                receive_cursor: row.get(7)?,
+                halted_reason: row.get(8)?,
             })
         })?;
 
@@ -1839,6 +2096,183 @@ impl Database {
     }
 }
 
+fn ensure_channel(transaction: &Transaction<'_>, channel_id: &str) -> Result<()> {
+    let exists = transaction
+        .query_row(
+            "SELECT 1 FROM channel WHERE channel_id = ?1",
+            params![channel_id],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if exists {
+        Ok(())
+    } else {
+        Err(StorageError::UnknownChannel {
+            channel_id: channel_id.to_owned(),
+        })
+    }
+}
+
+fn increment_device_sequence(
+    transaction: &Transaction<'_>,
+    channel_id: &str,
+    device_id: &str,
+) -> Result<(u64, Option<String>)> {
+    transaction.execute(
+        "INSERT INTO device_sequence (channel_id, device_id, last_sequence, last_chain_id)
+         VALUES (?1, ?2, 0, NULL)
+         ON CONFLICT (channel_id, device_id) DO NOTHING",
+        params![channel_id, device_id],
+    )?;
+
+    transaction
+        .query_row(
+            "UPDATE device_sequence SET last_sequence = last_sequence + 1
+             WHERE channel_id = ?1 AND device_id = ?2
+             RETURNING last_sequence, last_chain_id",
+            params![channel_id, device_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as u64,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
+        )
+        .map_err(Into::into)
+}
+
+fn set_last_allocated_chain(
+    transaction: &Transaction<'_>,
+    channel_id: &str,
+    device_id: &str,
+    chain_id: &str,
+) -> Result<()> {
+    transaction.execute(
+        "UPDATE device_sequence SET last_chain_id = ?3
+         WHERE channel_id = ?1 AND device_id = ?2",
+        params![channel_id, device_id, chain_id],
+    )?;
+    Ok(())
+}
+
+fn latest_publishable_chain(
+    transaction: &Transaction<'_>,
+    channel_id: &str,
+    device_id: &str,
+    before_sequence: u64,
+) -> Result<Option<String>> {
+    transaction
+        .query_row(
+            "SELECT chain_id FROM outbox
+             WHERE channel_id = ?1 AND device_id = ?2 AND device_sequence < ?3
+               AND state IN ('queued', 'publishing', 'published')
+             ORDER BY device_sequence DESC LIMIT 1",
+            params![channel_id, device_id, before_sequence as i64],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn recipient_predecessors_for(
+    transaction: &Transaction<'_>,
+    channel_id: &str,
+    device_id: &str,
+    before_sequence: u64,
+    recipient_device_ids: &[String],
+) -> Result<RecipientPredecessors> {
+    let mut predecessors = BTreeMap::new();
+    let mut statement = transaction.prepare(
+        "SELECT outbox.chain_id
+         FROM outbox
+         JOIN outbox_recipient
+           ON outbox_recipient.message_id = outbox.message_id
+         WHERE outbox.channel_id = ?1
+           AND outbox.device_id = ?2
+           AND outbox.device_sequence < ?3
+           AND outbox_recipient.device_id = ?4
+           AND outbox.state IN ('queued', 'publishing', 'published')
+         ORDER BY outbox.device_sequence DESC
+         LIMIT 1",
+    )?;
+
+    for recipient in recipient_device_ids {
+        let predecessor = statement
+            .query_row(
+                params![channel_id, device_id, before_sequence as i64, recipient],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        predecessors.insert(recipient.clone(), predecessor);
+    }
+
+    Ok(predecessors)
+}
+
+fn replace_recipient_facts(
+    transaction: &Transaction<'_>,
+    message_id: &str,
+    recipient_device_ids: &[String],
+) -> Result<()> {
+    transaction.execute(
+        "DELETE FROM outbox_recipient WHERE message_id = ?1",
+        params![message_id],
+    )?;
+    for device_id in recipient_device_ids {
+        transaction.execute(
+            "INSERT INTO outbox_recipient (message_id, device_id) VALUES (?1, ?2)",
+            params![message_id, device_id],
+        )?;
+    }
+    Ok(())
+}
+
+fn outgoing_channel(transaction: &Transaction<'_>, message_id: &str) -> Result<String> {
+    transaction
+        .query_row(
+            "SELECT channel_id FROM outbox WHERE message_id = ?1",
+            params![message_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| StorageError::UnknownMessage {
+            message_id: message_id.to_owned(),
+        })
+}
+
+fn pending_outgoing_in_transaction(
+    transaction: &Transaction<'_>,
+    message_id: &str,
+) -> Result<Option<PendingOutgoing>> {
+    transaction
+        .query_row(
+            "SELECT message_id, device_id, device_sequence, chain_id,
+                    previous_chain_id, roster_epoch, payload_hash, created_at,
+                    ciphertext, reseal_material, recipient_order_stale
+             FROM outbox
+             WHERE message_id = ?1 AND state IN ('queued', 'publishing')",
+            params![message_id],
+            |row| {
+                Ok(PendingOutgoing {
+                    message_id: row.get(0)?,
+                    device_id: row.get(1)?,
+                    device_sequence: row.get::<_, i64>(2)? as u64,
+                    chain_id: row.get(3)?,
+                    previous_chain_id: row.get(4)?,
+                    roster_epoch: row.get::<_, i64>(5)? as u64,
+                    payload_hash: row.get(6)?,
+                    created_at: row.get(7)?,
+                    ciphertext: row.get(8)?,
+                    reseal_material: row.get(9)?,
+                    recipient_order_stale: row.get(10)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
 /// A message taken back out of the hold table.
 struct HeldMessage {
     message_id: String,
@@ -1860,6 +2294,7 @@ struct HeldMessage {
     attachment_bytes: u64,
     prompt_request: bool,
     body: Vec<u8>,
+    disposition: String,
 }
 
 /// Stores a verified context only after its owning inbox row exists.
@@ -1870,7 +2305,7 @@ fn store_inbound_context(
     transaction: &rusqlite::Transaction<'_>,
     message: &InboundMessage<'_>,
 ) -> Result<()> {
-    if message.kind == "receipt" {
+    if message.kind == "receipt" || message.expired {
         return Ok(());
     }
     let Some(context) = &message.context else {
@@ -1888,6 +2323,457 @@ fn store_inbound_context(
         ],
     )?;
     Ok(())
+}
+
+fn store_held_inbox(
+    transaction: &Transaction<'_>,
+    message: &InboundMessage<'_>,
+    now: &str,
+) -> Result<()> {
+    if message.kind == "receipt" {
+        return Ok(());
+    }
+
+    transaction.execute(
+        "INSERT INTO inbox (
+             message_id, channel_id, sender_principal, sender_device, kind, thread_id,
+             in_reply_to, roster_epoch, endpoint, ciphertext_bytes, plaintext_bytes,
+             created_at, expires_at, received_at, body, disposition,
+             device_sequence, chain_id, previous_chain_id, ciphertext_sha256, arrival_sequence,
+             attachment_count, attachment_bytes, prompt_request
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                   ?16, ?17, ?18, ?19, ?20, NULL, ?21, ?22, ?23)
+         ON CONFLICT (message_id) DO NOTHING",
+        params![
+            message.message_id,
+            message.channel_id,
+            message.sender_principal,
+            message.sender_device,
+            message.kind,
+            message.thread_id,
+            message.in_reply_to,
+            message.roster_epoch as i64,
+            message.endpoint,
+            message.ciphertext_bytes as i64,
+            message.plaintext_bytes as i64,
+            message.created_at,
+            message.expires_at,
+            now,
+            (!message.expired).then_some(message.body),
+            if message.expired {
+                "expired"
+            } else {
+                "quarantined"
+            },
+            message.device_sequence as i64,
+            message.chain_id,
+            message.previous_chain_id,
+            message.ciphertext_sha256,
+            message.attachment_count,
+            message.attachment_bytes as i64,
+            message.prompt_request,
+        ],
+    )?;
+    Ok(())
+}
+
+fn record_recipient_inbound(
+    transaction: &Transaction<'_>,
+    message: &InboundMessage<'_>,
+    recipient_device: &str,
+    now: &str,
+) -> Result<InboundOutcome> {
+    let predecessor = message.recipient_previous_chain_id;
+
+    let competing_successor: Option<String> = transaction
+        .query_row(
+            "SELECT message_id FROM inbound_recipient_link
+             WHERE channel_id = ?1 AND sender_device = ?2 AND recipient_device = ?3
+               AND previous_chain_id IS ?4",
+            params![
+                message.channel_id,
+                message.sender_device,
+                recipient_device,
+                predecessor
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(existing) = competing_successor {
+        return Err(StorageError::InboundForked {
+            sender_device: message.sender_device.to_owned(),
+            device_sequence: message.device_sequence,
+            existing,
+            arriving: message.message_id.to_owned(),
+        });
+    }
+
+    let head: Option<(u64, String)> = transaction
+        .query_row(
+            "SELECT last_sequence, last_chain_id FROM inbound_recipient_chain
+             WHERE channel_id = ?1 AND sender_device = ?2 AND recipient_device = ?3",
+            params![message.channel_id, message.sender_device, recipient_device],
+            |row| Ok((row.get::<_, i64>(0)? as u64, row.get(1)?)),
+        )
+        .optional()?;
+
+    if let Some(previous) = predecessor
+        && let Some(previous_sequence) = recipient_predecessor_sequence(
+            transaction,
+            message.channel_id,
+            message.sender_device,
+            recipient_device,
+            previous,
+        )?
+        && message.device_sequence <= previous_sequence
+    {
+        return Err(StorageError::InboundForked {
+            sender_device: message.sender_device.to_owned(),
+            device_sequence: message.device_sequence,
+            existing: previous.to_owned(),
+            arriving: message.message_id.to_owned(),
+        });
+    }
+
+    let ready = match (head.as_ref(), predecessor) {
+        (Some((_, head)), Some(previous)) if head == previous => true,
+        (Some(_), Some(previous)) => {
+            if recipient_predecessor_accepted(
+                transaction,
+                message.channel_id,
+                message.sender_device,
+                recipient_device,
+                previous,
+            )? {
+                return Err(StorageError::InboundForked {
+                    sender_device: message.sender_device.to_owned(),
+                    device_sequence: message.device_sequence,
+                    existing: previous.to_owned(),
+                    arriving: message.message_id.to_owned(),
+                });
+            }
+            false
+        }
+        (Some((_, head)), None) => {
+            return Err(StorageError::InboundForked {
+                sender_device: message.sender_device.to_owned(),
+                device_sequence: message.device_sequence,
+                existing: head.to_owned(),
+                arriving: message.message_id.to_owned(),
+            });
+        }
+        (None, Some(previous)) => recipient_predecessor_accepted(
+            transaction,
+            message.channel_id,
+            message.sender_device,
+            recipient_device,
+            previous,
+        )?,
+        (None, None) => {
+            if legacy_sender_history_exists(transaction, message.channel_id, message.sender_device)?
+            {
+                return Err(StorageError::InboundForked {
+                    sender_device: message.sender_device.to_owned(),
+                    device_sequence: message.device_sequence,
+                    existing: "legacy recipient history".into(),
+                    arriving: message.message_id.to_owned(),
+                });
+            }
+            true
+        }
+    };
+
+    transaction.execute(
+        "INSERT INTO inbound_recipient_link (
+             message_id, channel_id, sender_device, recipient_device,
+             device_sequence, chain_id, previous_chain_id, ciphertext_sha256,
+             state, is_receipt, is_expired
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            message.message_id,
+            message.channel_id,
+            message.sender_device,
+            recipient_device,
+            message.device_sequence as i64,
+            message.chain_id,
+            predecessor,
+            message.ciphertext_sha256,
+            if ready { "accepted" } else { "held" },
+            message.kind == "receipt",
+            message.expired,
+        ],
+    )?;
+
+    if !ready {
+        store_held_inbox(transaction, message, now)?;
+        store_inbound_context(transaction, message)?;
+        return Ok(InboundOutcome::Held {
+            waiting_for: predecessor.unwrap_or_default().to_owned(),
+        });
+    }
+
+    let arrival_sequence = insert_accepted(transaction, message, now)?;
+    store_inbound_context(transaction, message)?;
+
+    let mut released = Vec::new();
+    let mut link = message.chain_id.to_owned();
+    let mut sequence = message.device_sequence;
+    loop {
+        let Some((message_id, device_sequence, chain_id, is_receipt, is_expired)) =
+            next_recipient_held(
+                transaction,
+                message.channel_id,
+                message.sender_device,
+                recipient_device,
+                &link,
+            )?
+        else {
+            break;
+        };
+        if device_sequence <= sequence {
+            return Err(StorageError::InboundForked {
+                sender_device: message.sender_device.to_owned(),
+                device_sequence,
+                existing: link,
+                arriving: message_id,
+            });
+        }
+
+        let mut effective_expired = is_expired;
+        if !is_receipt {
+            let next = held_message_by_id(transaction, &message_id)?.ok_or_else(|| {
+                StorageError::UnknownMessage {
+                    message_id: message_id.clone(),
+                }
+            })?;
+            effective_expired |= next.disposition == "expired";
+            let body = next.body.clone();
+            let waiting = InboundMessage {
+                channel_id: message.channel_id,
+                message_id: &next.message_id,
+                sender_principal: &next.sender_principal,
+                sender_device: message.sender_device,
+                device_sequence: next.device_sequence,
+                chain_id: &next.chain_id,
+                previous_chain_id: next.previous_chain_id.as_deref(),
+                recipient_device: Some(recipient_device),
+                recipient_previous_chain_id: Some(&link),
+                kind: &next.kind,
+                thread_id: next.thread_id.as_deref(),
+                in_reply_to: next.in_reply_to.as_deref(),
+                roster_epoch: next.roster_epoch,
+                endpoint: next.endpoint.as_deref(),
+                ciphertext_bytes: next.ciphertext_bytes,
+                plaintext_bytes: next.plaintext_bytes,
+                ciphertext_sha256: &next.ciphertext_sha256,
+                created_at: &next.created_at,
+                expires_at: next.expires_at.as_deref(),
+                expired: effective_expired,
+                attachment_count: next.attachment_count,
+                attachment_bytes: next.attachment_bytes,
+                prompt_request: next.prompt_request,
+                body: &body,
+                ciphertext: &[],
+                context: None,
+            };
+            insert_accepted(transaction, &waiting, now)?;
+            if !effective_expired {
+                released.push(message_id.clone());
+            }
+        }
+
+        transaction.execute(
+            "UPDATE inbound_recipient_link
+             SET state = 'accepted', is_expired = ?2 WHERE message_id = ?1",
+            params![message_id, effective_expired],
+        )?;
+        sequence = device_sequence;
+        link = chain_id;
+    }
+
+    transaction.execute(
+        "INSERT INTO inbound_recipient_chain (
+             channel_id, sender_device, recipient_device, last_sequence, last_chain_id
+         ) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT (channel_id, sender_device, recipient_device)
+         DO UPDATE SET last_sequence = excluded.last_sequence,
+                       last_chain_id = excluded.last_chain_id",
+        params![
+            message.channel_id,
+            message.sender_device,
+            recipient_device,
+            sequence as i64,
+            link,
+        ],
+    )?;
+
+    Ok(match (arrival_sequence, message.expired) {
+        (_, true) => InboundOutcome::ExpiredAccepted { released },
+        (Some(arrival_sequence), false) => InboundOutcome::Accepted {
+            arrival_sequence,
+            released,
+        },
+        (None, false) => InboundOutcome::ReceiptAccepted { released },
+    })
+}
+
+fn recipient_predecessor_accepted(
+    transaction: &Transaction<'_>,
+    channel_id: &str,
+    sender_device: &str,
+    recipient_device: &str,
+    chain_id: &str,
+) -> Result<bool> {
+    transaction
+        .query_row(
+            "SELECT 1
+             WHERE EXISTS (
+                 SELECT 1 FROM inbound_recipient_link
+                 WHERE channel_id = ?1 AND sender_device = ?2
+                   AND recipient_device = ?3 AND chain_id = ?4
+                   AND state = 'accepted'
+             )
+             OR EXISTS (
+                 SELECT 1 FROM inbound_chain
+                 WHERE channel_id = ?1 AND sender_device = ?2
+                   AND last_chain_id = ?4
+             )",
+            params![channel_id, sender_device, recipient_device, chain_id],
+            |_| Ok(true),
+        )
+        .optional()
+        .map(|found| found.unwrap_or(false))
+        .map_err(Into::into)
+}
+
+fn recipient_predecessor_sequence(
+    transaction: &Transaction<'_>,
+    channel_id: &str,
+    sender_device: &str,
+    recipient_device: &str,
+    chain_id: &str,
+) -> Result<Option<u64>> {
+    transaction
+        .query_row(
+            "SELECT device_sequence FROM inbound_recipient_link
+             WHERE channel_id = ?1 AND sender_device = ?2
+               AND recipient_device = ?3 AND chain_id = ?4
+             UNION ALL
+             SELECT last_sequence FROM inbound_chain
+             WHERE channel_id = ?1 AND sender_device = ?2 AND last_chain_id = ?4",
+            params![channel_id, sender_device, recipient_device, chain_id],
+            |row| Ok(row.get::<_, i64>(0)? as u64),
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn legacy_sender_history_exists(
+    transaction: &Transaction<'_>,
+    channel_id: &str,
+    sender_device: &str,
+) -> Result<bool> {
+    transaction
+        .query_row(
+            "SELECT 1
+             WHERE EXISTS (
+                 SELECT 1 FROM inbox
+                 WHERE channel_id = ?1 AND sender_device = ?2
+                   AND NOT EXISTS (
+                       SELECT 1 FROM inbound_recipient_link
+                       WHERE inbound_recipient_link.message_id = inbox.message_id
+                   )
+             )
+             OR EXISTS (
+                 SELECT 1 FROM inbound_receipt_link
+                 WHERE channel_id = ?1 AND sender_device = ?2
+                   AND NOT EXISTS (
+                       SELECT 1 FROM inbound_recipient_link
+                       WHERE inbound_recipient_link.message_id =
+                             inbound_receipt_link.message_id
+                   )
+             )",
+            params![channel_id, sender_device],
+            |_| Ok(true),
+        )
+        .optional()
+        .map(|found| found.unwrap_or(false))
+        .map_err(Into::into)
+}
+
+fn next_recipient_held(
+    transaction: &Transaction<'_>,
+    channel_id: &str,
+    sender_device: &str,
+    recipient_device: &str,
+    predecessor: &str,
+) -> Result<Option<(String, u64, String, bool, bool)>> {
+    transaction
+        .query_row(
+            "SELECT message_id, device_sequence, chain_id, is_receipt, is_expired
+             FROM inbound_recipient_link
+             WHERE channel_id = ?1 AND sender_device = ?2 AND recipient_device = ?3
+               AND state = 'held' AND previous_chain_id = ?4",
+            params![channel_id, sender_device, recipient_device, predecessor],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get::<_, i64>(1)? as u64,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn held_message_by_id(
+    transaction: &Transaction<'_>,
+    message_id: &str,
+) -> Result<Option<HeldMessage>> {
+    transaction
+        .query_row(
+            "SELECT inbox.message_id, inbox.sender_principal, inbox.device_sequence,
+                    inbox.chain_id, inbox.previous_chain_id, inbox.kind, inbox.thread_id,
+                    inbox.in_reply_to, inbox.roster_epoch, inbox.endpoint,
+                    inbox.ciphertext_bytes, inbox.plaintext_bytes, inbox.ciphertext_sha256,
+                    inbox.created_at, inbox.expires_at, inbox.attachment_count,
+                    inbox.attachment_bytes, inbox.prompt_request, inbox.body,
+                    inbox.disposition
+             FROM inbox
+             WHERE inbox.message_id = ?1 AND inbox.arrival_sequence IS NULL",
+            params![message_id],
+            held_message_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn held_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HeldMessage> {
+    Ok(HeldMessage {
+        message_id: row.get(0)?,
+        sender_principal: row.get(1)?,
+        device_sequence: row.get::<_, i64>(2)? as u64,
+        chain_id: row.get(3)?,
+        previous_chain_id: row.get(4)?,
+        kind: row.get(5)?,
+        thread_id: row.get(6)?,
+        in_reply_to: row.get(7)?,
+        roster_epoch: row.get::<_, i64>(8)? as u64,
+        endpoint: row.get(9)?,
+        ciphertext_bytes: row.get::<_, i64>(10)? as u64,
+        plaintext_bytes: row.get::<_, i64>(11)? as u64,
+        ciphertext_sha256: row.get(12)?,
+        created_at: row.get(13)?,
+        expires_at: row.get(14)?,
+        attachment_count: row.get::<_, i64>(15)? as u32,
+        attachment_bytes: row.get::<_, i64>(16)? as u64,
+        prompt_request: row.get(17)?,
+        body: row.get::<_, Option<Vec<u8>>>(18)?.unwrap_or_default(),
+        disposition: row.get(19)?,
+    })
 }
 
 /// Parks a message whose predecessor has not arrived.
@@ -1924,41 +2810,7 @@ fn hold(
     // The held row records everything needed to reconsider it later. The
     // decrypted body travels with it so releasing does not have to decrypt
     // again — and it is stored in the same quarantined state, never exposed.
-    transaction.execute(
-        "INSERT INTO inbox (
-             message_id, channel_id, sender_principal, sender_device, kind, thread_id,
-             in_reply_to, roster_epoch, endpoint, ciphertext_bytes, plaintext_bytes,
-             created_at, expires_at, received_at, body, disposition,
-             device_sequence, chain_id, previous_chain_id, ciphertext_sha256, arrival_sequence,
-             attachment_count, attachment_bytes, prompt_request
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                   'quarantined', ?16, ?17, ?18, ?19, NULL, ?20, ?21, ?22)
-         ON CONFLICT (message_id) DO NOTHING",
-        params![
-            message.message_id,
-            message.channel_id,
-            message.sender_principal,
-            message.sender_device,
-            message.kind,
-            message.thread_id,
-            message.in_reply_to,
-            message.roster_epoch as i64,
-            message.endpoint,
-            message.ciphertext_bytes as i64,
-            message.plaintext_bytes as i64,
-            message.created_at,
-            message.expires_at,
-            now,
-            message.body,
-            message.device_sequence as i64,
-            message.chain_id,
-            message.previous_chain_id,
-            message.ciphertext_sha256,
-            message.attachment_count,
-            message.attachment_bytes as i64,
-            message.prompt_request,
-        ],
-    )?;
+    store_held_inbox(transaction, message, now)?;
 
     Ok(InboundOutcome::Held {
         waiting_for: message.previous_chain_id.unwrap_or_default().to_owned(),
@@ -2002,7 +2854,7 @@ fn insert_accepted(
                  device_sequence, chain_id, previous_chain_id, ciphertext_sha256, arrival_sequence,
                  attachment_count, attachment_bytes, prompt_request
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                       'quarantined', ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                       ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
             params![
                 message.message_id,
                 message.channel_id,
@@ -2018,7 +2870,12 @@ fn insert_accepted(
                 message.created_at,
                 message.expires_at,
                 now,
-                message.body,
+                (!message.expired).then_some(message.body),
+                if message.expired {
+                    "expired"
+                } else {
+                    "quarantined"
+                },
                 message.device_sequence as i64,
                 message.chain_id,
                 message.previous_chain_id,
@@ -2053,35 +2910,14 @@ fn take_held(
                     inbox.in_reply_to, inbox.roster_epoch, inbox.endpoint,
                     inbox.ciphertext_bytes, inbox.plaintext_bytes, hold.ciphertext_sha256,
                     inbox.created_at, inbox.expires_at, inbox.attachment_count,
-                    inbox.attachment_bytes, inbox.prompt_request, inbox.body
+                    inbox.attachment_bytes, inbox.prompt_request, inbox.body,
+                    inbox.disposition
              FROM inbound_hold AS hold
              JOIN inbox ON inbox.message_id = hold.message_id
              WHERE hold.channel_id = ?1 AND hold.sender_device = ?2
                AND hold.previous_chain_id = ?3",
             params![channel_id, sender_device, link],
-            |row| {
-                Ok(HeldMessage {
-                    message_id: row.get(0)?,
-                    sender_principal: row.get(1)?,
-                    device_sequence: row.get::<_, i64>(2)? as u64,
-                    chain_id: row.get(3)?,
-                    previous_chain_id: row.get(4)?,
-                    kind: row.get(5)?,
-                    thread_id: row.get(6)?,
-                    in_reply_to: row.get(7)?,
-                    roster_epoch: row.get::<_, i64>(8)? as u64,
-                    endpoint: row.get(9)?,
-                    ciphertext_bytes: row.get::<_, i64>(10)? as u64,
-                    plaintext_bytes: row.get::<_, i64>(11)? as u64,
-                    ciphertext_sha256: row.get(12)?,
-                    created_at: row.get(13)?,
-                    expires_at: row.get(14)?,
-                    attachment_count: row.get::<_, i64>(15)? as u32,
-                    attachment_bytes: row.get::<_, i64>(16)? as u64,
-                    prompt_request: row.get(17)?,
-                    body: row.get::<_, Option<Vec<u8>>>(18)?.unwrap_or_default(),
-                })
-            },
+            held_message_from_row,
         )
         .optional()
         .map_err(Into::into)

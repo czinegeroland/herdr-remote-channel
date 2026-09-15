@@ -6,6 +6,8 @@
 
 use super::*;
 
+use std::collections::BTreeMap;
+
 use hrc_crypto::DeviceIdentity;
 use hrc_protocol::control::{
     ControlEntryPayload, ControlOperation, DeviceCertificate, GenesisPayload, PrincipalMaterial,
@@ -177,6 +179,7 @@ fn note(roster: &Roster, to: &[&str]) -> MessageEnvelope {
         // constructible and proves the caller's value is not trusted.
         recipients: hrc_protocol::RecipientDevices::new([canonical::sha256_hex(b"placeholder")])
             .unwrap(),
+        recipient_previous_chain_ids: None,
         thread_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
         in_reply_to: None,
         kind: "note".into(),
@@ -557,6 +560,48 @@ fn a_recipient_set_that_disagrees_with_the_roster_is_rejected() {
 }
 
 #[test]
+fn recipient_predecessors_are_signed_and_opened_with_the_message() {
+    let (alice, bob, roster) = channel();
+    let previous = canonical::sha256_hex(b"previous for bob");
+    let predecessors = BTreeMap::from([(bob.device_id(), Some(previous.clone()))]);
+
+    let ciphertext = seal_with_predecessors(
+        &roster,
+        &alice.device_key,
+        alice.signer(),
+        note(&roster, &["bob"]),
+        predecessors,
+    )
+    .unwrap();
+    let opened = open(&roster, &bob.identity, &ciphertext, roster.epoch(), NOW).unwrap();
+
+    assert_eq!(
+        opened.envelope.recipient_predecessor(&bob.device_id()),
+        Some(Some(previous.as_str()))
+    );
+}
+
+#[test]
+fn recipient_predecessors_must_exactly_match_the_sealed_recipient_set() {
+    let (alice, _bob, roster) = channel();
+    let predecessors = BTreeMap::from([(canonical::sha256_hex(b"someone-else"), None)]);
+
+    assert!(matches!(
+        seal_with_predecessors(
+            &roster,
+            &alice.device_key,
+            alice.signer(),
+            note(&roster, &["bob"]),
+            predecessors,
+        )
+        .unwrap_err(),
+        CoreError::Protocol(hrc_protocol::ProtocolError::DerivedMismatch {
+            field: "recipientPreviousChainIds"
+        })
+    ));
+}
+
+#[test]
 fn an_expired_message_is_refused() {
     let (alice, bob, roster) = channel();
 
@@ -576,6 +621,70 @@ fn an_expired_message_is_refused() {
     )
     .unwrap_err();
     assert!(matches!(error, CoreError::MessageExpired { .. }));
+}
+
+#[test]
+fn an_expired_message_can_be_authenticated_for_ordering() {
+    let (alice, bob, roster) = channel();
+    let mut envelope = note(&roster, &["bob"]);
+    envelope.expires_at = Some("2026-09-14T00:00:00Z".into());
+    let ciphertext = seal(&roster, &alice.device_key, alice.signer(), envelope).unwrap();
+
+    let opened = open_for_ordering(
+        &roster,
+        &bob.identity,
+        &ciphertext,
+        roster.epoch(),
+        "2026-09-15T00:00:00Z",
+    )
+    .unwrap();
+    assert!(opened.is_expired());
+    assert_eq!(opened.message().sender_device, alice.device_id());
+}
+
+#[test]
+fn resealing_replaces_the_recipient_predecessor_map() {
+    let (alice, bob, roster) = channel();
+    let envelope = note(&roster, &["bob"]);
+    let reseal_plaintext = canonical::to_canonical_bytes(&envelope).unwrap();
+    let reseal_material =
+        hrc_crypto::encrypt_to(&[alice.identity.recipient()], &reseal_plaintext).unwrap();
+    let chain_id = hrc_storage::chain_id_for(
+        roster.channel_id(),
+        &alice.device_id(),
+        envelope.device_sequence,
+        &envelope.message_id,
+    )
+    .unwrap();
+    let outgoing = PendingOutgoing {
+        message_id: envelope.message_id.clone(),
+        device_id: alice.device_id(),
+        device_sequence: envelope.device_sequence,
+        chain_id,
+        previous_chain_id: envelope.previous_chain_id.clone(),
+        roster_epoch: envelope.roster_epoch,
+        payload_hash: canonical::canonical_sha256_hex(&envelope.body).unwrap(),
+        created_at: envelope.created_at.clone(),
+        ciphertext: b"stale".to_vec(),
+        reseal_material: Some(reseal_material),
+        recipient_order_stale: false,
+    };
+    let previous = canonical::sha256_hex(b"bob previous");
+
+    let ciphertext = reseal_outgoing_with_predecessors(
+        &roster,
+        &alice.identity,
+        &alice.device_key,
+        &outgoing,
+        BTreeMap::from([(bob.device_id(), Some(previous.clone()))]),
+    )
+    .unwrap();
+    let opened = open(&roster, &bob.identity, &ciphertext, roster.epoch(), NOW).unwrap();
+
+    assert_eq!(
+        opened.envelope.recipient_predecessor(&bob.device_id()),
+        Some(Some(previous.as_str()))
+    );
 }
 
 #[test]

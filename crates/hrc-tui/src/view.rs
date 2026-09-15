@@ -21,8 +21,8 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
     let areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(7),
             Constraint::Min(5),
-            Constraint::Length(9),
             Constraint::Length(3),
         ])
         .split(frame.area());
@@ -87,10 +87,15 @@ fn render_body(frame: &mut Frame<'_>, app: &App, area: Rect) {
         _ => ("Message body", "No message selected.".to_owned()),
     };
 
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let inner = block.inner(area);
+    let lines = wrapped_lines(&text, inner.width);
+    app.set_body_viewport(lines.len(), inner.height);
+
     frame.render_widget(
-        Paragraph::new(text)
-            .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).title(title)),
+        Paragraph::new(lines)
+            .scroll((app.body_scroll(), 0))
+            .block(block),
         area,
     );
 }
@@ -452,54 +457,50 @@ pub fn render_context(frame: &mut Frame<'_>, app: &crate::context::ContextApp) {
     );
 
     let detail = match app.preview() {
-        None => vec![Line::from(
-            "Nothing has been disclosed yet. Press Enter to ask what this package contains.",
-        )],
+        None => "Nothing has been disclosed yet. Press Enter to ask what this package contains."
+            .to_owned(),
         Some(preview) => {
-            let mut lines = vec![Line::from(format!(
+            let mut text = format!(
                 "{} bytes in {} item(s)",
                 preview.total_bytes,
                 preview.items.len()
-            ))];
+            );
 
             for (kind, bytes) in &preview.items {
-                lines.push(Line::from(format!("  {kind}  {bytes} bytes")));
+                text.push_str(&format!("\n  {kind}  {bytes} bytes"));
             }
 
             if !preview.secrets.is_empty() {
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    "Secret-scan findings — this package cannot be sent:",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )));
+                text.push_str("\n\nSecret-scan findings — this package cannot be sent:");
                 for finding in &preview.secrets {
-                    lines.push(Line::from(format!("  {finding}")));
+                    text.push_str(&format!("\n  {finding}"));
                 }
             }
 
             if !preview.excluded.is_empty() {
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    "Excluded by the repository's own rules:",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )));
+                text.push_str("\n\nExcluded by the repository's own rules:");
                 for path in &preview.excluded {
-                    lines.push(Line::from(format!("  {path}")));
+                    text.push_str(&format!("\n  {path}"));
                 }
             }
 
-            lines
+            text.push_str("\n\nCanonical package content:\n");
+            text.push_str(&preview.content);
+            text
         }
     };
 
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("What would be sent");
+    let inner = block.inner(areas[2]);
+    let lines = wrapped_lines(&detail, inner.width);
+    app.set_preview_viewport(lines.len(), inner.height);
+
     frame.render_widget(
-        Paragraph::new(detail)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("What would be sent"),
-            )
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(lines)
+            .scroll((app.preview_scroll(), 0))
+            .block(block),
         areas[2],
     );
 
@@ -510,4 +511,50 @@ pub fn render_context(frame: &mut Frame<'_>, app: &crate::context::ContextApp) {
             .wrap(Wrap { trim: false }),
         areas[3],
     );
+}
+
+/// Wraps plain text into exactly the rows handed to a scrolling paragraph.
+///
+/// Doing the wrapping here gives the state machines a real rendered row
+/// count, so resize clamping and PageUp/PageDown never depend on a guessed
+/// terminal height or on byte counts that differ from display width.
+fn wrapped_lines(text: &str, width: u16) -> Vec<Line<'static>> {
+    let width = usize::from(width.max(1));
+    let mut rendered = Vec::new();
+
+    for source in text.split('\n') {
+        if source.is_empty() {
+            rendered.push(Line::from(String::new()));
+            continue;
+        }
+
+        let mut row = String::new();
+        let mut row_width = 0usize;
+
+        for character in source.chars() {
+            let character_width = Span::raw(character.to_string()).width();
+            if !row.is_empty() && row_width.saturating_add(character_width) > width {
+                rendered.push(Line::from(std::mem::take(&mut row)));
+                row_width = 0;
+            }
+
+            row.push(character);
+            row_width = row_width.saturating_add(character_width);
+
+            if row_width >= width {
+                rendered.push(Line::from(std::mem::take(&mut row)));
+                row_width = 0;
+            }
+        }
+
+        if !row.is_empty() {
+            rendered.push(Line::from(row));
+        }
+    }
+
+    if rendered.is_empty() {
+        rendered.push(Line::from(String::new()));
+    }
+
+    rendered
 }
