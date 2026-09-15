@@ -16,6 +16,8 @@ pub enum Pane {
     /// The channel setup screen: create a channel, invite someone, or
     /// redeem an invite.
     Setup,
+    /// The context disclosure screen, where a package is previewed and sent.
+    Context,
     /// The composition screen, for writing a note or a question without
     /// leaving Herdr.
     Compose,
@@ -36,10 +38,11 @@ pub enum Pane {
 
 impl Pane {
     /// Every pane, in the order the manifest declares them.
-    pub const ALL: [Pane; 5] = [
+    pub const ALL: [Pane; 6] = [
         Pane::Inbox,
         Pane::Setup,
         Pane::Compose,
+        Pane::Context,
         Pane::Joins,
         Pane::Review,
     ];
@@ -50,6 +53,7 @@ impl Pane {
             Pane::Inbox => "inbox",
             Pane::Setup => "setup",
             Pane::Compose => "compose",
+            Pane::Context => "context",
             Pane::Joins => "joins",
             Pane::Review => "review",
         }

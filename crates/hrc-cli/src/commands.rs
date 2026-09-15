@@ -3671,6 +3671,10 @@ pub fn herdr_pane(context: &Context, pane: &str) -> Result<Value> {
         // Writing a message, so that saying something needs no other tool.
         hrc_herdr::Pane::Compose => review::compose(context),
 
+        // Disclosing a context package, which section 22.4 puts behind the
+        // same boundary as reading a quarantined body.
+        hrc_herdr::Pane::Context => review::context(context),
+
         // Getting a channel in the first place.
         hrc_herdr::Pane::Setup => review::setup(context),
 

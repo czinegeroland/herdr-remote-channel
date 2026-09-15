@@ -43,6 +43,12 @@ contexts = ["workspace", "pane"]
 command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "action", "compose"]
 
 [[actions]]
+id = "context"
+title = "Remote channel context"
+contexts = ["workspace", "pane"]
+command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "action", "context"]
+
+[[actions]]
 id = "joins"
 title = "Remote channel join requests"
 contexts = ["workspace", "pane"]
@@ -79,6 +85,14 @@ placement = "popup"
 width = "80%"
 height = "80%"
 command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "pane", "compose"]
+
+[[panes]]
+id = "context"
+title = "Remote channel context"
+placement = "popup"
+width = "80%"
+height = "80%"
+command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "pane", "context"]
 
 [[panes]]
 id = "joins"

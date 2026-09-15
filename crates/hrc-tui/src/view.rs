@@ -379,3 +379,135 @@ pub fn render_passphrase(frame: &mut Frame<'_>, app: &crate::passphrase::Passphr
         areas[0],
     );
 }
+
+/// Draws the context disclosure screen.
+///
+/// Findings are spelled out rather than summarised. A count would tell a
+/// person that something is wrong without telling them what, and the whole
+/// purpose of the preview is that they can judge it.
+pub fn render_context(frame: &mut Frame<'_>, app: &crate::context::ContextApp) {
+    use crate::context::ContextFocus;
+
+    let areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(6),
+            Constraint::Length(5),
+            Constraint::Min(5),
+            Constraint::Length(3),
+        ])
+        .split(frame.area());
+
+    let packages: Vec<ListItem<'_>> = app
+        .drafts()
+        .iter()
+        .enumerate()
+        .map(|(index, draft)| {
+            let marker = if index == app.selected_draft_index() {
+                "> "
+            } else {
+                "  "
+            };
+
+            ListItem::new(Line::from(format!(
+                "{marker}{}  {}",
+                draft.package_id,
+                &draft.digest[..draft.digest.len().min(16)]
+            )))
+        })
+        .collect();
+
+    frame.render_widget(
+        List::new(packages).block(Block::default().borders(Borders::ALL).title(
+            match app.focus() {
+                ContextFocus::Package => "Package (choosing)",
+                _ => "Package",
+            },
+        )),
+        areas[0],
+    );
+
+    let recipients: Vec<ListItem<'_>> = app
+        .recipients()
+        .iter()
+        .enumerate()
+        .map(|(index, recipient)| {
+            let marker = if index == app.selected_recipient_index() {
+                "> "
+            } else {
+                "  "
+            };
+            ListItem::new(Line::from(format!("{marker}{recipient}")))
+        })
+        .collect();
+
+    frame.render_widget(
+        List::new(recipients).block(Block::default().borders(Borders::ALL).title(
+            match app.focus() {
+                ContextFocus::Recipient => "To (choosing)",
+                _ => "To",
+            },
+        )),
+        areas[1],
+    );
+
+    let detail = match app.preview() {
+        None => vec![Line::from(
+            "Nothing has been disclosed yet. Press Enter to ask what this package contains.",
+        )],
+        Some(preview) => {
+            let mut lines = vec![Line::from(format!(
+                "{} bytes in {} item(s)",
+                preview.total_bytes,
+                preview.items.len()
+            ))];
+
+            for (kind, bytes) in &preview.items {
+                lines.push(Line::from(format!("  {kind}  {bytes} bytes")));
+            }
+
+            if !preview.secrets.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "Secret-scan findings — this package cannot be sent:",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )));
+                for finding in &preview.secrets {
+                    lines.push(Line::from(format!("  {finding}")));
+                }
+            }
+
+            if !preview.excluded.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "Excluded by the repository's own rules:",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )));
+                for path in &preview.excluded {
+                    lines.push(Line::from(format!("  {path}")));
+                }
+            }
+
+            lines
+        }
+    };
+
+    frame.render_widget(
+        Paragraph::new(detail)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("What would be sent"),
+            )
+            .wrap(Wrap { trim: false }),
+        areas[2],
+    );
+
+    let status = app.proposed().unwrap_or_else(|| app.status()).to_owned();
+    frame.render_widget(
+        Paragraph::new(status)
+            .block(Block::default().borders(Borders::ALL))
+            .wrap(Wrap { trim: false }),
+        areas[3],
+    );
+}

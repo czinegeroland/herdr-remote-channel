@@ -1254,6 +1254,24 @@ impl Database {
             .map_err(Into::into)
     }
 
+    /// Every locally authored package, oldest first.
+    ///
+    /// Only the identifier and digest, not the manifest. A caller listing
+    /// what could be sent has no business reading the contents of each one,
+    /// and the manifests are large enough that loading them all to render a
+    /// menu would be wasteful as well as wrong.
+    pub fn context_drafts(&self) -> Result<Vec<(String, String)>> {
+        let mut statement = self.connection.prepare(
+            "SELECT package_id, digest FROM context_draft ORDER BY created_at, package_id",
+        )?;
+
+        let drafts = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(drafts)
+    }
+
     /// Reads quarantined context only for trusted code and tests.
     pub fn inbound_context(&self, message_id: &str) -> Result<Option<ContextDraft>> {
         self.connection

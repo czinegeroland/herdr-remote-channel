@@ -3026,7 +3026,7 @@ fn every_interactive_pane_refuses_a_captured_terminal() {
     // agent's tool call looks like; none of these screens should run for one.
     let (home, _remote) = channel_fixture();
 
-    for pane in ["review", "joins", "compose", "setup"] {
+    for pane in ["review", "joins", "compose", "context", "setup"] {
         let output = hrc_in(home.path())
             .args(["herdr", "pane", pane])
             .output()
@@ -3040,6 +3040,35 @@ fn every_interactive_pane_refuses_a_captured_terminal() {
         assert!(
             output.stdout.is_empty(),
             "`{pane}` must not write to standard output"
+        );
+    }
+}
+
+#[test]
+fn the_context_pane_is_the_only_way_to_disclose_a_package() {
+    // Section 22.4 puts both preview and send behind the human authorization
+    // boundary, and until this pane existed there was no way to cross it:
+    // the CLI refused, and nothing else asked. A whole section of the product
+    // was reachable only from a test.
+    //
+    // The CLI halves must keep refusing, so the pane is the only door rather
+    // than a second one.
+    let (home, _remote) = channel_fixture();
+
+    for args in [
+        vec!["context", "preview", "ctx-1"],
+        vec!["context", "send", "someone", "ctx-1"],
+    ] {
+        let output = hrc_in(home.path())
+            .args(&args)
+            .output()
+            .expect("command should run");
+
+        assert_eq!(
+            output.status.code(),
+            Some(AUTHORIZATION_REQUIRED),
+            "`hrc {}` must stay on the boundary",
+            args.join(" ")
         );
     }
 }
