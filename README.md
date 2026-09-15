@@ -120,7 +120,7 @@ published SHA-256 before it is packed, and a mismatch stops the publish.
 There is also a shell installer, which does the same verification itself:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/czinegeroland/herdr-remote-channel/main/scripts/install.sh | sh -s -- --version v0.1.1
+curl -fsSL https://raw.githubusercontent.com/czinegeroland/herdr-remote-channel/main/scripts/install.sh | sh -s -- --version v0.2.0
 ```
 
 `scripts/install.ps1` is the Windows equivalent. Both download a prebuilt
