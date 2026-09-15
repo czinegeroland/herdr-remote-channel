@@ -671,12 +671,13 @@ pub fn context(context: &Context) -> Result<Value> {
                     &endpoint,
                     TrustedRequest::PreviewContext {
                         recipient,
-                        package_id,
+                        package_id: package_id.clone(),
                     },
                 ))?;
 
-                authorization = previewed["authorization"].as_str().map(str::to_owned);
-                screen.show_preview(preview_from(&previewed));
+                let parsed = preview_from(&previewed, &package_id)?;
+                authorization = Some(parsed.authorization);
+                screen.show_preview(parsed.preview);
             }
 
             ContextOutcome::Send {
@@ -699,6 +700,7 @@ pub fn context(context: &Context) -> Result<Value> {
                         authorization: granted,
                     },
                 ))?;
+                require_trusted_success(&sent, "send_context")?;
 
                 return Ok(json!({
                     "status": "ok",
@@ -724,54 +726,276 @@ async fn trusted_call(endpoint: &Endpoint, request: TrustedRequest) -> Result<Va
     client.call(&request).await.map_err(CliError::from)
 }
 
-/// Reads a trusted preview response into what the screen displays.
+/// Reads a successful trusted preview into the exact content the screen displays.
 ///
-/// A response the screen cannot parse yields a preview that is not sendable,
-/// rather than an empty one that looks harmless. The failure mode to avoid
-/// here is a screen that shows "0 bytes, no findings" because a field moved.
-fn preview_from(response: &Value) -> hrc_tui::ContextPreview {
-    let strings = |key: &str, render: fn(&Value) -> Option<String>| -> Vec<String> {
-        response[key]
-            .as_array()
-            .map(|entries| entries.iter().filter_map(render).collect())
-            .unwrap_or_default()
-    };
+/// The daemon has already re-read source files and rejected secret or path
+/// findings before it returns success. Missing fields and explicit error
+/// responses therefore fail the command rather than becoming an empty,
+/// apparently harmless preview.
+fn preview_from(response: &Value, expected_package_id: &str) -> Result<ParsedContextPreview> {
+    require_trusted_success(response, "preview_context")?;
 
-    let secrets = strings("secretFindings", |finding| {
-        Some(format!(
-            "item {}: {}",
-            finding["item"].as_u64()?,
-            finding["rule"].as_str()?
-        ))
-    });
+    let package_id = required_string(response, "contextId")?;
+    if package_id != expected_package_id {
+        return Err(invalid_trusted_response(format!(
+            "trusted preview answered for context `{package_id}` instead of `{expected_package_id}`"
+        )));
+    }
 
-    let excluded = strings("excludedPaths", |path| {
-        Some(format!(
-            "{} ({})",
-            path["path"].as_str()?,
-            path["reason"].as_str().unwrap_or("excluded")
+    let digest = required_string(response, "digest")?.to_owned();
+    let content = required_string(response, "content")?.to_owned();
+    let authorization = required_string(response, "authorization")?.to_owned();
+    let total_bytes = response["totalBytes"].as_u64().ok_or_else(|| {
+        invalid_trusted_response("trusted preview omitted the canonical package size")
+    })?;
+    if total_bytes != content.len() as u64 {
+        return Err(invalid_trusted_response(format!(
+            "trusted preview declared {total_bytes} bytes but returned {}",
+            content.len()
+        )));
+    }
+
+    let package = hrc_protocol::canonical::from_json_str::<hrc_core::ContextPackage>(&content)
+        .map_err(|error| {
+            invalid_trusted_response(format!(
+                "trusted preview returned invalid canonical content: {error}"
+            ))
+        })?;
+    if package.id != package_id {
+        return Err(invalid_trusted_response(
+            "trusted preview content has a different package identifier",
+        ));
+    }
+    let canonical_content =
+        hrc_protocol::canonical::to_canonical_bytes(&package).map_err(|error| {
+            invalid_trusted_response(format!(
+                "trusted preview content could not be canonicalized: {error}"
+            ))
+        })?;
+    if canonical_content.as_slice() != content.as_bytes() {
+        return Err(invalid_trusted_response(
+            "trusted preview content was not the canonical package representation",
+        ));
+    }
+    package.verify_digest(&digest).map_err(|error| {
+        invalid_trusted_response(format!(
+            "trusted preview content does not match its digest: {error}"
         ))
-    });
+    })?;
 
     let items = response["items"]
         .as_array()
-        .map(|entries| {
-            entries
-                .iter()
-                .filter_map(|item| {
-                    Some((item["kind"].as_str()?.to_owned(), item["bytes"].as_u64()?))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+        .ok_or_else(|| invalid_trusted_response("trusted preview omitted its item list"))?
+        .iter()
+        .map(parse_preview_item)
+        .collect::<Result<Vec<_>>>()?;
+    let verified = package.preview().map_err(|error| {
+        invalid_trusted_response(format!(
+            "trusted preview content could not be verified: {error}"
+        ))
+    })?;
+    if !verified.is_sendable() {
+        return Err(invalid_trusted_response(
+            "trusted preview returned content that failed local disclosure checks",
+        ));
+    }
+    let verified_items = verified
+        .items
+        .into_iter()
+        .map(|(kind, bytes)| (kind, bytes as u64))
+        .collect::<Vec<_>>();
+    if items != verified_items || total_bytes != verified.total_bytes as u64 {
+        return Err(invalid_trusted_response(
+            "trusted preview summary did not match its canonical content",
+        ));
+    }
 
-    let understood = response["status"] == "ok" && response["digest"].is_string();
+    Ok(ParsedContextPreview {
+        authorization,
+        preview: hrc_tui::ContextPreview {
+            digest,
+            content,
+            items,
+            total_bytes,
+            secrets: Vec::new(),
+            excluded: Vec::new(),
+            // A successful daemon preview has already re-read the source,
+            // checked exclusions and scanned secrets. Error responses never
+            // reach the screen through this parser.
+            sendable: true,
+        },
+    })
+}
 
-    hrc_tui::ContextPreview {
-        items,
-        total_bytes: response["totalBytes"].as_u64().unwrap_or_default(),
-        secrets,
-        excluded,
-        sendable: understood && response["sendable"].as_bool().unwrap_or(false),
+#[derive(Debug)]
+struct ParsedContextPreview {
+    authorization: String,
+    preview: hrc_tui::ContextPreview,
+}
+
+fn parse_preview_item(value: &Value) -> Result<(String, u64)> {
+    if let Some(pair) = value.as_array()
+        && pair.len() == 2
+        && let (Some(kind), Some(bytes)) = (pair[0].as_str(), pair[1].as_u64())
+    {
+        return Ok((kind.to_owned(), bytes));
+    }
+
+    if let (Some(kind), Some(bytes)) = (value["kind"].as_str(), value["bytes"].as_u64()) {
+        return Ok((kind.to_owned(), bytes));
+    }
+
+    Err(invalid_trusted_response(
+        "trusted preview returned a malformed item summary",
+    ))
+}
+
+fn require_trusted_success(response: &Value, expected_method: &str) -> Result<()> {
+    if response["status"] != "ok" {
+        let code = response["code"].as_str().unwrap_or("unknown_error");
+        let message = response["message"]
+            .as_str()
+            .unwrap_or("the daemon did not explain the failure");
+        return Err(invalid_trusted_response(format!(
+            "trusted `{expected_method}` failed with `{code}`: {message}"
+        )));
+    }
+
+    if response["method"].as_str() != Some(expected_method) {
+        return Err(invalid_trusted_response(format!(
+            "trusted response did not identify `{expected_method}`"
+        )));
+    }
+
+    Ok(())
+}
+
+fn required_string<'a>(response: &'a Value, key: &str) -> Result<&'a str> {
+    response[key]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| invalid_trusted_response(format!("trusted preview omitted `{key}`")))
+}
+
+fn invalid_trusted_response(reason: impl Into<String>) -> CliError {
+    CliError::Ipc(hrc_ipc::IpcError::Malformed(reason.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::process::Command as ProcessCommand;
+
+    use crate::paths::Paths;
+
+    fn test_context(root: &std::path::Path) -> Context {
+        Context {
+            paths: Paths::at(root.join("state")),
+            passphrase: Some(SecretString::from(
+                "correct horse battery staple".to_owned(),
+            )),
+        }
+    }
+
+    #[test]
+    fn actual_daemon_preview_parses_into_a_sendable_visible_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let context = test_context(directory.path());
+        super::super::init(&context).unwrap();
+
+        let remote = directory.path().join("remote.git");
+        let status = ProcessCommand::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&remote)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        super::super::create(
+            &context,
+            remote.to_str().unwrap(),
+            Some("Context preview test"),
+        )
+        .unwrap();
+
+        let peer = test_context(&directory.path().join("peer"));
+        let peer_identity = super::super::init(&peer).unwrap();
+        let recipient = peer_identity["principalKey"].as_str().unwrap().to_owned();
+        let invite = super::super::invite_create(&context, "peer", "24h").unwrap();
+        let joined = super::super::join(&peer, invite["inviteCode"].as_str().unwrap()).unwrap();
+        super::super::admit_join(&context, joined["requestId"].as_str().unwrap()).unwrap();
+
+        let manifest = directory.path().join("context.json");
+        let canonical_text = "review this exact canonical content";
+        std::fs::write(
+            &manifest,
+            format!(
+                r#"{{"version":1,"id":"ctx-live","items":[{{"kind":"note","text":"{canonical_text}"}}]}}"#
+            ),
+        )
+        .unwrap();
+        super::super::context_draft(&context, manifest.to_str().unwrap(), None).unwrap();
+
+        let ledger = std::sync::Mutex::new(hrc_core::rpc::ContextAuthorizationLedger::new());
+        let response = super::super::handle_trusted_request(
+            &context,
+            &ledger,
+            TrustedRequest::PreviewContext {
+                recipient: recipient.clone(),
+                package_id: "ctx-live".into(),
+            },
+        );
+
+        assert!(response.get("sendable").is_none());
+        let parsed = preview_from(&response, "ctx-live").unwrap();
+        assert!(!parsed.authorization.is_empty());
+        assert!(parsed.preview.sendable);
+        assert!(parsed.preview.content.contains(canonical_text));
+        assert_eq!(parsed.preview.items.len(), 1);
+        assert_eq!(parsed.preview.items[0].0, "note");
+        assert_eq!(
+            parsed.preview.total_bytes,
+            parsed.preview.content.len() as u64
+        );
+        let authorization = parsed.authorization.clone();
+
+        let mut screen = ContextApp::new(
+            vec![hrc_tui::ContextDraft {
+                package_id: "ctx-live".into(),
+                digest: parsed.preview.digest.clone(),
+            }],
+            vec![recipient.clone()],
+        );
+        screen.show_preview(parsed.preview);
+        assert!(screen.status().contains("Ctrl+S"));
+        assert!(screen.preview().unwrap().content.contains(canonical_text));
+
+        let sent = super::super::handle_trusted_request(
+            &context,
+            &ledger,
+            TrustedRequest::SendContext {
+                recipient,
+                package_id: "ctx-live".into(),
+                authorization,
+            },
+        );
+        require_trusted_success(&sent, "send_context").unwrap();
+    }
+
+    #[test]
+    fn daemon_error_response_is_not_rendered_as_an_empty_preview() {
+        let response = json!({
+            "status": "error",
+            "code": "core_error",
+            "message": "context package is blocked by source or secret checks",
+        });
+
+        let error = preview_from(&response, "ctx-blocked").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("blocked by source or secret checks"),
+            "{error}"
+        );
     }
 }

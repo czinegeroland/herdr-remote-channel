@@ -4,6 +4,8 @@
 //! interactive approval, and because a decision that can be reached by a
 //! stray click is a decision that can be made by accident.
 
+use std::cell::Cell;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use hrc_core::gate::AgentView;
 
@@ -80,6 +82,9 @@ pub struct App {
     proposed: Option<Proposed>,
     /// The agent a delivery would go to, chosen locally.
     agent: String,
+    body_scroll: Cell<u16>,
+    body_page_rows: Cell<u16>,
+    body_max_scroll: Cell<u16>,
     status: String,
 }
 
@@ -97,6 +102,9 @@ impl App {
             focus: Focus::List,
             proposed: None,
             agent: agent.into(),
+            body_scroll: Cell::new(0),
+            body_page_rows: Cell::new(1),
+            body_max_scroll: Cell::new(0),
             status: "Press Enter to reveal the selected message.".into(),
         }
     }
@@ -136,6 +144,21 @@ impl App {
         &self.status
     }
 
+    /// The first wrapped body row currently shown.
+    pub fn body_scroll(&self) -> u16 {
+        self.body_scroll.get()
+    }
+
+    /// Updates the rendered body dimensions and clamps scrolling after resize.
+    pub(crate) fn set_body_viewport(&self, total_rows: usize, visible_rows: u16) {
+        let max_scroll = total_rows
+            .saturating_sub(visible_rows as usize)
+            .min(u16::MAX as usize) as u16;
+        self.body_page_rows.set(visible_rows.max(1));
+        self.body_max_scroll.set(max_scroll);
+        self.body_scroll.set(self.body_scroll.get().min(max_scroll));
+    }
+
     /// Handles one key press, returning an outcome when one is reached.
     ///
     /// A decision needs two presses: the first proposes it and the second
@@ -171,11 +194,37 @@ impl App {
                     // takes a second, deliberate press.
                     self.revealed = false;
                     self.focus = Focus::List;
+                    self.body_scroll.set(0);
                     self.status = "Press Enter to reveal the selected message.".into();
                     None
                 } else {
                     Some(Outcome::Quit)
                 }
+            }
+
+            KeyCode::Char('j') if self.focus == Focus::Body => {
+                self.scroll_body(1);
+                None
+            }
+            KeyCode::Char('k') if self.focus == Focus::Body => {
+                self.scroll_body(-1);
+                None
+            }
+            KeyCode::PageDown if self.focus == Focus::Body => {
+                self.scroll_body(i32::from(self.body_page_rows.get()));
+                None
+            }
+            KeyCode::PageUp if self.focus == Focus::Body => {
+                self.scroll_body(-i32::from(self.body_page_rows.get()));
+                None
+            }
+            KeyCode::Home if self.focus == Focus::Body => {
+                self.body_scroll.set(0);
+                None
+            }
+            KeyCode::End if self.focus == Focus::Body => {
+                self.body_scroll.set(self.body_max_scroll.get());
+                None
             }
 
             KeyCode::Down | KeyCode::Char('j') => {
@@ -191,8 +240,8 @@ impl App {
                 if self.selected().is_some() {
                     self.revealed = true;
                     self.focus = Focus::Body;
-                    self.status =
-                        "a: deliver to agent   i: keep in inbox   d: decline   Esc: hide".into();
+                    self.body_scroll.set(0);
+                    self.status = "j/k/PgUp/PgDn: scroll   Up/Down: select   a: deliver   i: inbox   d: decline   Esc: hide".into();
                 }
                 None
             }
@@ -237,7 +286,16 @@ impl App {
         // decision would be made about the wrong one.
         self.revealed = false;
         self.focus = Focus::List;
+        self.body_scroll.set(0);
         self.status = "Press Enter to reveal the selected message.".into();
+    }
+
+    /// Scrolls the wrapped body without changing which message is selected.
+    fn scroll_body(&self, delta: i32) {
+        let current = i32::from(self.body_scroll.get());
+        let maximum = i32::from(self.body_max_scroll.get());
+        self.body_scroll
+            .set((current + delta).clamp(0, maximum) as u16);
     }
 
     /// Proposes a decision about the selected item.

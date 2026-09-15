@@ -17,7 +17,7 @@
 use hrc_crypto::{DeviceIdentity, DeviceRecipient, SigningKey, VerifyingKey, encrypt_to};
 use hrc_protocol::canonical;
 use hrc_protocol::domain;
-use hrc_protocol::message::MessageEnvelope;
+use hrc_protocol::message::{MessageEnvelope, RecipientPredecessors};
 use hrc_protocol::signed::{SignedObject, Signer};
 use hrc_storage::PendingOutgoing;
 
@@ -42,6 +42,32 @@ pub struct QuarantinedMessage {
     /// An approval is bound to this digest, so approving a message and
     /// delivering a different one is not possible (PRD section 19.5).
     pub ciphertext_sha256: String,
+}
+
+/// A fully authenticated message classified by whether it is still actionable.
+#[derive(Debug, Clone)]
+pub enum OpenedForOrdering {
+    /// The message passed every check and has not expired.
+    Actionable(QuarantinedMessage),
+    /// The message passed every authenticity and roster check but has expired.
+    ///
+    /// Receivers retain its ordering link but must not expose its body or
+    /// generate an ordinary delivered receipt.
+    Expired(QuarantinedMessage),
+}
+
+impl OpenedForOrdering {
+    /// Borrows the authenticated message regardless of expiry.
+    pub fn message(&self) -> &QuarantinedMessage {
+        match self {
+            Self::Actionable(message) | Self::Expired(message) => message,
+        }
+    }
+
+    /// Whether the authenticated message has expired.
+    pub const fn is_expired(&self) -> bool {
+        matches!(self, Self::Expired(_))
+    }
 }
 
 /// Builds a signed, encrypted message for the active recipient devices.
@@ -103,6 +129,23 @@ pub fn seal(
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
     Ok(encrypt_to(&age_recipients, &plaintext)?)
+}
+
+/// Seals a message with recipient-scoped predecessor links.
+///
+/// Storage derives this map from the sender's own durable outbox facts inside
+/// the same transaction that allocates and queues the message. Keeping the
+/// derivation outside the envelope avoids trusting caller-authored remote
+/// claims while still signing the final map.
+pub fn seal_with_predecessors(
+    roster: &Roster,
+    signing_key: &SigningKey,
+    sender: Signer,
+    mut envelope: MessageEnvelope,
+    recipient_previous_chain_ids: RecipientPredecessors,
+) -> Result<Vec<u8>> {
+    envelope.recipient_previous_chain_ids = Some(recipient_previous_chain_ids);
+    seal(roster, signing_key, sender, envelope)
 }
 
 /// Rebuilds queued ciphertext for the roster that will introduce it.
@@ -195,6 +238,112 @@ pub fn reseal_outgoing(
     )
 }
 
+/// Rebuilds queued ciphertext with freshly derived recipient predecessors.
+///
+/// This is the recipient-ordered counterpart to [`reseal_outgoing`]. The
+/// storage transaction computes the map from earlier durable outbox facts and
+/// atomically replaces both ciphertext and recipient rows after this returns.
+pub fn reseal_outgoing_with_predecessors(
+    roster: &Roster,
+    identity: &DeviceIdentity,
+    signing_key: &SigningKey,
+    outgoing: &PendingOutgoing,
+    recipient_previous_chain_ids: RecipientPredecessors,
+) -> Result<Vec<u8>> {
+    let material =
+        outgoing
+            .reseal_material
+            .as_deref()
+            .ok_or_else(|| CoreError::OutboxMessageMismatch {
+                message_id: outgoing.message_id.clone(),
+                field: "re-encryption material",
+            })?;
+    let plaintext = identity.decrypt(material)?;
+    let text = std::str::from_utf8(&plaintext).map_err(|_| CoreError::MalformedMessage {
+        reason: "protected outbox material is not UTF-8".into(),
+    })?;
+    let mut envelope: MessageEnvelope = canonical::from_json_str(text)?;
+
+    validate_outgoing_material(roster, signing_key, outgoing, &envelope)?;
+    envelope.roster_epoch = roster.epoch();
+    envelope.recipient_previous_chain_ids = Some(recipient_previous_chain_ids);
+
+    let sender = roster
+        .device(&outgoing.device_id)
+        .ok_or_else(|| CoreError::UnknownDevice {
+            device_id: outgoing.device_id.clone(),
+        })?;
+
+    seal(
+        roster,
+        signing_key,
+        Signer {
+            principal_id: sender.principal_id.clone(),
+            device_id: outgoing.device_id.clone(),
+        },
+        envelope,
+    )
+}
+
+fn validate_outgoing_material(
+    roster: &Roster,
+    signing_key: &SigningKey,
+    outgoing: &PendingOutgoing,
+    envelope: &MessageEnvelope,
+) -> Result<()> {
+    check_outbox_field(
+        &outgoing.message_id,
+        envelope.channel_id == *roster.channel_id(),
+        "channel ID",
+    )?;
+    check_outbox_field(
+        &outgoing.message_id,
+        envelope.message_id == outgoing.message_id,
+        "message ID",
+    )?;
+    check_outbox_field(
+        &outgoing.message_id,
+        envelope.device_sequence == outgoing.device_sequence,
+        "device sequence",
+    )?;
+    check_outbox_field(
+        &outgoing.message_id,
+        envelope.previous_chain_id == outgoing.previous_chain_id,
+        "previous chain ID",
+    )?;
+    check_outbox_field(
+        &outgoing.message_id,
+        envelope.created_at == outgoing.created_at,
+        "creation time",
+    )?;
+    check_outbox_field(
+        &outgoing.message_id,
+        canonical::canonical_sha256_hex(&envelope.body)? == outgoing.payload_hash,
+        "payload hash",
+    )?;
+    check_outbox_field(
+        &outgoing.message_id,
+        hrc_storage::chain_id_for(
+            roster.channel_id(),
+            &outgoing.device_id,
+            outgoing.device_sequence,
+            &outgoing.message_id,
+        )? == outgoing.chain_id,
+        "chain ID",
+    )?;
+
+    let sender = roster
+        .device(&outgoing.device_id)
+        .ok_or_else(|| CoreError::UnknownDevice {
+            device_id: outgoing.device_id.clone(),
+        })?;
+    check_outbox_field(
+        &outgoing.message_id,
+        signing_key.verifying_key().to_base64url() == sender.signing_key,
+        "signing key",
+    )
+}
+
 fn check_outbox_field(message_id: &str, matches: bool, field: &'static str) -> Result<()> {
     if !matches {
         return Err(CoreError::OutboxMessageMismatch {
@@ -260,6 +409,28 @@ pub fn open(
     introduced_in_epoch: u64,
     now: &str,
 ) -> Result<QuarantinedMessage> {
+    match open_for_ordering(roster, identity, ciphertext, introduced_in_epoch, now)? {
+        OpenedForOrdering::Actionable(message) => Ok(message),
+        OpenedForOrdering::Expired(message) => Err(CoreError::MessageExpired {
+            expires_at: message.envelope.expires_at.unwrap_or_default(),
+        }),
+    }
+}
+
+/// Opens a message while preserving authenticated expired links for ordering.
+///
+/// Decryption, shape validation, roster authorization, signature checks,
+/// introduction ordering, and recipient validation all run before expiry is
+/// classified. Callers may therefore advance durable ordering for
+/// [`OpenedForOrdering::Expired`] without treating arbitrary invalid
+/// ciphertext as a predecessor.
+pub fn open_for_ordering(
+    roster: &Roster,
+    identity: &DeviceIdentity,
+    ciphertext: &[u8],
+    introduced_in_epoch: u64,
+    now: &str,
+) -> Result<OpenedForOrdering> {
     // Steps 1 and 2: the caller has already matched the object against the
     // hash the transport reported. Record the digest so an approval can be
     // bound to it later.
@@ -357,20 +528,23 @@ pub fn open(
         return Err(CoreError::RecipientSetMismatch);
     }
 
-    // Step 9: expiry. Sequence and deduplication are the storage layer's
+    // Step 9: sequence and deduplication are the storage layer's
     // responsibility, since they need state this function does not hold.
-    if envelope.is_expired_at(now) {
-        return Err(CoreError::MessageExpired {
-            expires_at: envelope.expires_at.clone().unwrap_or_default(),
-        });
-    }
+    let expired = envelope.is_expired_at(now);
 
-    // Step 10: hand back quarantined content. Nothing here delivers it.
-    Ok(QuarantinedMessage {
+    // Step 10: hand back authenticated quarantined content. Nothing here
+    // delivers it, and the expired variant must only advance ordering.
+    let message = QuarantinedMessage {
         sender_principal: device.principal_id.clone(),
         sender_device: device.device_id.clone(),
         envelope: signed.payload,
         ciphertext_sha256,
+    };
+
+    Ok(if expired {
+        OpenedForOrdering::Expired(message)
+    } else {
+        OpenedForOrdering::Actionable(message)
     })
 }
 

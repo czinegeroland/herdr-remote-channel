@@ -218,7 +218,7 @@ pub struct FetchOutcome {
 /// rather than a tighter loop.
 pub fn publish_one<T: Transport>(
     transport: &mut T,
-    database: &Database,
+    database: &mut Database,
     channel_id: &str,
     message_id: &str,
     object: PublishObject,
@@ -230,7 +230,7 @@ pub fn publish_one<T: Transport>(
         database,
         channel_id,
         message_id,
-        move |_| Ok(PreparedPublication::Publish(object.clone())),
+        move |_, _| Ok(PreparedPublication::Publish(object.clone())),
         max_attempts,
         now,
     )
@@ -245,7 +245,7 @@ pub fn publish_one<T: Transport>(
 /// commit is built.
 pub fn publish_one_prepared<T, F>(
     transport: &mut T,
-    database: &Database,
+    database: &mut Database,
     channel_id: &str,
     message_id: &str,
     mut prepare: F,
@@ -254,7 +254,7 @@ pub fn publish_one_prepared<T, F>(
 ) -> Result<PublishOutcome>
 where
     T: Transport,
-    F: FnMut(&T) -> Result<PreparedPublication>,
+    F: FnMut(&T, &mut Database) -> Result<PreparedPublication>,
 {
     let mut conflicts = 0;
 
@@ -263,7 +263,7 @@ where
             Ok(state) => state.revision,
             Err(error) => return Err(halt(database, channel_id, error, now)),
         };
-        let object = match prepare(transport)? {
+        let object = match prepare(transport, database)? {
             PreparedPublication::Publish(object) => object,
             PreparedPublication::AlreadyPublished => {
                 database.mark_published(message_id, now)?;

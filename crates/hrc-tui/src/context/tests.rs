@@ -46,6 +46,8 @@ fn app() -> ContextApp {
 
 fn clean() -> ContextPreview {
     ContextPreview {
+        digest: "abcdef0123456789abcdef0123456789".into(),
+        content: r#"{"id":"ctx-review","items":[],"version":1}"#.into(),
         items: vec![("file_excerpt".into(), 512)],
         total_bytes: 512,
         secrets: Vec::new(),
@@ -91,6 +93,8 @@ fn a_package_with_secret_findings_cannot_be_confirmed() {
     let mut app = app();
     app.on_key(key(KeyCode::Enter));
     app.show_preview(ContextPreview {
+        digest: "abcdef0123456789abcdef0123456789".into(),
+        content: r#"{"id":"ctx-review","items":[],"version":1}"#.into(),
         items: vec![("file_excerpt".into(), 64)],
         total_bytes: 64,
         secrets: vec!["item 0: aws_secret_key".into()],
@@ -111,6 +115,8 @@ fn an_excluded_path_blocks_it_too() {
     let mut app = app();
     app.on_key(key(KeyCode::Enter));
     app.show_preview(ContextPreview {
+        digest: "abcdef0123456789abcdef0123456789".into(),
+        content: r#"{"id":"ctx-review","items":[],"version":1}"#.into(),
         items: vec![("file_excerpt".into(), 64)],
         total_bytes: 64,
         secrets: Vec::new(),
@@ -167,6 +173,49 @@ fn changing_the_recipient_discards_the_preview() {
 
     app.on_key(key(KeyCode::Tab));
     assert!(app.preview().is_none());
+}
+
+fn screen(app: &ContextApp, width: u16, height: u16) -> String {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal
+        .draw(|frame| crate::view::render_context(frame, app))
+        .unwrap();
+
+    terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect()
+}
+
+#[test]
+fn canonical_content_can_be_scrolled_and_reflows_after_resize() {
+    let mut app = app();
+    let mut preview = clean();
+    preview.content = format!(
+        "{{\"id\":\"ctx-review\",\"items\":[{{\"kind\":\"note\",\"text\":\"{} TAIL_MARKER\"}}],\"version\":1}}",
+        "wrapped context ".repeat(80)
+    );
+    app.show_preview(preview);
+
+    let first_page = screen(&app, 42, 20);
+    assert!(first_page.contains("Canonical package"));
+    assert!(!first_page.contains("TAIL_MARKER"));
+
+    app.on_key(key(KeyCode::Char('j')));
+    assert_eq!(app.preview_scroll(), 1);
+    app.on_key(key(KeyCode::End));
+    assert!(app.preview_scroll() > 0);
+    assert!(screen(&app, 42, 20).contains("TAIL_MARKER"));
+
+    let resized = screen(&app, 140, 60);
+    assert_eq!(app.preview_scroll(), 0);
+    assert!(resized.contains("TAIL_MARKER"));
 }
 
 #[test]

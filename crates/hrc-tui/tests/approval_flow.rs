@@ -63,7 +63,11 @@ fn app() -> App {
 
 /// Everything the screen currently shows, as one string.
 fn screen(app: &App) -> String {
-    let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
+    screen_at(app, 90, 24)
+}
+
+fn screen_at(app: &App, width: u16, height: u16) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal.draw(|frame| render(frame, app)).unwrap();
 
     terminal
@@ -320,6 +324,35 @@ fn the_body_pane_says_the_message_is_not_approved() {
     app.on_key(key(KeyCode::Enter));
 
     assert!(screen(&app).contains("not yet approved"));
+}
+
+#[test]
+fn a_wrapped_body_can_be_scrolled_to_the_end_and_reflows_after_resize() {
+    let body = format!("START {}\nTAIL_MARKER", "wrapped words ".repeat(80));
+    let mut app = App::new(
+        vec![PendingItem {
+            message_id: "msg-long".into(),
+            view: view("Alice", "question"),
+            body,
+        }],
+        "reviewer-pane",
+    );
+    app.on_key(key(KeyCode::Enter));
+
+    let first_page = screen_at(&app, 42, 18);
+    assert!(first_page.contains("START"));
+    assert!(!first_page.contains("TAIL_MARKER"));
+
+    app.on_key(key(KeyCode::Char('j')));
+    assert_eq!(app.body_scroll(), 1);
+    app.on_key(key(KeyCode::End));
+    assert!(app.body_scroll() > 0);
+    assert!(screen_at(&app, 42, 18).contains("TAIL_MARKER"));
+
+    let resized = screen_at(&app, 140, 60);
+    assert_eq!(app.body_scroll(), 0);
+    assert!(resized.contains("START"));
+    assert!(resized.contains("TAIL_MARKER"));
 }
 
 fn release(code: KeyCode) -> KeyEvent {
