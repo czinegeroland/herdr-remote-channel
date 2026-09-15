@@ -1200,19 +1200,13 @@ fn receive_messages(
                             continue;
                         };
 
-                        // A receipt is machine state about a message this
-                        // installation sent, not content for a human to
-                        // approve. Quarantining one would put "delivered" in
-                        // an inbox waiting for a decision nobody should have
-                        // to make, so it is verified and recorded here and
-                        // never reaches the inbox at all.
-                        if opened.envelope.kind == hrc_protocol::MessageKind::Receipt.as_str() {
-                            record_inbound_receipt(database, channel, &opened, now)?;
-                            continue;
-                        }
-
-                        let received_context =
-                            ContextPackage::from_message_body(&opened.envelope.body);
+                        let is_receipt =
+                            opened.envelope.kind == hrc_protocol::MessageKind::Receipt.as_str();
+                        let received_context = if is_receipt {
+                            Ok(None)
+                        } else {
+                            ContextPackage::from_message_body(&opened.envelope.body)
+                        };
                         let malformed_context =
                             received_context.as_ref().err().map(ToString::to_string);
                         let received_context = received_context.ok().flatten();
@@ -1295,9 +1289,22 @@ fn receive_messages(
                             now,
                         )?;
 
-                        if let hrc_storage::InboundOutcome::Accepted { released, .. } = outcome {
-                            received.push(opened.envelope.message_id.clone());
-                            received.extend(released);
+                        match outcome {
+                            hrc_storage::InboundOutcome::Accepted { released, .. } => {
+                                received.push(opened.envelope.message_id.clone());
+                                received.extend(released);
+                            }
+                            hrc_storage::InboundOutcome::ReceiptAccepted { released } => {
+                                received.extend(released);
+                            }
+                            _ => {}
+                        }
+                        if is_receipt {
+                            // A receipt's authenticated link must advance the
+                            // sender chain even if its report is invalid.
+                            // Storage keeps it out of the inbox and therefore
+                            // out of prompt-gate decisions and receipt replies.
+                            record_inbound_receipt(database, channel, &opened, now)?;
                         }
                         if let Some(reason) = malformed_context {
                             // A valid signature authenticates that this

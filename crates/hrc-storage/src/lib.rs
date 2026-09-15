@@ -161,6 +161,11 @@ pub enum InboundOutcome {
         /// in the order they were released.
         released: Vec<String>,
     },
+    /// A receipt advanced the chain without becoming an inbox entry.
+    ReceiptAccepted {
+        /// Human messages released by this receipt, in chain order.
+        released: Vec<String>,
+    },
     /// Already accepted, byte for byte. At-least-once delivery is normal.
     Duplicate,
     /// Held: its predecessor from this sender device has not arrived.
@@ -692,6 +697,9 @@ impl Database {
     ///    order is a guarantee, so it cannot be accepted ahead of it either.
     /// 5. Otherwise it is accepted, and anything held behind it is released
     ///    in sequence order.
+    ///
+    /// Receipts participate in the same chain checks, but only their links
+    /// are stored: they never acquire an inbox row or an arrival number.
     pub fn record_inbound(
         &mut self,
         message: &InboundMessage<'_>,
@@ -704,7 +712,10 @@ impl Database {
         // 1 and 2: is this one we already have?
         let existing: Option<Option<String>> = transaction
             .query_row(
-                "SELECT ciphertext_sha256 FROM inbox WHERE message_id = ?1 AND channel_id = ?2",
+                "SELECT ciphertext_sha256 FROM inbox WHERE message_id = ?1 AND channel_id = ?2
+                 UNION ALL
+                 SELECT ciphertext_sha256 FROM inbound_receipt_link
+                 WHERE message_id = ?1 AND channel_id = ?2",
                 params![message.message_id, message.channel_id],
                 |row| row.get::<_, Option<String>>(0),
             )
@@ -727,6 +738,9 @@ impl Database {
         let taken: Option<String> = transaction
             .query_row(
                 "SELECT message_id FROM inbox
+                 WHERE channel_id = ?1 AND sender_device = ?2 AND device_sequence = ?3
+                 UNION ALL
+                 SELECT message_id FROM inbound_receipt_link
                  WHERE channel_id = ?1 AND sender_device = ?2 AND device_sequence = ?3",
                 params![
                     message.channel_id,
@@ -754,6 +768,24 @@ impl Database {
                 |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, String>(1)?)),
             )
             .optional()?;
+
+        if message.kind == "receipt" {
+            transaction.execute(
+                "INSERT INTO inbound_receipt_link (
+                     message_id, channel_id, sender_device, device_sequence,
+                     chain_id, previous_chain_id, ciphertext_sha256
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    message.message_id,
+                    message.channel_id,
+                    message.sender_device,
+                    message.device_sequence as i64,
+                    message.chain_id,
+                    message.previous_chain_id,
+                    message.ciphertext_sha256,
+                ],
+            )?;
+        }
 
         match (&head, message.previous_chain_id) {
             // The device's first message, and we have nothing recorded.
@@ -799,13 +831,33 @@ impl Database {
         // can anything waiting on *that*, so the release walks the chain.
         let mut released = Vec::new();
         let mut link = message.chain_id.to_owned();
+        let mut sequence = message.device_sequence;
 
-        while let Some(next) = take_held(
-            &transaction,
-            message.channel_id,
-            message.sender_device,
-            &link,
-        )? {
+        loop {
+            if let Some((message_id, device_sequence, chain_id)) = take_held_receipt(
+                &transaction,
+                message.channel_id,
+                message.sender_device,
+                &link,
+            )? {
+                transaction.execute(
+                    "DELETE FROM inbound_hold WHERE message_id = ?1",
+                    params![message_id],
+                )?;
+                sequence = device_sequence;
+                link = chain_id;
+                continue;
+            }
+
+            let Some(next) = take_held(
+                &transaction,
+                message.channel_id,
+                message.sender_device,
+                &link,
+            )?
+            else {
+                break;
+            };
             let body = next.body.clone();
             let waiting = InboundMessage {
                 channel_id: message.channel_id,
@@ -835,6 +887,7 @@ impl Database {
 
             insert_accepted(&transaction, &waiting, now)?;
             released.push(next.message_id.clone());
+            sequence = next.device_sequence;
             link = next.chain_id;
         }
 
@@ -847,16 +900,19 @@ impl Database {
             params![
                 message.channel_id,
                 message.sender_device,
-                last_sequence(&transaction, message, &released)? as i64,
+                sequence as i64,
                 link,
             ],
         )?;
 
         transaction.commit()?;
 
-        Ok(InboundOutcome::Accepted {
-            arrival_sequence,
-            released,
+        Ok(match arrival_sequence {
+            Some(arrival_sequence) => InboundOutcome::Accepted {
+                arrival_sequence,
+                released,
+            },
+            None => InboundOutcome::ReceiptAccepted { released },
         })
     }
 
@@ -1814,6 +1870,9 @@ fn store_inbound_context(
     transaction: &rusqlite::Transaction<'_>,
     message: &InboundMessage<'_>,
 ) -> Result<()> {
+    if message.kind == "receipt" {
+        return Ok(());
+    }
     let Some(context) = &message.context else {
         return Ok(());
     };
@@ -1855,6 +1914,12 @@ fn hold(
             now,
         ],
     )?;
+
+    if message.kind == "receipt" {
+        return Ok(InboundOutcome::Held {
+            waiting_for: message.previous_chain_id.unwrap_or_default().to_owned(),
+        });
+    }
 
     // The held row records everything needed to reconsider it later. The
     // decrypted body travels with it so releasing does not have to decrypt
@@ -1905,7 +1970,15 @@ fn insert_accepted(
     transaction: &rusqlite::Transaction<'_>,
     message: &InboundMessage<'_>,
     now: &str,
-) -> Result<u64> {
+) -> Result<Option<u64>> {
+    if message.kind == "receipt" {
+        transaction.execute(
+            "DELETE FROM inbound_hold WHERE message_id = ?1",
+            params![message.message_id],
+        )?;
+        return Ok(None);
+    }
+
     let arrival_sequence: u64 = transaction.query_row(
         "SELECT COALESCE(MAX(arrival_sequence), 0) + 1 FROM inbox WHERE channel_id = ?1",
         params![message.channel_id],
@@ -1963,7 +2036,7 @@ fn insert_accepted(
         params![message.message_id],
     )?;
 
-    Ok(arrival_sequence)
+    Ok(Some(arrival_sequence))
 }
 
 /// Takes the message waiting on `link`, if one is held.
@@ -2014,20 +2087,25 @@ fn take_held(
         .map_err(Into::into)
 }
 
-/// The sequence number the chain head should record after a release run.
-fn last_sequence(
+/// Takes a receipt waiting on `link` without consulting the inbox.
+fn take_held_receipt(
     transaction: &rusqlite::Transaction<'_>,
-    message: &InboundMessage<'_>,
-    released: &[String],
-) -> Result<u64> {
-    match released.last() {
-        None => Ok(message.device_sequence),
-        Some(message_id) => Ok(transaction.query_row(
-            "SELECT device_sequence FROM inbox WHERE message_id = ?1",
-            params![message_id],
-            |row| row.get::<_, i64>(0),
-        )? as u64),
-    }
+    channel_id: &str,
+    sender_device: &str,
+    link: &str,
+) -> Result<Option<(String, u64, String)>> {
+    transaction
+        .query_row(
+            "SELECT receipt.message_id, receipt.device_sequence, receipt.chain_id
+             FROM inbound_receipt_link AS receipt
+             JOIN inbound_hold AS hold ON hold.message_id = receipt.message_id
+             WHERE receipt.channel_id = ?1 AND receipt.sender_device = ?2
+               AND receipt.previous_chain_id = ?3",
+            params![channel_id, sender_device, link],
+            |row| Ok((row.get(0)?, row.get::<_, i64>(1)? as u64, row.get(2)?)),
+        )
+        .optional()
+        .map_err(Into::into)
 }
 
 /// Derives the per-device message chain ID (PRD section 18.1).

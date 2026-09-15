@@ -63,18 +63,18 @@ fn conflicting_inbox_filters_are_a_usage_error() {
 
 #[test]
 fn unimplemented_commands_report_a_stable_json_shape() {
-    // `show` is still part of the published contract without behaviour, and
-    // agents branch on the code rather than on the prose.
+    // Continuous `sync` is not shipped (`--once` is), and agents branch on
+    // the code rather than on the prose.
     let output = hrc()
-        .args(["show", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "--json"])
+        .args(["sync", "--json"])
         .output()
-        .expect("show should run");
+        .expect("sync should run");
     assert_eq!(output.status.code(), Some(UNIMPLEMENTED));
 
     let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
     assert_eq!(value["status"], "error");
     assert_eq!(value["code"], "unimplemented");
-    assert_eq!(value["command"], "show");
+    assert_eq!(value["command"], "sync");
     assert!(value["milestone"].is_string());
 }
 

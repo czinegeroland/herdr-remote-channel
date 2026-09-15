@@ -1099,6 +1099,188 @@ fn two_sender_devices_have_independent_chains() {
 
 // --- Receipts (PRD sections 18.2 and 18.3) ---
 
+#[test]
+fn receipt_links_advance_the_chain_without_entering_any_inbox() {
+    let mut database = database();
+    let first = arrival(1);
+    let receipt = InboundMessage {
+        kind: "receipt",
+        ..first.message()
+    };
+
+    assert_eq!(
+        database.record_inbound(&receipt, NOW).unwrap(),
+        InboundOutcome::ReceiptAccepted {
+            released: Vec::new(),
+        }
+    );
+    assert_eq!(
+        database.record_inbound(&receipt, NOW).unwrap(),
+        InboundOutcome::Duplicate
+    );
+    assert!(database.inbox_entries(CHANNEL).unwrap().is_empty());
+    assert!(
+        database
+            .thread_entries(CHANNEL, "thread-1")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(database.plugin_inbox(CHANNEL).unwrap().is_empty());
+    assert!(database.pending_inbound().unwrap().is_empty());
+    let inbox_rows: i64 = database
+        .connection
+        .query_row("SELECT COUNT(*) FROM inbox", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(inbox_rows, 0);
+
+    assert_eq!(
+        database.record_inbound(&arrival(2).message(), NOW).unwrap(),
+        InboundOutcome::Accepted {
+            arrival_sequence: 1,
+            released: Vec::new(),
+        }
+    );
+}
+
+#[test]
+fn a_missing_receipt_releases_a_held_message_after_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut database = file_database(&directory);
+    assert!(matches!(
+        database.record_inbound(&arrival(2).message(), NOW).unwrap(),
+        InboundOutcome::Held { .. }
+    ));
+    drop(database);
+
+    let mut database = file_database(&directory);
+    let first = arrival(1);
+    let receipt = InboundMessage {
+        kind: "receipt",
+        ..first.message()
+    };
+    assert_eq!(
+        database.record_inbound(&receipt, NOW).unwrap(),
+        InboundOutcome::ReceiptAccepted {
+            released: vec!["msg-2".into()],
+        }
+    );
+    drop(database);
+
+    let mut database = file_database(&directory);
+    assert_eq!(
+        database.record_inbound(&receipt, NOW).unwrap(),
+        InboundOutcome::Duplicate
+    );
+    assert!(database.held_inbound(CHANNEL).unwrap().is_empty());
+    let entries = database.inbox_entries(CHANNEL).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].message_id, "msg-2");
+    assert_eq!(entries[0].arrival_sequence, 1);
+    assert_eq!(entries[0].disposition, "quarantined");
+    assert!(matches!(
+        database.record_inbound(&arrival(3).message(), NOW).unwrap(),
+        InboundOutcome::Accepted { .. }
+    ));
+}
+
+#[test]
+fn held_receipts_release_a_mixed_chain_without_becoming_deliveries() {
+    let mut database = database();
+    for (sequence, kind) in [(5, "receipt"), (4, "note"), (3, "receipt"), (2, "receipt")] {
+        let arriving = arrival(sequence);
+        let message = InboundMessage {
+            kind,
+            ..arriving.message()
+        };
+        assert!(matches!(
+            database.record_inbound(&message, NOW).unwrap(),
+            InboundOutcome::Held { .. }
+        ));
+    }
+    assert!(database.inbox_entries(CHANNEL).unwrap().is_empty());
+    assert!(database.pending_inbound().unwrap().is_empty());
+
+    assert_eq!(
+        database.record_inbound(&arrival(1).message(), NOW).unwrap(),
+        InboundOutcome::Accepted {
+            arrival_sequence: 1,
+            released: vec!["msg-4".into()],
+        }
+    );
+    assert!(database.held_inbound(CHANNEL).unwrap().is_empty());
+    assert_eq!(
+        database.record_inbound(&arrival(6).message(), NOW).unwrap(),
+        InboundOutcome::Accepted {
+            arrival_sequence: 3,
+            released: Vec::new(),
+        }
+    );
+    let entries = database.inbox_entries(CHANNEL).unwrap();
+    let ids: Vec<&str> = entries
+        .iter()
+        .map(|entry| entry.message_id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["msg-1", "msg-4", "msg-6"]);
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.disposition == "quarantined")
+    );
+}
+
+#[test]
+fn receipt_links_detect_ciphertext_substitution() {
+    let mut database = database();
+    let first = arrival(1);
+    let receipt = InboundMessage {
+        kind: "receipt",
+        ..first.message()
+    };
+    database.record_inbound(&receipt, NOW).unwrap();
+
+    let substituted = InboundMessage {
+        ciphertext_sha256: "different ciphertext",
+        ..receipt
+    };
+    assert!(matches!(
+        database.record_inbound(&substituted, NOW).unwrap_err(),
+        StorageError::InboundSubstituted { .. }
+    ));
+}
+
+#[test]
+fn receipts_and_human_messages_cannot_reuse_each_others_sequence() {
+    for (first_kind, fork_kind) in [
+        ("receipt", "note"),
+        ("note", "receipt"),
+        ("receipt", "receipt"),
+    ] {
+        let mut database = database();
+        let first = arrival(1);
+        database
+            .record_inbound(
+                &InboundMessage {
+                    kind: first_kind,
+                    ..first.message()
+                },
+                NOW,
+            )
+            .unwrap();
+
+        let fork_chain = chain_id_for(CHANNEL, SENDER, 1, "fork").unwrap();
+        let fork = InboundMessage {
+            message_id: "fork",
+            chain_id: &fork_chain,
+            kind: fork_kind,
+            ..first.message()
+        };
+        assert!(matches!(
+            database.record_inbound(&fork, NOW).unwrap_err(),
+            StorageError::InboundForked { .. }
+        ));
+    }
+}
+
 fn receipt(device: &str, state: &str) -> RecordedReceipt {
     RecordedReceipt {
         message_id: "msg-1".into(),
