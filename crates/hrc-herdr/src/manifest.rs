@@ -178,6 +178,7 @@ fn pane_title(pane: crate::pane::Pane) -> String {
         crate::pane::Pane::Inbox => "Remote channel inbox".to_owned(),
         crate::pane::Pane::Setup => "Remote channel setup".to_owned(),
         crate::pane::Pane::Compose => "Remote channel compose".to_owned(),
+        crate::pane::Pane::Context => "Remote channel context".to_owned(),
         crate::pane::Pane::Joins => "Remote channel join requests".to_owned(),
         crate::pane::Pane::Review => "Remote channel review".to_owned(),
     }
@@ -263,6 +264,7 @@ pub fn manifest() -> Manifest {
                     // approving content, and gets the same modal treatment.
                     crate::pane::Pane::Setup
                     | crate::pane::Pane::Compose
+                    | crate::pane::Pane::Context
                     | crate::pane::Pane::Joins
                     | crate::pane::Pane::Review => "popup".to_owned(),
                 },
@@ -273,6 +275,7 @@ pub fn manifest() -> Manifest {
                     crate::pane::Pane::Inbox => None,
                     crate::pane::Pane::Setup
                     | crate::pane::Pane::Compose
+                    | crate::pane::Pane::Context
                     | crate::pane::Pane::Joins
                     | crate::pane::Pane::Review => Some("80%".to_owned()),
                 },
@@ -280,6 +283,7 @@ pub fn manifest() -> Manifest {
                     crate::pane::Pane::Inbox => None,
                     crate::pane::Pane::Setup
                     | crate::pane::Pane::Compose
+                    | crate::pane::Pane::Context
                     | crate::pane::Pane::Joins
                     | crate::pane::Pane::Review => Some("80%".to_owned()),
                 },

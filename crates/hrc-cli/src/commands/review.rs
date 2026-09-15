@@ -22,8 +22,8 @@ use hrc_ipc::Client;
 use hrc_ipc::endpoint::{Endpoint, Interface};
 use hrc_storage::Database;
 use hrc_tui::{
-    App, ComposeApp, ComposeOutcome, JoinApp, JoinOutcome, Outcome, PassphraseApp,
-    PassphraseOutcome, PendingItem, PendingJoin, Recipient, SetupApp, SetupOutcome,
+    App, ComposeApp, ComposeOutcome, ContextApp, ContextOutcome, JoinApp, JoinOutcome, Outcome,
+    PassphraseApp, PassphraseOutcome, PendingItem, PendingJoin, Recipient, SetupApp, SetupOutcome,
 };
 use secrecy::SecretString;
 use serde_json::{Value, json};
@@ -594,5 +594,184 @@ fn unlocked(context: &Context, reason: &str) -> Result<Context> {
             passphrase: Some(SecretString::from(passphrase)),
         }),
         PassphraseOutcome::Quit => Err(CliError::NoPassphrase),
+    }
+}
+
+/// Opens the context disclosure screen (PRD sections 20 and 22.4).
+///
+/// Both halves go through the daemon's trusted interface rather than the
+/// local functions of the same name, because doing the work locally would
+/// move the boundary into a process an agent can start.
+///
+/// Section 22.4's context authorization is different from the prompt gate's.
+/// The approval one never leaves the daemon (decision DEC-040); this one is
+/// returned by `PreviewContext` and must be presented to `SendContext`, and
+/// it is bound to the package digest, the recipient, the channel and the send
+/// action, with a five-minute server-controlled expiry. So it is held here,
+/// in memory, between the human seeing the preview and answering the
+/// confirmation — and it is dropped the moment the selection changes, because
+/// an authorization for bytes nobody is looking at any more is one nobody
+/// meant to spend.
+pub fn context(context: &Context) -> Result<Value> {
+    if !is_a_terminal() {
+        return Err(CliError::NotInteractive);
+    }
+
+    let context = &unlocked(context, "send a context package")?;
+
+    let database = Database::open(context.paths.database())?;
+    let drafts: Vec<hrc_tui::ContextDraft> = database
+        .context_drafts()?
+        .into_iter()
+        .map(|(package_id, digest)| hrc_tui::ContextDraft { package_id, digest })
+        .collect();
+
+    if drafts.is_empty() {
+        return Ok(json!({
+            "status": "ok",
+            "drafts": 0,
+            "sent": Value::Null,
+        }));
+    }
+
+    let recipients: Vec<String> = addressable(context)?
+        .into_iter()
+        .filter(|recipient| recipient.active)
+        .map(|recipient| recipient.principal_id)
+        .collect();
+
+    if recipients.is_empty() {
+        return Ok(json!({
+            "status": "ok",
+            "recipients": 0,
+            "sent": Value::Null,
+        }));
+    }
+
+    let runtime = runtime()?;
+    let endpoint = trusted_endpoint(context)?;
+    let mut screen = ContextApp::new(drafts, recipients);
+    let mut authorization: Option<String> = None;
+
+    // The screen asks and answers more than once: a preview comes back into
+    // it, and only then can a send be proposed. So the loop lives here rather
+    // than in `hrc_tui::run`, which returns on the first outcome.
+    loop {
+        let outcome = hrc_tui::run(&mut screen).map_err(|source| CliError::Io {
+            action: "run the context disclosure screen",
+            source,
+        })?;
+
+        match outcome {
+            ContextOutcome::Preview {
+                package_id,
+                recipient,
+            } => {
+                let previewed = runtime.block_on(trusted_call(
+                    &endpoint,
+                    TrustedRequest::PreviewContext {
+                        recipient,
+                        package_id,
+                    },
+                ))?;
+
+                authorization = previewed["authorization"].as_str().map(str::to_owned);
+                screen.show_preview(preview_from(&previewed));
+            }
+
+            ContextOutcome::Send {
+                package_id,
+                recipient,
+            } => {
+                // The authorization the preview issued for exactly this
+                // package and recipient. Taken rather than cloned, so a
+                // second send cannot reuse it from here — the daemon would
+                // refuse it anyway, and the two agreeing is the point.
+                let Some(granted) = authorization.take() else {
+                    return Err(CliError::NoContextAuthorization);
+                };
+
+                let sent = runtime.block_on(trusted_call(
+                    &endpoint,
+                    TrustedRequest::SendContext {
+                        recipient: recipient.clone(),
+                        package_id: package_id.clone(),
+                        authorization: granted,
+                    },
+                ))?;
+
+                return Ok(json!({
+                    "status": "ok",
+                    "contextId": package_id,
+                    "recipient": recipient,
+                    "daemon": sent,
+                }));
+            }
+
+            ContextOutcome::Quit => {
+                return Ok(json!({
+                    "status": "ok",
+                    "sent": Value::Null,
+                }));
+            }
+        }
+    }
+}
+
+/// One request and answer on the trusted endpoint.
+async fn trusted_call(endpoint: &Endpoint, request: TrustedRequest) -> Result<Value> {
+    let mut client = connect(endpoint).await?;
+    client.call(&request).await.map_err(CliError::from)
+}
+
+/// Reads a trusted preview response into what the screen displays.
+///
+/// A response the screen cannot parse yields a preview that is not sendable,
+/// rather than an empty one that looks harmless. The failure mode to avoid
+/// here is a screen that shows "0 bytes, no findings" because a field moved.
+fn preview_from(response: &Value) -> hrc_tui::ContextPreview {
+    let strings = |key: &str, render: fn(&Value) -> Option<String>| -> Vec<String> {
+        response[key]
+            .as_array()
+            .map(|entries| entries.iter().filter_map(render).collect())
+            .unwrap_or_default()
+    };
+
+    let secrets = strings("secretFindings", |finding| {
+        Some(format!(
+            "item {}: {}",
+            finding["item"].as_u64()?,
+            finding["rule"].as_str()?
+        ))
+    });
+
+    let excluded = strings("excludedPaths", |path| {
+        Some(format!(
+            "{} ({})",
+            path["path"].as_str()?,
+            path["reason"].as_str().unwrap_or("excluded")
+        ))
+    });
+
+    let items = response["items"]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|item| {
+                    Some((item["kind"].as_str()?.to_owned(), item["bytes"].as_u64()?))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let understood = response["status"] == "ok" && response["digest"].is_string();
+
+    hrc_tui::ContextPreview {
+        items,
+        total_bytes: response["totalBytes"].as_u64().unwrap_or_default(),
+        secrets,
+        excluded,
+        sendable: understood && response["sendable"].as_bool().unwrap_or(false),
     }
 }

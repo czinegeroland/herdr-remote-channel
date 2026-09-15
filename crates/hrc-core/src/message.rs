@@ -209,7 +209,14 @@ fn check_outbox_field(message_id: &str, matches: bool, field: &'static str) -> R
 ///
 /// Direct messages go to every active device of each addressed principal;
 /// an empty principal list is a channel broadcast to every active device.
-fn intended_recipients<'a>(
+///
+/// Public because a sender has to record who it addressed in order to judge
+/// a receipt later (PRD section 18.2): `accept_receipt` refuses a report from
+/// a device that was never a recipient, and that check is only as good as the
+/// sender's own record of the set. Deriving it once here and storing the
+/// answer keeps the stored set and the encrypted set the same computation
+/// rather than two that could drift.
+pub fn intended_recipients<'a>(
     roster: &'a Roster,
     envelope: &MessageEnvelope,
 ) -> Result<Vec<&'a crate::roster::RosterDevice>> {

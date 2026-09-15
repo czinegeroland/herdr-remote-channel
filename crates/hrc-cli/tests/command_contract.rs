@@ -63,18 +63,18 @@ fn conflicting_inbox_filters_are_a_usage_error() {
 
 #[test]
 fn unimplemented_commands_report_a_stable_json_shape() {
-    // `show` is still part of the published contract without behaviour, and
-    // agents branch on the code rather than on the prose.
+    // Continuous `sync` is not shipped (`--once` is), and agents branch on
+    // the code rather than on the prose.
     let output = hrc()
-        .args(["show", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "--json"])
+        .args(["sync", "--json"])
         .output()
-        .expect("show should run");
+        .expect("sync should run");
     assert_eq!(output.status.code(), Some(UNIMPLEMENTED));
 
     let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
     assert_eq!(value["status"], "error");
     assert_eq!(value["code"], "unimplemented");
-    assert_eq!(value["command"], "show");
+    assert_eq!(value["command"], "sync");
     assert!(value["milestone"].is_string());
 }
 
@@ -3026,7 +3026,7 @@ fn every_interactive_pane_refuses_a_captured_terminal() {
     // agent's tool call looks like; none of these screens should run for one.
     let (home, _remote) = channel_fixture();
 
-    for pane in ["review", "joins", "compose", "setup"] {
+    for pane in ["review", "joins", "compose", "context", "setup"] {
         let output = hrc_in(home.path())
             .args(["herdr", "pane", pane])
             .output()
@@ -3042,4 +3042,401 @@ fn every_interactive_pane_refuses_a_captured_terminal() {
             "`{pane}` must not write to standard output"
         );
     }
+}
+
+#[test]
+fn the_context_pane_is_the_only_way_to_disclose_a_package() {
+    // Section 22.4 puts both preview and send behind the human authorization
+    // boundary, and until this pane existed there was no way to cross it:
+    // the CLI refused, and nothing else asked. A whole section of the product
+    // was reachable only from a test.
+    //
+    // The CLI halves must keep refusing, so the pane is the only door rather
+    // than a second one.
+    let (home, _remote) = channel_fixture();
+
+    for args in [
+        vec!["context", "preview", "ctx-1"],
+        vec!["context", "send", "someone", "ctx-1"],
+    ] {
+        let output = hrc_in(home.path())
+            .args(&args)
+            .output()
+            .expect("command should run");
+
+        assert_eq!(
+            output.status.code(),
+            Some(AUTHORIZATION_REQUIRED),
+            "`hrc {}` must stay on the boundary",
+            args.join(" ")
+        );
+    }
+}
+
+#[test]
+fn a_delivered_receipt_reaches_the_sender() {
+    // PRD section 18.2. Receipts were built and verified in `hrc-core` and
+    // wired to nothing: no sender published one and no receiver recorded one,
+    // so `delivered` never existed as observable state. That is what made
+    // `hrc wait --until delivered` impossible to implement.
+    //
+    // This drives both halves over a real published channel: Alice sends,
+    // Bob's synchronization accepts it and publishes a receipt, and Alice's
+    // next synchronization verifies and records it.
+    let (alice, _remote, bob, request_id) = pending_join_fixture();
+
+    let (mut daemon, _startup) = start_daemon(alice.path());
+    let admitted = daemon_call(
+        alice.path(),
+        Interface::TrustedHuman,
+        serde_json::json!({
+            "method": "approve_join",
+            "params": { "request_id": request_id },
+        }),
+    );
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    assert_eq!(admitted["status"], "ok", "{admitted}");
+
+    hrc_in(bob.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+
+    let members = hrc_in(alice.path())
+        .args(["members", "--json"])
+        .output()
+        .expect("command should run");
+    let members: Value = serde_json::from_slice(&members.stdout).expect("stdout should be JSON");
+    let alice_principal = principal_of(alice.path(), _remote.path());
+    let bob_principal = members["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .map(|member| member["principalId"].as_str().expect("a principal"))
+        .find(|principal| *principal != alice_principal)
+        .expect("Bob should be in the roster")
+        .to_owned();
+
+    let sent = hrc_in(alice.path())
+        .args(["send", &bob_principal, "does this arrive?", "--json"])
+        .output()
+        .expect("command should run");
+    let sent: Value = serde_json::from_slice(&sent.stdout).expect("stdout should be JSON");
+    let message_id = sent["messageId"].as_str().expect("a message id").to_owned();
+
+    hrc_in(alice.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+
+    // Bob accepts the message and, in the same pass, publishes the receipt.
+    hrc_in(bob.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+
+    // Alice picks it up and verifies it against what she actually sent.
+    hrc_in(alice.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+
+    let database = alice.path().join("state.sqlite");
+    let stored = hrc_storage::Database::open(&database).expect("the database should open");
+    let receipts = stored
+        .receipts_for(&message_id)
+        .expect("receipts should be readable");
+
+    assert!(
+        receipts.iter().any(|receipt| receipt.state == "delivered"),
+        "Alice should have recorded a delivered receipt for {message_id}: {receipts:?}"
+    );
+
+    // And the receipt itself is not something a human has to decide about.
+    let inbox = hrc_in(alice.path())
+        .args(["inbox", "--json"])
+        .output()
+        .expect("command should run");
+    let inbox: Value = serde_json::from_slice(&inbox.stdout).expect("stdout should be JSON");
+    assert!(
+        !inbox["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .any(|entry| entry["kind"] == "receipt"),
+        "a receipt must never reach the inbox: {inbox}"
+    );
+}
+
+#[test]
+fn show_never_discloses_a_body_nobody_approved() {
+    // The same rule the inbox and the plugin pane follow. `hrc show` exists
+    // to say everything known about a message, and what is known about a
+    // quarantined one does not include its contents.
+    let (home, _remote) = channel_fixture();
+    let principal = principal_of(home.path(), _remote.path());
+
+    let secret = "the staging credentials rotated on Tuesday";
+    hrc_in(home.path())
+        .args(["send", &principal, secret])
+        .assert()
+        .success();
+    hrc_in(home.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+
+    let inbox = hrc_in(home.path())
+        .args(["inbox", "--json"])
+        .output()
+        .expect("command should run");
+    let inbox: Value = serde_json::from_slice(&inbox.stdout).expect("stdout should be JSON");
+    let message_id = inbox["entries"][0]["messageId"]
+        .as_str()
+        .expect("a message id")
+        .to_owned();
+
+    let shown = hrc_in(home.path())
+        .args(["show", &message_id, "--json"])
+        .output()
+        .expect("command should run");
+    let rendered = String::from_utf8_lossy(&shown.stdout).into_owned();
+    let shown: Value = serde_json::from_slice(&shown.stdout).expect("stdout should be JSON");
+
+    assert_eq!(shown["direction"], "inbound");
+    assert_eq!(shown["disposition"], "quarantined");
+    assert!(shown["body"].is_null(), "{shown}");
+    assert!(
+        !rendered.contains(secret),
+        "an unapproved body must not appear on this surface: {rendered}"
+    );
+    assert!(
+        shown["bodyWithheld"].is_string(),
+        "the reason the body is absent should be stated: {shown}"
+    );
+}
+
+#[test]
+fn show_reports_where_an_outbound_message_got_to() {
+    // A message this installation sent was never quarantined — it did not
+    // arrive from anyone. What matters is where it reached, which is the
+    // outbox state and whatever receipts came back.
+    let (home, _remote) = channel_fixture();
+    let principal = principal_of(home.path(), _remote.path());
+
+    let sent = hrc_in(home.path())
+        .args(["send", &principal, "hello", "--json"])
+        .output()
+        .expect("command should run");
+    let sent: Value = serde_json::from_slice(&sent.stdout).expect("stdout should be JSON");
+    let message_id = sent["messageId"].as_str().expect("a message id");
+
+    // Before it is synchronized the inbox does not know it, so this is the
+    // outbound branch.
+    let shown = hrc_in(home.path())
+        .args(["show", message_id, "--json"])
+        .output()
+        .expect("command should run");
+    let shown: Value = serde_json::from_slice(&shown.stdout).expect("stdout should be JSON");
+
+    assert_eq!(shown["direction"], "outbound", "{shown}");
+    assert!(shown["state"].is_string(), "{shown}");
+    assert!(shown["receipts"].is_array(), "{shown}");
+}
+
+#[test]
+fn wait_returns_immediately_when_the_state_is_already_reached() {
+    let (home, _remote) = channel_fixture();
+    let principal = principal_of(home.path(), _remote.path());
+
+    hrc_in(home.path())
+        .args(["send", &principal, "hello"])
+        .assert()
+        .success();
+    hrc_in(home.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+
+    let inbox = hrc_in(home.path())
+        .args(["inbox", "--json"])
+        .output()
+        .expect("command should run");
+    let inbox: Value = serde_json::from_slice(&inbox.stdout).expect("stdout should be JSON");
+    let message_id = inbox["entries"][0]["messageId"]
+        .as_str()
+        .expect("a message id")
+        .to_owned();
+
+    let waited = hrc_in(home.path())
+        .args([
+            "wait",
+            &message_id,
+            "--until",
+            "quarantined",
+            "--timeout",
+            "5s",
+            "--json",
+        ])
+        .output()
+        .expect("command should run");
+    let waited: Value = serde_json::from_slice(&waited.stdout).expect("stdout should be JSON");
+
+    assert_eq!(waited["state"], "quarantined", "{waited}");
+}
+
+#[test]
+fn a_wait_that_times_out_is_an_answer_rather_than_a_failure() {
+    // The caller asked how things stand after a bounded wait. "Not yet" is an
+    // answer to that question, and exiting non-zero would make every script
+    // that polls treat a normal outcome as an error.
+    let (home, _remote) = channel_fixture();
+    let principal = principal_of(home.path(), _remote.path());
+
+    let sent = hrc_in(home.path())
+        .args(["send", &principal, "hello", "--json"])
+        .output()
+        .expect("command should run");
+    let sent: Value = serde_json::from_slice(&sent.stdout).expect("stdout should be JSON");
+    let message_id = sent["messageId"].as_str().expect("a message id").to_owned();
+
+    let waited = hrc_in(home.path())
+        .args([
+            "wait",
+            &message_id,
+            "--until",
+            "accepted",
+            "--timeout",
+            "1s",
+            "--json",
+        ])
+        .output()
+        .expect("command should run");
+
+    assert!(
+        waited.status.success(),
+        "a timeout must not be an error exit: {}",
+        String::from_utf8_lossy(&waited.stderr)
+    );
+
+    let waited: Value = serde_json::from_slice(&waited.stdout).expect("stdout should be JSON");
+    assert_eq!(waited["state"], "timeout", "{waited}");
+}
+
+#[test]
+fn a_malformed_wait_timeout_is_refused() {
+    let (home, _remote) = channel_fixture();
+
+    for bad in ["0s", "soon", "5", "-1m"] {
+        hrc_in(home.path())
+            .args(["wait", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "--timeout", bad])
+            .assert()
+            .failure();
+    }
+}
+
+#[test]
+fn a_delegation_carries_no_way_to_execute_anything() {
+    // HRC-MSG-008. The `task` kind is communication, never execution, and the
+    // wire shape is what guarantees it: a receiver that wanted to run
+    // something would have nothing to run. This drives the real CLI so the
+    // guarantee covers what is actually published rather than only the type.
+    let (home, _remote) = channel_fixture();
+    let principal = principal_of(home.path(), _remote.path());
+
+    let sent = hrc_in(home.path())
+        .args([
+            "delegate",
+            &principal,
+            "Review the backoff jitter",
+            "--title",
+            "backoff review",
+            "--criterion",
+            "jitter is bounded",
+            "--json",
+        ])
+        .output()
+        .expect("command should run");
+
+    assert!(
+        sent.status.success(),
+        "delegate failed: {}{}",
+        String::from_utf8_lossy(&sent.stdout),
+        String::from_utf8_lossy(&sent.stderr)
+    );
+
+    let sent: Value = serde_json::from_slice(&sent.stdout).expect("stdout should be JSON");
+    assert_eq!(sent["kind"], "task", "{sent}");
+
+    hrc_in(home.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+
+    let inbox = hrc_in(home.path())
+        .args(["inbox", "--json"])
+        .output()
+        .expect("command should run");
+    let inbox: Value = serde_json::from_slice(&inbox.stdout).expect("stdout should be JSON");
+
+    let task = inbox["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .find(|entry| entry["kind"] == "task")
+        .unwrap_or_else(|| panic!("the task should have arrived: {inbox}"));
+
+    // A delegation arrives quarantined like anything else. Nothing on the
+    // receiving side acts on it, which is the property that makes "never
+    // executed" true in practice and not only in the type.
+    assert_eq!(task["disposition"], "quarantined", "{task}");
+}
+
+#[test]
+fn a_delegation_needs_a_title_and_a_description() {
+    // A task nobody can act on is worse than no task, and finding that out
+    // after it reaches an append-only history helps no one — so it is refused
+    // here rather than left to the receiver.
+    let (home, _remote) = channel_fixture();
+    let principal = principal_of(home.path(), _remote.path());
+
+    for args in [
+        vec!["delegate", &principal, "a description", "--title", ""],
+        vec!["delegate", &principal, "", "--title", "a title"],
+    ] {
+        hrc_in(home.path()).args(&args).assert().failure();
+    }
+}
+
+#[test]
+fn naming_a_context_package_in_a_delegation_discloses_nothing() {
+    // `--context` points at a package the recipient may already hold. The
+    // package itself travels by `hrc context send`, which is a trusted
+    // operation with its own authorization — so naming one must not become a
+    // way to attach it from the agent-safe path.
+    let (home, _remote) = channel_fixture();
+    let principal = principal_of(home.path(), _remote.path());
+
+    let sent = hrc_in(home.path())
+        .args([
+            "delegate",
+            &principal,
+            "please look at this",
+            "--title",
+            "with context",
+            "--context",
+            "ctx-never-drafted",
+            "--json",
+        ])
+        .output()
+        .expect("command should run");
+
+    // The identifier need not resolve locally: it names something the
+    // recipient may hold, not something this installation is sending.
+    assert!(
+        sent.status.success(),
+        "naming a package should not require holding it: {}",
+        String::from_utf8_lossy(&sent.stderr)
+    );
 }

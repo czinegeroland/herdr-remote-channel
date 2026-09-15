@@ -92,6 +92,16 @@ pub enum CliError {
     )]
     NotInteractive,
 
+    /// A context send was reached without the preview that authorizes it.
+    ///
+    /// Section 22.4 binds the authorization to the package digest, the
+    /// recipient, the channel and the action, and trusted send must present
+    /// one. Reaching a send without it means the screen and the daemon
+    /// disagree about what was previewed, which is a bug rather than
+    /// something to retry.
+    #[error("no context preview authorized this send; preview the package again")]
+    NoContextAuthorization,
+
     /// The daemon's trusted interface did not answer.
     ///
     /// Every disclosure of a quarantined body goes through the daemon, so
@@ -204,6 +214,7 @@ impl CliError {
             // retrying against the first.
             CliError::NotInteractive => "authorization_required",
             CliError::DaemonUnavailable => "daemon_unavailable",
+            CliError::NoContextAuthorization => "no_context_authorization",
             CliError::AmbiguousChannel => "ambiguous_channel",
             CliError::PublicationUnavailable { .. } => "publication_unavailable",
             CliError::UnknownHerdrTarget { .. } => "unknown_herdr_target",
@@ -249,6 +260,7 @@ impl CliError {
             | CliError::LocalDeviceNotInChannel
             | CliError::InviteChannelMismatch { .. }
             | CliError::DaemonUnavailable
+            | CliError::NoContextAuthorization
             | CliError::PublicationUnavailable { .. } => exit::FAILURE,
 
             // Same reasoning as the code above: to a program this is the

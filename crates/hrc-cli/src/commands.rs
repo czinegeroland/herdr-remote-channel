@@ -1057,7 +1057,80 @@ fn receive_for(
     )?;
 
     let mut database = Database::open(context.paths.database())?;
-    receive_messages(&transport, &mut database, channel, identity.as_ref(), now)
+    let received = receive_messages(&transport, &mut database, channel, identity.as_ref(), now)?;
+
+    // Only for what this pass accepted, so a message is reported once. A
+    // failure to report is not a failure to receive: the message is already
+    // recorded, and raising here would make an unreachable remote turn a
+    // successful receive into a failed synchronization.
+    if !received.is_empty() {
+        // A failure to report is not a failure to receive: the message is
+        // already recorded, and raising here would let an unreachable remote
+        // turn a successful receive into a failed synchronization.
+        let _ = publish_delivery_receipts(context, channel, &received, now);
+    }
+
+    Ok(received)
+}
+
+/// Tells each sender that their messages arrived (PRD section 18.2).
+///
+/// One receipt per sender rather than one per message, because that is what
+/// `ReceiptBody` is for and a channel that published a receipt per message
+/// would double its own traffic.
+///
+/// Only `delivered` is reported here. `read` is a different claim — that a
+/// human opened it — and whether to make it the default is still open
+/// question OQ-007, so nothing here decides it.
+///
+/// Receipts never generate receipts: an arriving one is recorded and skipped
+/// before it reaches the inbox, so it is never among the messages this
+/// reports on.
+fn publish_delivery_receipts(
+    context: &Context,
+    channel: &hrc_storage::ChannelRecord,
+    received: &[String],
+    now: &str,
+) -> Result<()> {
+    let database = Database::open(context.paths.database())?;
+
+    let mut by_sender: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+
+    for entry in database.inbox_entries(&channel.channel_id)? {
+        if received.contains(&entry.message_id) {
+            by_sender
+                .entry(entry.sender_principal)
+                .or_default()
+                .push(entry.message_id);
+        }
+    }
+
+    for (sender, message_ids) in by_sender {
+        let body = hrc_core::receipt::build_receipt(
+            message_ids,
+            hrc_protocol::ReceiptState::Delivered,
+            now,
+        )?;
+
+        // A receipt body that will not serialize is a bug here rather than
+        // anything the sender did, and there is nothing useful to report to
+        // them about it, so this pass simply skips that sender.
+        let Ok(body) = serde_json::to_value(&body) else {
+            continue;
+        };
+
+        compose_body(
+            context,
+            hrc_protocol::MessageKind::Receipt,
+            &sender,
+            body,
+            None,
+            None,
+        )?;
+    }
+
+    Ok(())
 }
 
 /// Decrypts and records every message published since the last receive pass.
@@ -1127,8 +1200,13 @@ fn receive_messages(
                             continue;
                         };
 
-                        let received_context =
-                            ContextPackage::from_message_body(&opened.envelope.body);
+                        let is_receipt =
+                            opened.envelope.kind == hrc_protocol::MessageKind::Receipt.as_str();
+                        let received_context = if is_receipt {
+                            Ok(None)
+                        } else {
+                            ContextPackage::from_message_body(&opened.envelope.body)
+                        };
                         let malformed_context =
                             received_context.as_ref().err().map(ToString::to_string);
                         let received_context = received_context.ok().flatten();
@@ -1211,9 +1289,22 @@ fn receive_messages(
                             now,
                         )?;
 
-                        if let hrc_storage::InboundOutcome::Accepted { released, .. } = outcome {
-                            received.push(opened.envelope.message_id.clone());
-                            received.extend(released);
+                        match outcome {
+                            hrc_storage::InboundOutcome::Accepted { released, .. } => {
+                                received.push(opened.envelope.message_id.clone());
+                                received.extend(released);
+                            }
+                            hrc_storage::InboundOutcome::ReceiptAccepted { released } => {
+                                received.extend(released);
+                            }
+                            _ => {}
+                        }
+                        if is_receipt {
+                            // A receipt's authenticated link must advance the
+                            // sender chain even if its report is invalid.
+                            // Storage keeps it out of the inbox and therefore
+                            // out of prompt-gate decisions and receipt replies.
+                            record_inbound_receipt(database, channel, &opened, now)?;
                         }
                         if let Some(reason) = malformed_context {
                             // A valid signature authenticates that this
@@ -1244,6 +1335,63 @@ fn receive_messages(
     }
 
     Ok(received)
+}
+
+/// Verifies an arriving receipt and records what it reports.
+///
+/// The verification is the point. `accept_receipt` refuses a report naming a
+/// message this installation did not send, or coming from a device that was
+/// never among its recipients, and it refuses outright rather than recording
+/// the claim and discounting it later — a stored claim tends to be read as a
+/// fact.
+///
+/// A receipt that fails verification is dropped rather than raised. It is a
+/// remote party's assertion about our own state, and the sender of a bad one
+/// should not be able to interrupt synchronization for everyone by publishing
+/// it.
+fn record_inbound_receipt(
+    database: &Database,
+    channel: &hrc_storage::ChannelRecord,
+    opened: &hrc_core::message::QuarantinedMessage,
+    now: &str,
+) -> Result<()> {
+    let Ok(body) =
+        serde_json::from_value::<hrc_protocol::receipt::ReceiptBody>(opened.envelope.body.clone())
+    else {
+        return Ok(());
+    };
+
+    let sent: Vec<hrc_core::receipt::SentMessage> = database
+        .sent_messages(&channel.channel_id)?
+        .into_iter()
+        .map(|facts| hrc_core::receipt::SentMessage {
+            message_id: facts.message_id,
+            recipient_device_ids: facts.recipient_device_ids,
+            thread_id: facts.thread_id,
+            kind: facts.kind,
+        })
+        .collect();
+
+    let Ok(verified) = hrc_core::receipt::accept_receipt(opened, &body, &sent) else {
+        return Ok(());
+    };
+
+    for report in verified {
+        database.record_receipt(
+            &channel.channel_id,
+            &hrc_storage::RecordedReceipt {
+                message_id: report.message_id,
+                reporter_principal: report.reporter_principal,
+                reporter_device: report.reporter_device,
+                state: report.state.as_str().to_owned(),
+                rejection_code: report.rejection_code,
+                reported_at: report.reported_at,
+            },
+            now,
+        )?;
+    }
+
+    Ok(())
 }
 
 /// `hrc send`, `hrc ask`, and `hrc reply` share this path.
@@ -1373,6 +1521,18 @@ fn compose_body(
     let reseal_plaintext = canonical::to_canonical_bytes(&envelope)?;
     let reseal_material =
         hrc_crypto::encrypt_to(&[device.device_identity()?.recipient()], &reseal_plaintext)?;
+    // Derived before sealing and stored, because `accept_receipt` refuses a
+    // report from a device that was never addressed and can only do that
+    // against the sender's own record. Reading it back out of the published
+    // object instead would check a receipt against whatever the transport
+    // currently holds, so a rewritten history could validate its own
+    // receipts. `seal` performs the same derivation for the encryption, which
+    // is why this calls the same function rather than reimplementing it.
+    let addressed: Vec<String> = hrc_core::message::intended_recipients(&roster, &envelope)?
+        .into_iter()
+        .map(|device| device.device_id.clone())
+        .collect();
+
     let ciphertext = hrc_core::message::seal(
         &roster,
         &device.signing_key(),
@@ -1384,6 +1544,7 @@ fn compose_body(
     )?;
 
     database.queue_outgoing_resealable(&message_id, &ciphertext, Some(&reseal_material), &now)?;
+    database.record_sent_facts(&message_id, &thread_id, kind.as_str(), &addressed)?;
 
     let outcomes = publish_pending_outgoing(
         &mut transport,
@@ -1468,6 +1629,69 @@ pub fn reply(context: &Context, message_id: &str, text: &str) -> Result<Value> {
         // the sender's statement about their own message.
         None,
     )
+}
+
+/// `hrc delegate`: ask someone to do something, without being able to make
+/// them.
+///
+/// The `task` kind is communication, never execution. `TaskBody` is proven to
+/// expose no command, script, argument or environment field, and nothing on
+/// the receiving side runs anything: a delegation arrives as a quarantined
+/// message like any other and waits for a human.
+///
+/// `--context` names a package rather than carrying one. Disclosure is `hrc
+/// context send`, which is a trusted operation with its own authorization, so
+/// pointing at a package a recipient may already hold stays on the agent-safe
+/// path where drafting a request belongs.
+pub fn delegate(
+    context: &Context,
+    recipient: &str,
+    title: &str,
+    description: &str,
+    criteria: &[String],
+    context_id: Option<&str>,
+    due: Option<&str>,
+) -> Result<Value> {
+    let due_by = match due {
+        Some(lifetime) => {
+            let database = Database::open(context.paths.database())?;
+            let now = database.utc_now()?;
+            Some(expiry_from(&now, lifetime)?)
+        }
+        None => None,
+    };
+
+    let body = hrc_protocol::delegation::TaskBody {
+        title: title.to_owned(),
+        description: description.to_owned(),
+        acceptance_criteria: criteria.to_vec(),
+        context_id: context_id.map(str::to_owned),
+        due_by,
+    };
+
+    // Validated here rather than left to the receiver. A task with an empty
+    // title or description is one nobody can act on, and finding that out
+    // after it is published to an append-only history helps no one.
+    body.validate()?;
+
+    let mut sent = compose_body(
+        context,
+        hrc_protocol::MessageKind::Task,
+        recipient,
+        serde_json::to_value(&body).map_err(|_| {
+            CliError::Core(hrc_core::CoreError::MalformedMessage {
+                reason: "the delegation body could not be serialized".into(),
+            })
+        })?,
+        None,
+        // The task's own `dueBy` is when the requester stops waiting, which
+        // is not the same as when the message should stop existing. Expiring
+        // the message would delete the request from the recipient's inbox.
+        None,
+    )?;
+
+    sent["title"] = Value::String(title.to_owned());
+    Ok(sent)
 }
 
 /// `hrc context draft`: keep an explicitly selected package locally.
@@ -2047,6 +2271,220 @@ pub fn inbox(context: &Context, pending_only: bool) -> Result<Value> {
         "channelId": channel.channel_id,
         "entries": entries,
     }))
+}
+
+/// `hrc show`: everything known about one message, without disclosing a
+/// body nobody approved.
+///
+/// The rule is the same one the inbox and the plugin pane follow, and it is
+/// why this is not simply "print the message". An inbound body stays sealed
+/// until a human releases it through the trusted interface, so what this
+/// shows for a quarantined message is the agent-safe metadata and the reason
+/// the body is absent — never the body itself.
+///
+/// A message this installation sent is different in kind: the content was
+/// never quarantined, because it did not arrive from anyone. What matters
+/// there is where it got to, which is the outbox state and the receipts
+/// other devices published about it.
+pub fn show(context: &Context, message_id: &str) -> Result<Value> {
+    let database = Database::open(context.paths.database())?;
+    let channel = only_channel(&database)?;
+
+    let inbound = database
+        .inbox_entries(&channel.channel_id)?
+        .into_iter()
+        .find(|entry| entry.message_id == message_id);
+
+    if let Some(entry) = inbound {
+        // `released_content` returns something only for a decision that
+        // actually delivers. Keeping a message in the inbox and declining it
+        // are decisions too, and neither authorizes disclosure.
+        let released = released_content(&database, message_id)?;
+
+        return Ok(json!({
+            "status": "ok",
+            "messageId": entry.message_id,
+            "direction": "inbound",
+            "sender": entry.sender_principal,
+            "kind": entry.kind,
+            "threadId": entry.thread_id,
+            "inReplyTo": entry.in_reply_to,
+            "arrival": entry.arrival_sequence,
+            "expiresAt": entry.expires_at,
+            "disposition": entry.disposition,
+            "body": match released {
+                Some(text) => Value::String(text),
+                None => Value::Null,
+            },
+            "bodyWithheld": match entry.disposition.as_str() {
+                "quarantined" => Some("awaiting a decision in the trusted interface"),
+                "declined" => Some("declined"),
+                "expired" => Some("expired before a decision"),
+                _ => None,
+            },
+        }));
+    }
+
+    let Some(state) = database.outbox_state(message_id)? else {
+        return Err(CliError::NoSuchMessage {
+            message_id: message_id.to_owned(),
+        });
+    };
+
+    let receipts: Vec<Value> = database
+        .receipts_for(message_id)?
+        .into_iter()
+        .map(|receipt| {
+            json!({
+                "reporter": receipt.reporter_principal,
+                "device": receipt.reporter_device,
+                "state": receipt.state,
+                "rejectionCode": receipt.rejection_code,
+                "reportedAt": receipt.reported_at,
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "status": "ok",
+        "messageId": message_id,
+        "direction": "outbound",
+        "state": state.as_str(),
+        "receipts": receipts,
+    }))
+}
+
+/// `hrc wait`: block until a message reaches a state, or give up.
+///
+/// The states are the ones the rest of the system already records, not a new
+/// vocabulary: an outbound message reaches `published` in the outbox and then
+/// `delivered`, `read`, `accepted` or `rejected` when a recipient device says
+/// so, and an inbound message reaches a disposition when a human decides.
+///
+/// Each pass runs a real synchronization rather than only reading local
+/// state. Without one, waiting on a machine whose daemon is not running would
+/// block until the timeout no matter what the channel did — and section 17.1
+/// names explicit `hrc wait` as the reason a five-second poll exists.
+pub fn wait(
+    context: &Context,
+    message_id: &str,
+    until: Option<&str>,
+    timeout: Option<&str>,
+) -> Result<Value> {
+    const DEFAULT_STATE: &str = "delivered";
+    const DEFAULT_TIMEOUT_SECONDS: u64 = 300;
+
+    let wanted = until.unwrap_or(DEFAULT_STATE);
+    let limit = match timeout {
+        Some(value) => Duration::from_secs(parse_wait_timeout(value)?),
+        None => Duration::from_secs(DEFAULT_TIMEOUT_SECONDS),
+    };
+
+    // Section 17.1's explicit-wait interval, and the adapter's own minimum
+    // where that is longer: a provider's rate limit is a hard constraint and
+    // exceeding it throttles every channel the installation hosts.
+    let interval = {
+        let database = Database::open(context.paths.database())?;
+        let channel = only_channel(&database)?;
+        let transport = GitTransport::open(
+            context.paths.channel_transport(&channel.channel_id),
+            &channel.transport_locator,
+        )?;
+        let minimum =
+            Duration::from_secs(transport.capabilities().min_poll_interval_seconds as u64);
+        poll_interval(PollActivity::Waiting, minimum)
+    };
+
+    let started = std::time::Instant::now();
+
+    loop {
+        if let Some(state) = observed_state(context, message_id)?
+            && state == wanted
+        {
+            return Ok(json!({
+                "status": "ok",
+                "messageId": message_id,
+                "state": state,
+                "waitedSeconds": started.elapsed().as_secs(),
+            }));
+        }
+
+        if started.elapsed() >= limit {
+            // A timeout is not an error. The caller asked how things stand
+            // after a bounded wait, and "not yet" is an answer to that.
+            return Ok(json!({
+                "status": "ok",
+                "messageId": message_id,
+                "state": "timeout",
+                "waitedSeconds": started.elapsed().as_secs(),
+            }));
+        }
+
+        std::thread::sleep(interval);
+
+        // Failing to reach the transport is not a reason to stop waiting: the
+        // state may still arrive through a daemon running alongside this, and
+        // a caller that asked for a timeout asked to be told at the end of it.
+        let _ = sync_once(context);
+    }
+}
+
+/// The state a message is in now, in the vocabulary `hrc wait` accepts.
+///
+/// Receipts win over the outbox for an outbound message, because `published`
+/// is what this installation did and a receipt is what happened to it. The
+/// most advanced report is the one returned: a device that has read a message
+/// also received it, and reporting `delivered` after `read` would go
+/// backwards.
+fn observed_state(context: &Context, message_id: &str) -> Result<Option<String>> {
+    let database = Database::open(context.paths.database())?;
+    let channel = only_channel(&database)?;
+
+    if let Some(entry) = database
+        .inbox_entries(&channel.channel_id)?
+        .into_iter()
+        .find(|entry| entry.message_id == message_id)
+    {
+        return Ok(Some(entry.disposition));
+    }
+
+    let reported = database.receipts_for(message_id)?;
+    for state in ["rejected", "accepted", "read", "delivered"] {
+        if reported.iter().any(|receipt| receipt.state == state) {
+            return Ok(Some(state.to_owned()));
+        }
+    }
+
+    Ok(database
+        .outbox_state(message_id)?
+        .map(|state| state.as_str().to_owned()))
+}
+
+/// Parses `30s`, `5m`, or `2h` into seconds.
+///
+/// Separate from `parse_lifetime`, which governs invite and message expiry on
+/// the wire. That one deliberately has no seconds unit, because a lifetime
+/// measured in seconds is not a useful thing to publish; a wait measured in
+/// seconds is entirely reasonable.
+fn parse_wait_timeout(value: &str) -> Result<u64> {
+    let invalid = || CliError::InvalidLifetime {
+        value: value.to_owned(),
+    };
+
+    let value = value.trim();
+    let (digits, unit) = value.split_at(value.len().checked_sub(1).ok_or_else(invalid)?);
+    let amount: u64 = digits.parse().map_err(|_| invalid())?;
+
+    if amount == 0 {
+        return Err(invalid());
+    }
+
+    match unit {
+        "s" => Ok(amount),
+        "m" => Ok(amount * 60),
+        "h" => Ok(amount * 3_600),
+        _ => Err(invalid()),
+    }
 }
 
 /// `hrc thread`: one conversation in local arrival order.
@@ -3670,6 +4108,10 @@ pub fn herdr_pane(context: &Context, pane: &str) -> Result<Value> {
 
         // Writing a message, so that saying something needs no other tool.
         hrc_herdr::Pane::Compose => review::compose(context),
+
+        // Disclosing a context package, which section 22.4 puts behind the
+        // same boundary as reading a quarantined body.
+        hrc_herdr::Pane::Context => review::context(context),
 
         // Getting a channel in the first place.
         hrc_herdr::Pane::Setup => review::setup(context),
