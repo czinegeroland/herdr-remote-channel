@@ -13,6 +13,14 @@ ALTER TABLE channel ADD COLUMN receive_cursor TEXT;
 ALTER TABLE outbox ADD COLUMN recipient_order_stale INTEGER NOT NULL DEFAULT 0
     CHECK (recipient_order_stale IN (0, 1));
 
+-- Version-10 queued envelopes predate recipient-scoped predecessors. Rebuild
+-- every one before publication, even when the roster epoch itself has not
+-- changed. Rows without protected material remain safely deferred rather than
+-- publishing legacy global links.
+UPDATE outbox
+SET recipient_order_stale = 1
+WHERE state IN ('queued', 'publishing');
+
 CREATE TABLE inbound_recipient_chain (
     channel_id       TEXT NOT NULL,
     sender_device    TEXT NOT NULL,

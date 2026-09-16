@@ -1919,6 +1919,36 @@ impl Database {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// One currently queued outbox record, refreshed from durable state.
+    pub fn pending_outgoing_record(&self, message_id: &str) -> Result<Option<PendingOutgoing>> {
+        self.connection
+            .query_row(
+                "SELECT message_id, device_id, device_sequence, chain_id,
+                        previous_chain_id, roster_epoch, payload_hash, created_at,
+                        ciphertext, reseal_material, recipient_order_stale
+                 FROM outbox
+                 WHERE message_id = ?1 AND state IN ('queued', 'publishing')",
+                params![message_id],
+                |row| {
+                    Ok(PendingOutgoing {
+                        message_id: row.get(0)?,
+                        device_id: row.get(1)?,
+                        device_sequence: row.get::<_, i64>(2)? as u64,
+                        chain_id: row.get(3)?,
+                        previous_chain_id: row.get(4)?,
+                        roster_epoch: row.get::<_, i64>(5)? as u64,
+                        payload_hash: row.get(6)?,
+                        created_at: row.get(7)?,
+                        ciphertext: row.get(8)?,
+                        reseal_material: row.get(9)?,
+                        recipient_order_stale: row.get(10)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     /// Resolves reservations left behind by a crash.
     ///
     /// A reserved slot has a sequence but no ciphertext, so nothing can be
@@ -2444,6 +2474,7 @@ fn record_recipient_inbound(
                 message.sender_device,
                 recipient_device,
                 previous,
+                now,
             )? {
                 return Err(StorageError::InboundForked {
                     sender_device: message.sender_device.to_owned(),
@@ -2468,6 +2499,7 @@ fn record_recipient_inbound(
             message.sender_device,
             recipient_device,
             previous,
+            now,
         )?,
         (None, None) => {
             if legacy_sender_history_exists(transaction, message.channel_id, message.sender_device)?
@@ -2629,8 +2661,9 @@ fn recipient_predecessor_accepted(
     sender_device: &str,
     recipient_device: &str,
     chain_id: &str,
+    now: &str,
 ) -> Result<bool> {
-    transaction
+    let accepted = transaction
         .query_row(
             "SELECT 1
              WHERE EXISTS (
@@ -2649,7 +2682,111 @@ fn recipient_predecessor_accepted(
         )
         .optional()
         .map(|found| found.unwrap_or(false))
-        .map_err(Into::into)
+        .map_err(StorageError::from)?;
+    if accepted {
+        return Ok(true);
+    }
+
+    adopt_legacy_held_predecessor(
+        transaction,
+        channel_id,
+        sender_device,
+        recipient_device,
+        chain_id,
+        now,
+    )
+}
+
+fn adopt_legacy_held_predecessor(
+    transaction: &Transaction<'_>,
+    channel_id: &str,
+    sender_device: &str,
+    recipient_device: &str,
+    chain_id: &str,
+    now: &str,
+) -> Result<bool> {
+    let held: Option<LegacyHeldPredecessor> = transaction
+        .query_row(
+            "SELECT inbound_hold.message_id, inbound_hold.device_sequence,
+                    inbound_hold.ciphertext_sha256,
+                    EXISTS (
+                        SELECT 1 FROM inbound_receipt_link
+                        WHERE inbound_receipt_link.message_id = inbound_hold.message_id
+                    ),
+                    COALESCE((
+                        SELECT disposition = 'expired' FROM inbox
+                        WHERE inbox.message_id = inbound_hold.message_id
+                    ), 0)
+             FROM inbound_hold
+             WHERE inbound_hold.channel_id = ?1
+               AND inbound_hold.sender_device = ?2
+               AND inbound_hold.chain_id = ?3",
+            params![channel_id, sender_device, chain_id],
+            |row| {
+                Ok(LegacyHeldPredecessor {
+                    message_id: row.get(0)?,
+                    device_sequence: row.get::<_, i64>(1)? as u64,
+                    ciphertext_sha256: row.get(2)?,
+                    is_receipt: row.get(3)?,
+                    is_expired: row.get(4)?,
+                })
+            },
+        )
+        .optional()?;
+    let Some(held) = held else {
+        return Ok(false);
+    };
+
+    transaction.execute(
+        "INSERT INTO inbound_recipient_link (
+             message_id, channel_id, sender_device, recipient_device,
+             device_sequence, chain_id, previous_chain_id, ciphertext_sha256,
+             state, is_receipt, is_expired
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, 'accepted', ?8, ?9)",
+        params![
+            held.message_id,
+            channel_id,
+            sender_device,
+            recipient_device,
+            held.device_sequence as i64,
+            chain_id,
+            held.ciphertext_sha256,
+            held.is_receipt,
+            held.is_expired,
+        ],
+    )?;
+
+    if !held.is_receipt {
+        let arrival_sequence: u64 = transaction.query_row(
+            "SELECT COALESCE(MAX(arrival_sequence), 0) + 1
+             FROM inbox WHERE channel_id = ?1",
+            params![channel_id],
+            |row| row.get::<_, i64>(0),
+        )? as u64;
+        transaction.execute(
+            "UPDATE inbox SET arrival_sequence = COALESCE(arrival_sequence, ?2),
+                              received_at = ?3
+             WHERE message_id = ?1",
+            params![held.message_id, arrival_sequence as i64, now],
+        )?;
+    }
+    transaction.execute(
+        "DELETE FROM inbound_receipt_link WHERE message_id = ?1",
+        params![held.message_id],
+    )?;
+    transaction.execute(
+        "DELETE FROM inbound_hold WHERE message_id = ?1",
+        params![held.message_id],
+    )?;
+    Ok(true)
+}
+
+struct LegacyHeldPredecessor {
+    message_id: String,
+    device_sequence: u64,
+    ciphertext_sha256: String,
+    is_receipt: bool,
+    is_expired: bool,
 }
 
 fn recipient_predecessor_sequence(
