@@ -109,6 +109,71 @@ fn version_five_outbox_rows_migrate_without_becoming_publishable_at_a_new_epoch(
 }
 
 #[test]
+fn version_ten_queued_rows_are_marked_for_recipient_order_reseal() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite");
+    let connection = Connection::open(&path).unwrap();
+    for migration in [
+        include_str!("migrations/001_initial.sql"),
+        include_str!("migrations/002_inbound_order.sql"),
+        include_str!("migrations/003_receipts.sql"),
+        include_str!("migrations/004_decision_audit.sql"),
+        include_str!("migrations/005_invites.sql"),
+        include_str!("migrations/006_outbox_reseal.sql"),
+        include_str!("migrations/007_context_packages.sql"),
+        include_str!("migrations/008_inbox_plugin_view.sql"),
+        include_str!("migrations/009_sent_message_facts.sql"),
+        include_str!("migrations/010_inbound_receipt_links.sql"),
+    ] {
+        connection.execute_batch(migration).unwrap();
+    }
+    connection.pragma_update(None, "user_version", 10).unwrap();
+    connection
+        .execute(
+            "INSERT INTO channel (
+                 channel_id, transport_kind, transport_locator, local_name, created_at
+             ) VALUES (?1, 'git', 'owner/channel', 'Test channel', ?2)",
+            params![CHANNEL, NOW],
+        )
+        .unwrap();
+    for (message_id, sequence, material) in [
+        ("recoverable", 1, Some(b"protected".as_slice())),
+        ("legacy", 2, None),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO outbox (
+                     message_id, channel_id, device_id, device_sequence, chain_id,
+                     roster_epoch, payload_hash, ciphertext, reseal_material,
+                     thread_id, kind, state, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, 1, 'hash', X'636970686572',
+                           ?6, 'thread', 'note', 'queued', ?7, ?7)",
+                params![
+                    message_id,
+                    CHANNEL,
+                    DEVICE,
+                    sequence,
+                    format!("chain-{sequence}"),
+                    material,
+                    NOW
+                ],
+            )
+            .unwrap();
+    }
+    drop(connection);
+
+    let migrated = Database::open(&path).unwrap();
+    assert!(
+        migrated
+            .pending_outgoing_records(CHANNEL)
+            .unwrap()
+            .iter()
+            .all(|record| record.recipient_order_stale),
+        "all legacy queued envelopes must be rebuilt or safely deferred"
+    );
+}
+
+#[test]
 fn a_database_from_a_newer_build_is_refused() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.sqlite");
@@ -755,6 +820,54 @@ fn reseal_replaces_recipients_and_recomputes_their_predecessors() {
     let mut expected = vec![bob, carol];
     expected.sort();
     assert_eq!(stale.recipient_device_ids, expected);
+}
+
+#[test]
+fn a_fresh_pending_read_observes_staleness_created_by_an_earlier_reseal() {
+    let mut database = database();
+    let bob = recipient("bob");
+    for (message_id, sequence) in [("msg-first", 1), ("msg-later", 2)] {
+        database
+            .compose_outgoing::<StorageError, _>(
+                CHANNEL,
+                DEVICE,
+                message_id,
+                sequence,
+                "payload",
+                "thread",
+                "note",
+                std::slice::from_ref(&bob),
+                NOW,
+                |_| {
+                    Ok(OutgoingBuild {
+                        ciphertext: message_id.as_bytes().to_vec(),
+                        reseal_material: b"protected".to_vec(),
+                    })
+                },
+            )
+            .unwrap();
+    }
+    let stale_snapshot = database.pending_outgoing_records(CHANNEL).unwrap();
+    assert!(!stale_snapshot[1].recipient_order_stale);
+
+    database
+        .reseal_outgoing::<StorageError, _>(
+            "msg-first",
+            1,
+            2,
+            std::slice::from_ref(&bob),
+            NOW,
+            |_, _| Ok(b"fresh".to_vec()),
+        )
+        .unwrap();
+
+    assert!(
+        database
+            .pending_outgoing_record("msg-later")
+            .unwrap()
+            .unwrap()
+            .recipient_order_stale
+    );
 }
 
 #[test]
@@ -1827,6 +1940,106 @@ fn recipient_ordering_bootstraps_from_an_accepted_legacy_link() {
         .unwrap();
 
     assert!(matches!(outcome, InboundOutcome::Accepted { .. }));
+}
+
+#[test]
+fn recipient_ordering_adopts_an_authenticated_legacy_held_predecessor() {
+    let mut database = database();
+    let local = recipient("local");
+    let first = arrival(2);
+    let second = arrival(3);
+    let missing = canonical::sha256_hex(b"message for another recipient");
+    let held = InboundMessage {
+        previous_chain_id: Some(&missing),
+        ..first.message()
+    };
+
+    assert!(matches!(
+        database.record_inbound(&held, NOW).unwrap(),
+        InboundOutcome::Held { .. }
+    ));
+    let outcome = database
+        .record_inbound(
+            &recipient_message(&second, &local, Some(&first.chain_id)),
+            NOW,
+        )
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        InboundOutcome::Accepted {
+            arrival_sequence: 2,
+            released: Vec::new()
+        }
+    );
+    assert!(database.held_inbound(CHANNEL).unwrap().is_empty());
+    assert_eq!(
+        database
+            .inbox_entries(CHANNEL)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.message_id)
+            .collect::<Vec<_>>(),
+        vec![first.message_id, second.message_id]
+    );
+}
+
+#[test]
+fn recipient_ordering_adopts_a_contiguous_legacy_held_chain_oldest_first() {
+    let mut database = database();
+    let local = recipient("local");
+    let first = arrival(2);
+    let second = arrival(3);
+    let successor = arrival(4);
+    let missing = canonical::sha256_hex(b"message for another recipient");
+    let first_held = InboundMessage {
+        previous_chain_id: Some(&missing),
+        ..first.message()
+    };
+
+    database.record_inbound(&first_held, NOW).unwrap();
+    database.record_inbound(&second.message(), NOW).unwrap();
+    let outcome = database
+        .record_inbound(
+            &recipient_message(&successor, &local, Some(&second.chain_id)),
+            NOW,
+        )
+        .unwrap();
+
+    assert!(matches!(outcome, InboundOutcome::Accepted { .. }));
+    assert!(database.held_inbound(CHANNEL).unwrap().is_empty());
+    assert_eq!(
+        database
+            .inbox_entries(CHANNEL)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.message_id)
+            .collect::<Vec<_>>(),
+        vec![first.message_id, second.message_id, successor.message_id]
+    );
+}
+
+#[test]
+fn recipient_ordering_rejects_backwards_legacy_adoption() {
+    let mut database = database();
+    let local = recipient("local");
+    let held = arrival(5);
+    let successor = arrival(4);
+    let missing = canonical::sha256_hex(b"message for another recipient");
+    let held = InboundMessage {
+        previous_chain_id: Some(&missing),
+        ..held.message()
+    };
+
+    database.record_inbound(&held, NOW).unwrap();
+    let error = database
+        .record_inbound(
+            &recipient_message(&successor, &local, Some(held.chain_id)),
+            NOW,
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, StorageError::InboundForked { .. }));
 }
 
 // --- Receipts (PRD sections 18.2 and 18.3) ---

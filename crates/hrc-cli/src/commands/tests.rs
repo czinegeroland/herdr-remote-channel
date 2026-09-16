@@ -305,10 +305,57 @@ fn wait_returns_the_advanced_report_when_earlier_milestones_are_reached() {
             assert_eq!(waited["state"], state);
         }
     }
+    database
+        .record_receipt(
+            &channel_id,
+            &hrc_storage::RecordedReceipt {
+                message_id: message_id.into(),
+                reporter_principal: principal,
+                reporter_device: "rejecting-device".into(),
+                state: "rejected".into(),
+                rejection_code: Some("declined".into()),
+                reported_at: now.clone(),
+            },
+            &now,
+        )
+        .unwrap();
+    assert_eq!(
+        wait(&context, message_id, Some("delivered"), Some("1s")).unwrap()["state"],
+        "accepted"
+    );
     assert!(!state_reaches("rejected", "accepted"));
     assert!(!state_reaches("rejected", "delivered"));
     assert!(!state_reaches("declined", "approved"));
     assert!(!state_reaches("published", "delivered"));
+}
+
+#[test]
+fn delivery_receipts_are_partitioned_by_originating_device() {
+    let entry = |message_id: &str, sender_device: &str| hrc_storage::InboxEntry {
+        message_id: message_id.into(),
+        sender_principal: "same-principal".into(),
+        sender_device: sender_device.into(),
+        kind: "note".into(),
+        thread_id: Some(message_id.into()),
+        in_reply_to: None,
+        arrival_sequence: 1,
+        expires_at: None,
+        disposition: "quarantined".into(),
+    };
+    let obligations = delivery_receipt_obligations(
+        vec![entry("from-a", "device-a"), entry("from-b", "device-b")],
+        &std::collections::HashSet::new(),
+    );
+
+    assert_eq!(obligations.len(), 2);
+    assert_eq!(
+        obligations[&("same-principal".into(), "device-a".into())],
+        ["from-a"]
+    );
+    assert_eq!(
+        obligations[&("same-principal".into(), "device-b".into())],
+        ["from-b"]
+    );
 }
 
 #[test]

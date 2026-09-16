@@ -1919,6 +1919,36 @@ impl Database {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// One currently queued outbox record, refreshed from durable state.
+    pub fn pending_outgoing_record(&self, message_id: &str) -> Result<Option<PendingOutgoing>> {
+        self.connection
+            .query_row(
+                "SELECT message_id, device_id, device_sequence, chain_id,
+                        previous_chain_id, roster_epoch, payload_hash, created_at,
+                        ciphertext, reseal_material, recipient_order_stale
+                 FROM outbox
+                 WHERE message_id = ?1 AND state IN ('queued', 'publishing')",
+                params![message_id],
+                |row| {
+                    Ok(PendingOutgoing {
+                        message_id: row.get(0)?,
+                        device_id: row.get(1)?,
+                        device_sequence: row.get::<_, i64>(2)? as u64,
+                        chain_id: row.get(3)?,
+                        previous_chain_id: row.get(4)?,
+                        roster_epoch: row.get::<_, i64>(5)? as u64,
+                        payload_hash: row.get(6)?,
+                        created_at: row.get(7)?,
+                        ciphertext: row.get(8)?,
+                        reseal_material: row.get(9)?,
+                        recipient_order_stale: row.get(10)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     /// Resolves reservations left behind by a crash.
     ///
     /// A reserved slot has a sequence but no ciphertext, so nothing can be
@@ -2444,6 +2474,8 @@ fn record_recipient_inbound(
                 message.sender_device,
                 recipient_device,
                 previous,
+                message.device_sequence,
+                now,
             )? {
                 return Err(StorageError::InboundForked {
                     sender_device: message.sender_device.to_owned(),
@@ -2468,6 +2500,8 @@ fn record_recipient_inbound(
             message.sender_device,
             recipient_device,
             previous,
+            message.device_sequence,
+            now,
         )?,
         (None, None) => {
             if legacy_sender_history_exists(transaction, message.channel_id, message.sender_device)?
@@ -2629,8 +2663,10 @@ fn recipient_predecessor_accepted(
     sender_device: &str,
     recipient_device: &str,
     chain_id: &str,
+    successor_sequence: u64,
+    now: &str,
 ) -> Result<bool> {
-    transaction
+    let accepted = transaction
         .query_row(
             "SELECT 1
              WHERE EXISTS (
@@ -2649,7 +2685,196 @@ fn recipient_predecessor_accepted(
         )
         .optional()
         .map(|found| found.unwrap_or(false))
-        .map_err(Into::into)
+        .map_err(StorageError::from)?;
+    if accepted {
+        return Ok(true);
+    }
+
+    adopt_legacy_held_predecessor(
+        transaction,
+        channel_id,
+        sender_device,
+        recipient_device,
+        chain_id,
+        successor_sequence,
+        now,
+    )
+}
+
+fn adopt_legacy_held_predecessor(
+    transaction: &Transaction<'_>,
+    channel_id: &str,
+    sender_device: &str,
+    recipient_device: &str,
+    chain_id: &str,
+    successor_sequence: u64,
+    now: &str,
+) -> Result<bool> {
+    let mut held_chain = Vec::new();
+    let mut current_chain_id = chain_id.to_owned();
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        if !seen.insert(current_chain_id.clone()) {
+            return Err(StorageError::InboundForked {
+                sender_device: sender_device.to_owned(),
+                device_sequence: successor_sequence,
+                existing: current_chain_id,
+                arriving: chain_id.to_owned(),
+            });
+        }
+        let held: Option<LegacyHeldPredecessor> = transaction
+            .query_row(
+                "SELECT inbound_hold.message_id, inbound_hold.device_sequence,
+                    inbound_hold.chain_id, inbound_hold.previous_chain_id,
+                    inbound_hold.ciphertext_sha256,
+                    EXISTS (
+                        SELECT 1 FROM inbound_receipt_link
+                        WHERE inbound_receipt_link.message_id = inbound_hold.message_id
+                    ),
+                    COALESCE((
+                        SELECT disposition = 'expired' FROM inbox
+                        WHERE inbox.message_id = inbound_hold.message_id
+                    ), 0)
+             FROM inbound_hold
+             WHERE inbound_hold.channel_id = ?1
+               AND inbound_hold.sender_device = ?2
+               AND inbound_hold.chain_id = ?3",
+                params![channel_id, sender_device, current_chain_id],
+                |row| {
+                    Ok(LegacyHeldPredecessor {
+                        message_id: row.get(0)?,
+                        device_sequence: row.get::<_, i64>(1)? as u64,
+                        chain_id: row.get(2)?,
+                        previous_chain_id: row.get(3)?,
+                        ciphertext_sha256: row.get(4)?,
+                        is_receipt: row.get(5)?,
+                        is_expired: row.get(6)?,
+                    })
+                },
+            )
+            .optional()?;
+        let Some(held) = held else {
+            break;
+        };
+        current_chain_id = match &held.previous_chain_id {
+            Some(previous) => previous.clone(),
+            None => {
+                held_chain.push(held);
+                break;
+            }
+        };
+        held_chain.push(held);
+    }
+    if held_chain.is_empty() {
+        return Ok(false);
+    }
+    held_chain.reverse();
+
+    let legacy_head: Option<(u64, String)> = transaction
+        .query_row(
+            "SELECT last_sequence, last_chain_id FROM inbound_chain
+             WHERE channel_id = ?1 AND sender_device = ?2",
+            params![channel_id, sender_device],
+            |row| Ok((row.get::<_, i64>(0)? as u64, row.get(1)?)),
+        )
+        .optional()?;
+    let oldest = &held_chain[0];
+    if oldest.device_sequence == 1 && oldest.previous_chain_id.is_some() {
+        return Err(StorageError::InboundForked {
+            sender_device: sender_device.to_owned(),
+            device_sequence: oldest.device_sequence,
+            existing: oldest.previous_chain_id.clone().unwrap_or_default(),
+            arriving: oldest.message_id.clone(),
+        });
+    }
+    if let Some((head_sequence, head_chain_id)) = legacy_head
+        && oldest.device_sequence <= head_sequence
+    {
+        return Err(StorageError::InboundForked {
+            sender_device: sender_device.to_owned(),
+            device_sequence: oldest.device_sequence,
+            existing: head_chain_id,
+            arriving: oldest.message_id.clone(),
+        });
+    }
+    for pair in held_chain.windows(2) {
+        if pair[1].previous_chain_id.as_deref() != Some(pair[0].chain_id.as_str())
+            || pair[1].device_sequence <= pair[0].device_sequence
+        {
+            return Err(StorageError::InboundForked {
+                sender_device: sender_device.to_owned(),
+                device_sequence: pair[1].device_sequence,
+                existing: pair[0].chain_id.clone(),
+                arriving: pair[1].message_id.clone(),
+            });
+        }
+    }
+    if held_chain.last().unwrap().device_sequence >= successor_sequence {
+        return Err(StorageError::InboundForked {
+            sender_device: sender_device.to_owned(),
+            device_sequence: successor_sequence,
+            existing: held_chain.last().unwrap().chain_id.clone(),
+            arriving: chain_id.to_owned(),
+        });
+    }
+
+    let mut recipient_previous_chain_id = None;
+    for held in held_chain {
+        transaction.execute(
+            "INSERT INTO inbound_recipient_link (
+                 message_id, channel_id, sender_device, recipient_device,
+                 device_sequence, chain_id, previous_chain_id, ciphertext_sha256,
+                 state, is_receipt, is_expired
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'accepted', ?9, ?10)",
+            params![
+                held.message_id,
+                channel_id,
+                sender_device,
+                recipient_device,
+                held.device_sequence as i64,
+                held.chain_id,
+                recipient_previous_chain_id,
+                held.ciphertext_sha256,
+                held.is_receipt,
+                held.is_expired,
+            ],
+        )?;
+        recipient_previous_chain_id = Some(held.chain_id.clone());
+
+        if !held.is_receipt {
+            let arrival_sequence: u64 = transaction.query_row(
+                "SELECT COALESCE(MAX(arrival_sequence), 0) + 1
+                 FROM inbox WHERE channel_id = ?1",
+                params![channel_id],
+                |row| row.get::<_, i64>(0),
+            )? as u64;
+            transaction.execute(
+                "UPDATE inbox SET arrival_sequence = COALESCE(arrival_sequence, ?2),
+                                  received_at = ?3
+                 WHERE message_id = ?1",
+                params![held.message_id, arrival_sequence as i64, now],
+            )?;
+        }
+        transaction.execute(
+            "DELETE FROM inbound_receipt_link WHERE message_id = ?1",
+            params![held.message_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM inbound_hold WHERE message_id = ?1",
+            params![held.message_id],
+        )?;
+    }
+    Ok(true)
+}
+
+struct LegacyHeldPredecessor {
+    message_id: String,
+    device_sequence: u64,
+    chain_id: String,
+    previous_chain_id: Option<String>,
+    ciphertext_sha256: String,
+    is_receipt: bool,
+    is_expired: bool,
 }
 
 fn recipient_predecessor_sequence(

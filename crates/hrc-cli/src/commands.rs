@@ -1091,19 +1091,10 @@ fn publish_delivery_receipts(
         .filter_map(|entry| entry.message_id)
         .collect();
 
-    let mut by_sender: std::collections::BTreeMap<String, Vec<String>> =
-        std::collections::BTreeMap::new();
+    let by_sender =
+        delivery_receipt_obligations(database.inbox_entries(&channel.channel_id)?, &reported);
 
-    for entry in database.inbox_entries(&channel.channel_id)? {
-        if entry.disposition != "expired" && !reported.contains(&entry.message_id) {
-            by_sender
-                .entry(entry.sender_principal)
-                .or_default()
-                .push(entry.message_id);
-        }
-    }
-
-    for (sender, message_ids) in by_sender {
+    for ((sender, _sender_device), message_ids) in by_sender {
         for batch in message_ids.chunks(hrc_protocol::receipt::MAX_REFERENCED_MESSAGES) {
             let body = hrc_core::receipt::build_receipt(
                 batch.iter().cloned(),
@@ -1136,6 +1127,22 @@ fn publish_delivery_receipts(
     }
 
     Ok(())
+}
+
+fn delivery_receipt_obligations(
+    entries: Vec<hrc_storage::InboxEntry>,
+    reported: &std::collections::HashSet<String>,
+) -> std::collections::BTreeMap<(String, String), Vec<String>> {
+    let mut by_sender = std::collections::BTreeMap::new();
+    for entry in entries {
+        if entry.disposition != "expired" && !reported.contains(&entry.message_id) {
+            by_sender
+                .entry((entry.sender_principal, entry.sender_device))
+                .or_insert_with(Vec::new)
+                .push(entry.message_id);
+        }
+    }
+    by_sender
 }
 
 /// Decrypts and records every message published since the last receive pass.
@@ -2521,10 +2528,24 @@ fn reached_state(context: &Context, message_id: &str, wanted: &str) -> Result<Op
         observed.push(state.as_str().to_owned());
     }
     Ok(observed
-        .iter()
-        .any(|state| state_reaches(state, wanted))
-        .then(|| observed.into_iter().next())
-        .flatten())
+        .into_iter()
+        .filter(|state| state_reaches(state, wanted))
+        .max_by_key(|state| state_rank(state)))
+}
+
+fn state_rank(state: &str) -> u8 {
+    match state {
+        "accepted" | "approved" | "edited" => 9,
+        "read" => 8,
+        "delivered" => 7,
+        "rejected" | "declined" | "expired" => 6,
+        "published" => 5,
+        "publishing" => 4,
+        "queued" => 3,
+        "reserved" => 2,
+        "quarantined" => 1,
+        _ => 0,
+    }
 }
 
 fn state_reaches(observed: &str, wanted: &str) -> bool {
@@ -3922,7 +3943,10 @@ fn publish_pending_outgoing(
     let mut blocked_devices = std::collections::HashSet::new();
     let mut outcomes = Vec::new();
 
-    for outgoing in database.pending_outgoing_records(channel_id)? {
+    for message_id in database.pending_outgoing(channel_id)? {
+        let Some(outgoing) = database.pending_outgoing_record(&message_id)? else {
+            continue;
+        };
         if blocked_devices.contains(&outgoing.device_id) {
             outcomes.push(hrc_core::sync::PublishOutcome {
                 published: Vec::new(),
