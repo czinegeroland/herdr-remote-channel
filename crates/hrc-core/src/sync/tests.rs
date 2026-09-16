@@ -146,7 +146,7 @@ fn publishing_marks_the_record_published() {
 
     let outcome = publish_one(
         &mut transport,
-        &database,
+        &mut database,
         CHANNEL,
         "msg-1",
         message("msg-1"),
@@ -168,10 +168,10 @@ fn an_unpreparable_message_is_deferred_without_publishing_stale_bytes() {
 
     let outcome = publish_one_prepared(
         &mut transport,
-        &database,
+        &mut database,
         CHANNEL,
         "msg-1",
-        |_| Ok(PreparedPublication::Defer),
+        |_, _| Ok(PreparedPublication::Defer),
         3,
         NOW,
     )
@@ -200,10 +200,10 @@ fn a_previously_published_message_is_acknowledged_without_another_publication() 
 
     let outcome = publish_one_prepared(
         &mut transport,
-        &database,
+        &mut database,
         CHANNEL,
         "msg-1",
-        |_| Ok(PreparedPublication::AlreadyPublished),
+        |_, _| Ok(PreparedPublication::AlreadyPublished),
         3,
         NOW,
     )
@@ -284,10 +284,10 @@ fn a_conflict_reprepares_bytes_before_the_retry() {
 
     let outcome = publish_one_prepared(
         &mut transport,
-        &database,
+        &mut database,
         CHANNEL,
         "msg-1",
-        |_| {
+        |_, _| {
             preparations += 1;
             let mut object = message("msg-1");
             object.bytes = if preparations == 1 {
@@ -338,7 +338,7 @@ fn a_conflict_is_resolved_by_rebuilding_on_the_new_tip() {
 
     let outcome = publish_one(
         &mut transport,
-        &database,
+        &mut database,
         CHANNEL,
         "msg-1",
         message("msg-1"),
@@ -374,7 +374,7 @@ fn a_security_conflict_halts_the_channel_instead_of_retrying() {
 
     let error = publish_one(
         &mut transport,
-        &database,
+        &mut database,
         CHANNEL,
         "msg-1",
         different,
@@ -409,7 +409,7 @@ fn a_transient_failure_defers_the_message_without_losing_it() {
 
     let error = publish_one(
         &mut transport,
-        &database,
+        &mut database,
         CHANNEL,
         "msg-1",
         message("msg-1"),

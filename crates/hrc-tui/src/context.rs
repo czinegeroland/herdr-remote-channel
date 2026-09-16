@@ -18,6 +18,8 @@
 //! authorized is a specific set of bytes rather than a package name that
 //! could be re-drafted with different contents afterwards.
 
+use std::cell::Cell;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 /// One locally drafted package that could be disclosed.
@@ -32,6 +34,10 @@ pub struct ContextDraft {
 /// What the trusted preview reported about a package.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ContextPreview {
+    /// Digest of the exact canonical package shown to the human.
+    pub digest: String,
+    /// Exact canonical package content that would leave the machine.
+    pub content: String,
     /// Item kinds and their byte counts.
     pub items: Vec<(String, u64)>,
     /// Total bytes the package would disclose.
@@ -86,6 +92,9 @@ pub struct ContextApp {
     focus: ContextFocus,
     preview: Option<ContextPreview>,
     proposed: Option<String>,
+    preview_scroll: Cell<u16>,
+    preview_page_rows: Cell<u16>,
+    preview_max_scroll: Cell<u16>,
     status: String,
 }
 
@@ -101,6 +110,9 @@ impl ContextApp {
             focus: ContextFocus::Package,
             preview: None,
             proposed: None,
+            preview_scroll: Cell::new(0),
+            preview_page_rows: Cell::new(1),
+            preview_max_scroll: Cell::new(0),
             status: "Tab: choose recipient   Enter: see what would be sent   Esc: leave".into(),
         }
     }
@@ -155,6 +167,22 @@ impl ContextApp {
         &self.status
     }
 
+    /// The first wrapped preview row currently shown.
+    pub fn preview_scroll(&self) -> u16 {
+        self.preview_scroll.get()
+    }
+
+    /// Updates the rendered preview dimensions and clamps scrolling after resize.
+    pub(crate) fn set_preview_viewport(&self, total_rows: usize, visible_rows: u16) {
+        let max_scroll = total_rows
+            .saturating_sub(visible_rows as usize)
+            .min(u16::MAX as usize) as u16;
+        self.preview_page_rows.set(visible_rows.max(1));
+        self.preview_max_scroll.set(max_scroll);
+        self.preview_scroll
+            .set(self.preview_scroll.get().min(max_scroll));
+    }
+
     /// Records what the daemon's trusted preview reported.
     ///
     /// Moving the selection afterwards discards it: a preview describes one
@@ -162,12 +190,13 @@ impl ContextApp {
     /// would invite a decision about the wrong bytes.
     pub fn show_preview(&mut self, preview: ContextPreview) {
         self.status = if preview.sendable {
-            "Ctrl+S: send this exact package   Esc: back".into()
+            "j/k/PgUp/PgDn: scroll   Up/Down: select   Ctrl+S: send   Esc: back".into()
         } else {
             "This package cannot be sent. Findings must be resolved in the draft first.".into()
         };
 
         self.preview = Some(preview);
+        self.preview_scroll.set(0);
         self.focus = ContextFocus::Preview;
     }
 
@@ -196,6 +225,7 @@ impl ContextApp {
                     // Back to the selection rather than out of the screen, so
                     // leaving takes a second deliberate press.
                     self.preview = None;
+                    self.preview_scroll.set(0);
                     self.focus = ContextFocus::Package;
                     self.status =
                         "Tab: choose recipient   Enter: see what would be sent   Esc: leave".into();
@@ -210,6 +240,31 @@ impl ContextApp {
                     _ => ContextFocus::Package,
                 };
                 self.preview = None;
+                self.preview_scroll.set(0);
+                None
+            }
+            KeyCode::Char('j') if self.focus == ContextFocus::Preview => {
+                self.scroll_preview(1);
+                None
+            }
+            KeyCode::Char('k') if self.focus == ContextFocus::Preview => {
+                self.scroll_preview(-1);
+                None
+            }
+            KeyCode::PageDown if self.focus == ContextFocus::Preview => {
+                self.scroll_preview(i32::from(self.preview_page_rows.get()));
+                None
+            }
+            KeyCode::PageUp if self.focus == ContextFocus::Preview => {
+                self.scroll_preview(-i32::from(self.preview_page_rows.get()));
+                None
+            }
+            KeyCode::Home if self.focus == ContextFocus::Preview => {
+                self.preview_scroll.set(0);
+                None
+            }
+            KeyCode::End if self.focus == ContextFocus::Preview => {
+                self.preview_scroll.set(self.preview_max_scroll.get());
                 None
             }
             KeyCode::Down | KeyCode::Char('j') => {
@@ -253,6 +308,7 @@ impl ContextApp {
 
     /// Moves whichever list has the keyboard.
     fn move_selection(&mut self, delta: isize) {
+        let left_preview = self.focus == ContextFocus::Preview;
         let (index, length) = match self.focus {
             ContextFocus::Recipient => (&mut self.selected_recipient, self.recipients.len()),
             _ => (&mut self.selected_draft, self.drafts.len()),
@@ -269,6 +325,18 @@ impl ContextApp {
 
         // The preview described the previous selection.
         self.preview = None;
+        self.preview_scroll.set(0);
+        if left_preview {
+            self.focus = ContextFocus::Package;
+        }
+    }
+
+    /// Scrolls the canonical preview without changing package or recipient.
+    fn scroll_preview(&self, delta: i32) {
+        let current = i32::from(self.preview_scroll.get());
+        let maximum = i32::from(self.preview_max_scroll.get());
+        self.preview_scroll
+            .set((current + delta).clamp(0, maximum) as u16);
     }
 
     /// Proposes disclosing the previewed package.
@@ -300,7 +368,7 @@ impl ContextApp {
             preview.total_bytes,
             recipient,
             draft.package_id,
-            &draft.digest[..draft.digest.len().min(16)]
+            &preview.digest[..preview.digest.len().min(16)]
         ));
     }
 }
