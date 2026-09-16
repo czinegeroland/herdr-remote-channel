@@ -426,3 +426,33 @@ fn a_partly_published_release_can_be_retried() {
         "an existing version should be skipped rather than fail the run"
     );
 }
+
+#[test]
+fn a_publish_refused_by_the_registry_is_retried_rather_than_reported() {
+    // npm will not accept a new package name while it is still processing
+    // the one before it, and answers with `E409 Failed to save packument`.
+    // Publishing five new names in a row hits that every time: the first two
+    // runs of v0.2.1 each landed exactly one package and were refused the
+    // next, so the release could only ever be completed by dispatching the
+    // workflow once per package.
+    //
+    // That is a property of the registry rather than of these packages, so
+    // the step waits and asks again. It also re-checks the registry after a
+    // failure, because `E409` reports a packument that failed to save and
+    // only the registry knows whether it did; retrying one that actually
+    // landed would fail as `EPUBLISHCONFLICT` and end the run.
+    let workflow = read(".github/workflows/npm-publish.yml");
+
+    assert!(
+        workflow.contains("sleep \"$delay\""),
+        "the publish step should wait before retrying a refused publish"
+    );
+    assert!(
+        workflow.contains("delay=$((delay * 2))"),
+        "successive retries should back off rather than hammer the registry"
+    );
+    assert!(
+        workflow.contains("is published despite the error"),
+        "a publish that landed despite an error should not be retried"
+    );
+}
