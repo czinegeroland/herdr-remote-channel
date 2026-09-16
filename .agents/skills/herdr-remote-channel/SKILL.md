@@ -54,33 +54,49 @@ let them decide.
 
 ## Starting from nothing
 
-Ask for everything you need in one message, then do the work. Do not hand the
-user a list of commands to run: not having to run them is the point.
+**Collect every input in one structured question, then run the whole setup
+yourself.** Use the form or multiple-choice mechanism your host gives you for
+asking the user something — not a paragraph describing what they should go and
+type. Handing back a list of commands is the failure this section exists to
+prevent: if you find yourself writing "you need to run", stop and ask instead.
 
-Ask for:
+Ask once, in a single form, for whichever of these apply:
 
-1. **The repository**, as `owner/name`. It must already exist and should be
-   private. `hrc create` records the locator and creates nothing, so if they
-   do not have one yet, say so and wait — you cannot make it for them.
-2. **Who they are inviting**, as a GitHub username, if they are starting a
-   channel.
-3. **The invite code**, if they are joining one someone else started.
+| Field | Notes |
+|---|---|
+| **Repository**, as `owner/name` | Must already exist and should be private. `hrc create` records the locator and creates nothing, so if they have not made it yet, that is the one thing to wait for. |
+| **Invitee**, a GitHub username | Only when starting a channel. |
+| **Invite code** | Only when joining one someone else started. |
+| **Key store passphrase** | Only when `hrc doctor` reports no key store. See below. |
 
-Never ask for the key store passphrase. It encrypts the device keys, and a
-passphrase you can see is one the user has to change. `hrc init` prompts for
-it, and the `Remote channel setup` pane prompts for it where you cannot read
-it. Direct them there instead.
-
-Then run what is yours:
+Then run all of it, without stopping in between:
 
 ```bash
-hrc doctor                                # before anything, and after a failure
+hrc doctor                                # first, and again after any failure
+hrc init                                  # only when doctor says the key store is missing
 hrc create --repo <owner/name>            # private unless --visibility says otherwise
 hrc invite create --github-user <user>    # the code prints once and is never shown again
 ```
 
-Stop at the boundary. Approving the join is theirs, in the pane, after they
-have compared the safety phrase with the other person out of band.
+### The passphrase
+
+`hrc init` reads it from `HRC_PASSPHRASE` and has no prompt of its own, so
+running init means putting it in that command's environment. Collect it in the
+same form as everything else and treat it as the secret it is:
+
+- Set it only in the environment of the commands that need it.
+- Never echo it, never repeat it back, never write it to a file, and never
+  include it in anything you print or summarize.
+- If the user would rather not give it to you at all, that is the better
+  choice: `Remote channel setup` prompts for it where you cannot read it, and
+  everything after init still works normally.
+
+### Where to stop
+
+Two things are never yours, however smoothly the rest went. Comparing the
+safety phrase happens between two people on some other channel. Approving the
+join happens in `Remote channel join requests`. Do both by naming the pane,
+and do not improvise around either.
 
 ## Panes: where a person decides
 
