@@ -139,8 +139,40 @@ jobs:
               return 0
             fi
 
-            echo "publishing $name@$version"
-            npm publish --access public "./$dir"
+            # npm needs a moment after a brand-new package name is created
+            # before it will accept the next one, and answers a publish that
+            # arrives too early with `E409 Failed to save packument`. Five new
+            # names in a row hits it every time: each run published exactly
+            # one and was refused the next. It is a property of the registry
+            # rather than of these packages, so it is retried rather than
+            # reported.
+            local attempt=1 delay=20
+            while true; do
+              echo "publishing $name@$version (attempt $attempt)"
+              if npm publish --access public "./$dir"; then
+                return 0
+              fi
+
+              # A refused publish may still have landed: `E409` reports a
+              # packument that failed to save, and the registry is the only
+              # authority on whether it did. Asking costs one request and
+              # avoids retrying a publish that already succeeded, which would
+              # fail as `EPUBLISHCONFLICT` and end the run.
+              if npm view "$name@$version" version >/dev/null 2>&1; then
+                echo "$name@$version is published despite the error"
+                return 0
+              fi
+
+              if [ "$attempt" -ge 6 ]; then
+                echo "giving up on $name@$version after $attempt attempts" >&2
+                return 1
+              fi
+
+              echo "retrying $name@$version in ${delay}s"
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+            done
           }
 
           # Platform packages first. The root package depends on them, and an
