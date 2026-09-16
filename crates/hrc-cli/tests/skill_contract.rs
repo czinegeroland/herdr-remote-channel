@@ -296,13 +296,31 @@ fn the_skill_gathers_what_it_needs_instead_of_delegating_the_work() {
     let skill = skill().to_lowercase();
 
     assert!(
-        skill.contains("ask for everything you need"),
-        "the skill should tell the agent to gather its inputs and proceed"
+        skill.contains("collect every input in one structured question"),
+        "the skill should tell the agent to gather its inputs in one form"
     );
     assert!(
-        skill.contains("never ask for the key store passphrase"),
-        "the one input the agent must not gather should be named"
+        skill.contains("run the whole setup"),
+        "the skill should tell the agent to proceed once it has them"
     );
+
+    // The first version of this flow told the agent never to ask for the
+    // passphrase, so every setup dead-ended at `hrc init` and the user was
+    // handed a command after all. It may ask now, which makes how it is
+    // handled the thing worth holding: `hrc init` reads `HRC_PASSPHRASE` and
+    // has no prompt of its own, so running init means putting a secret in an
+    // environment, and a skill that says so casually is worse than one that
+    // refused.
+    for rule in [
+        "never echo it",
+        "never write it to a file",
+        "only in the environment of the commands that need it",
+    ] {
+        assert!(
+            skill.contains(rule),
+            "the skill should say `{rule}` about the passphrase"
+        );
+    }
 }
 
 #[test]
