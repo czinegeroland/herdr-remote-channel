@@ -24,6 +24,19 @@ use serde::Serialize;
 /// The npm package that carries the executable.
 pub const PACKAGE: &str = "herdr-remote-channel";
 
+/// The GitHub repository the agent skill is installed from.
+///
+/// `skills add` takes `owner/repo` and has no flag for a tag or a commit, so
+/// the skill always comes from the default branch while the executable is
+/// pinned to this build. That asymmetry is deliberate but real: a skill
+/// describing commands a pinned older binary does not have would send an
+/// agent at a CLI that rejects it, so the skill's own contract tests hold it
+/// to the CLI in the same repository (decision DEC-079).
+pub const REPOSITORY: &str = "czinegeroland/herdr-remote-channel";
+
+/// The skill installed alongside the executable.
+pub const SKILL: &str = "herdr-remote-channel";
+
 /// The launcher the build step installs, relative to the plugin root that
 /// Herdr uses as the working directory.
 ///
@@ -164,6 +177,42 @@ fn npm_install(prefix: &[&str]) -> Vec<String> {
     command
 }
 
+/// The argv that installs the agent skill.
+///
+/// Installing the plugin without it leaves the panes reachable and the agent
+/// unable to drive the CLI, which is most of the way to the point rather than
+/// at it. `--agent claude-code` rather than `*`: a plugin install should not
+/// write a skill into every agent on the machine it can find. `--global` so
+/// it is there regardless of which directory Herdr opens, and `--yes` because
+/// a build step has no one to answer a prompt.
+///
+/// `prefix` wraps it for the same reason `npm_install` does: `npx` is
+/// `npx.cmd` on Windows, which `CreateProcess` will not find.
+fn skill_install(prefix: &[&str]) -> Vec<String> {
+    let mut command: Vec<String> = prefix
+        .iter()
+        .map(|argument| (*argument).to_owned())
+        .collect();
+    command.extend(
+        ["npx", "--yes", "skills", "add", REPOSITORY]
+            .into_iter()
+            .map(str::to_owned),
+    );
+    command.extend(
+        [
+            "--skill",
+            SKILL,
+            "--agent",
+            "claude-code",
+            "--global",
+            "--yes",
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
+    command
+}
+
 /// The argv for one `hrc herdr ...` entry point.
 fn invoke(arguments: &[&str]) -> Vec<String> {
     let mut command = vec!["node".to_owned(), LAUNCHER.to_owned(), "herdr".to_owned()];
@@ -218,6 +267,14 @@ pub fn manifest() -> Manifest {
             },
             Build {
                 command: npm_install(&[]),
+                platforms: Some(vec!["linux".to_owned(), "macos".to_owned()]),
+            },
+            Build {
+                command: skill_install(&["cmd", "/c"]),
+                platforms: Some(vec!["windows".to_owned()]),
+            },
+            Build {
+                command: skill_install(&[]),
                 platforms: Some(vec!["linux".to_owned(), "macos".to_owned()]),
             },
         ],

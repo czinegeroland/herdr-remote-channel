@@ -153,6 +153,24 @@ fn build_steps() -> Vec<(Option<Vec<String>>, Vec<String>)> {
         .collect()
 }
 
+/// Whether a build step is the one that installs the executable.
+///
+/// The install used to be a single kind of step, and several tests below
+/// assumed it: every step pinned the package version, and exactly one applied
+/// to each platform. Installing the agent skill alongside the executable
+/// (decision DEC-079) makes that false, and an assertion that quietly covers
+/// the wrong step is worse than one that covers none — so each test now says
+/// which kind it is about.
+fn installs_the_executable(command: &[String]) -> bool {
+    command.iter().any(|argument| argument == "npm")
+        && command.iter().any(|argument| argument == "install")
+}
+
+/// Whether a build step is the one that installs the agent skill.
+fn installs_the_skill(command: &[String]) -> bool {
+    command.iter().any(|argument| argument == "skills")
+}
+
 #[test]
 fn installing_the_plugin_compiles_nothing() {
     // The property that matters, and the reason it is asserted rather than
@@ -179,10 +197,17 @@ fn installing_the_plugin_compiles_nothing() {
         }
 
         assert!(
-            command.iter().any(|argument| argument == "npm"),
-            "a build step should install the published executable: {command:?}"
+            installs_the_executable(command) || installs_the_skill(command),
+            "a build step should install the executable or the skill: {command:?}"
         );
     }
+
+    assert!(
+        steps
+            .iter()
+            .any(|(_, command)| installs_the_executable(command)),
+        "something has to install the published executable"
+    );
 }
 
 #[test]
@@ -200,6 +225,12 @@ fn the_build_installs_exactly_the_version_the_manifest_declares() {
     let pinned = format!("herdr-remote-channel@{version}");
 
     for (_, command) in build_steps() {
+        if !installs_the_executable(&command) {
+            // The skill is installed from a repository rather than a
+            // registry, and `skills add` has no flag for a tag or a commit,
+            // so there is no version here to pin (decision DEC-079).
+            continue;
+        }
         assert!(
             command.contains(&pinned),
             "a build step should pin `{pinned}`: {command:?}"
@@ -235,9 +266,32 @@ fn every_platform_the_plugin_claims_can_install_it() {
             .count();
 
         assert_eq!(
-            applicable, 1,
-            "`{platform}` should have exactly one step that installs the executable"
+            applicable, 2,
+            "`{platform}` should install both the executable and the skill"
         );
+
+        for (kind, matches) in [
+            (
+                "executable",
+                installs_the_executable as fn(&[String]) -> bool,
+            ),
+            ("skill", installs_the_skill),
+        ] {
+            let count = steps
+                .iter()
+                .filter(|(platforms, command)| {
+                    matches(command)
+                        && match platforms {
+                            Some(platforms) => platforms.iter().any(|entry| entry == platform),
+                            None => true,
+                        }
+                })
+                .count();
+            assert_eq!(
+                count, 1,
+                "`{platform}` should install the {kind} exactly once"
+            );
+        }
     }
 }
 
@@ -262,11 +316,20 @@ fn the_platform_variants_differ_only_by_the_windows_process_wrapper() {
         })
         .collect();
 
-    for command in &stripped {
-        assert_eq!(
-            command, &stripped[0],
-            "the platform variants should be one command, not two: {stripped:?}"
-        );
+    for matches in [
+        installs_the_executable as fn(&[String]) -> bool,
+        installs_the_skill,
+    ] {
+        let variants: Vec<&Vec<String>> =
+            stripped.iter().filter(|command| matches(command)).collect();
+
+        assert!(!variants.is_empty(), "each kind of step should exist");
+        for command in &variants {
+            assert_eq!(
+                *command, variants[0],
+                "the platform variants should be one command, not two: {variants:?}"
+            );
+        }
     }
 }
 
