@@ -234,9 +234,18 @@ pub fn render_compose(frame: &mut Frame<'_>, app: &crate::compose::ComposeApp) {
             // state survives a terminal without colour.
             let state = if recipient.active { "" } else { "  [inactive]" };
 
+            // A reply target says what it answers, so the list distinguishes
+            // "write to Bob" from "answer Bob's question" without relying on
+            // the person remembering which entry is which.
+            let answering = match &recipient.answering {
+                Some(answering) => format!("  (reply to {answering})"),
+                None => String::new(),
+            };
+
             ListItem::new(Line::from(vec![
                 Span::raw(marker),
                 Span::raw(recipient.principal_id.clone()),
+                Span::raw(answering),
                 Span::raw(state),
             ]))
         })
@@ -557,4 +566,113 @@ fn wrapped_lines(text: &str, width: u16) -> Vec<Line<'static>> {
     }
 
     rendered
+}
+
+/// Draws the membership screen.
+///
+/// Inactive members and revoked devices are spelled out rather than greyed,
+/// for the same reason the selection is marked in text: a terminal without
+/// colour, or a reader who cannot distinguish it, still has to be able to see
+/// which of these is already gone.
+pub fn render_members(frame: &mut Frame<'_>, app: &crate::members::MembersApp) {
+    use crate::members::MemberFocus;
+
+    let areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(4),
+            Constraint::Length(7),
+            Constraint::Length(4),
+        ])
+        .split(frame.area());
+
+    let members: Vec<ListItem<'_>> = app
+        .members()
+        .iter()
+        .enumerate()
+        .map(|(index, member)| {
+            let marker = if index == app.selected_member_index() {
+                "> "
+            } else {
+                "  "
+            };
+
+            let mut labels = Vec::new();
+            if member.administrator {
+                labels.push("admin");
+            }
+            if !member.active {
+                labels.push("removed");
+            }
+            if member.is_local {
+                labels.push("this installation");
+            }
+
+            let suffix = if labels.is_empty() {
+                String::new()
+            } else {
+                format!("  [{}]", labels.join(", "))
+            };
+
+            ListItem::new(Line::from(format!(
+                "{marker}{}{suffix}",
+                member.principal_id
+            )))
+        })
+        .collect();
+
+    frame.render_widget(
+        List::new(members).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(match app.focus() {
+                    MemberFocus::Member => "Members (choosing)",
+                    MemberFocus::Device => "Members",
+                }),
+        ),
+        areas[0],
+    );
+
+    let devices: Vec<ListItem<'_>> = app
+        .selected_member()
+        .map(|member| {
+            member
+                .devices
+                .iter()
+                .enumerate()
+                .map(|(index, device)| {
+                    let marker = if app.focus() == MemberFocus::Device
+                        && index == app.selected_device_index()
+                    {
+                        "> "
+                    } else {
+                        "  "
+                    };
+
+                    let state = if device.active { "" } else { "  [revoked]" };
+                    ListItem::new(Line::from(format!("{marker}{}{state}", device.device_id)))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    frame.render_widget(
+        List::new(devices).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(match app.focus() {
+                    MemberFocus::Device => "Devices (choosing)",
+                    MemberFocus::Member => "Devices",
+                }),
+        ),
+        areas[1],
+    );
+
+    let status = app.proposed().unwrap_or_else(|| app.status()).to_owned();
+    frame.render_widget(
+        Paragraph::new(status)
+            .block(Block::default().borders(Borders::ALL))
+            .wrap(Wrap { trim: false }),
+        areas[2],
+    );
 }

@@ -21,6 +21,8 @@ pub enum Pane {
     /// The composition screen, for writing a note or a question without
     /// leaving Herdr.
     Compose,
+    /// The membership screen, where a member is removed or a device revoked.
+    Members,
     /// The membership approval screen, where a join request is checked
     /// against its safety phrase and admitted or refused.
     Joins,
@@ -38,12 +40,13 @@ pub enum Pane {
 
 impl Pane {
     /// Every pane, in the order the manifest declares them.
-    pub const ALL: [Pane; 6] = [
+    pub const ALL: [Pane; 7] = [
         Pane::Inbox,
         Pane::Setup,
         Pane::Compose,
         Pane::Context,
         Pane::Joins,
+        Pane::Members,
         Pane::Review,
     ];
 
@@ -55,6 +58,7 @@ impl Pane {
             Pane::Compose => "compose",
             Pane::Context => "context",
             Pane::Joins => "joins",
+            Pane::Members => "members",
             Pane::Review => "review",
         }
     }

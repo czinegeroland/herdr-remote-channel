@@ -55,6 +55,12 @@ contexts = ["workspace", "pane"]
 command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "action", "joins"]
 
 [[actions]]
+id = "members"
+title = "Remote channel members"
+contexts = ["workspace", "pane"]
+command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "action", "members"]
+
+[[actions]]
 id = "review"
 title = "Remote channel review"
 contexts = ["workspace", "pane"]
@@ -101,6 +107,14 @@ placement = "popup"
 width = "80%"
 height = "80%"
 command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "pane", "joins"]
+
+[[panes]]
+id = "members"
+title = "Remote channel members"
+placement = "popup"
+width = "80%"
+height = "80%"
+command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "pane", "members"]
 
 [[panes]]
 id = "review"

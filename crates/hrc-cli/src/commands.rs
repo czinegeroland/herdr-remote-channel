@@ -4259,6 +4259,10 @@ pub fn herdr_pane(context: &Context, pane: &str) -> Result<Value> {
         // Membership approval, the other decision a human owns.
         hrc_herdr::Pane::Joins => review::review_joins(context),
 
+        // Removing a member and revoking a device, the other half of
+        // membership that section 22.7 puts behind the boundary.
+        hrc_herdr::Pane::Members => review::members(context),
+
         // Writing a message, so that saying something needs no other tool.
         hrc_herdr::Pane::Compose => review::compose(context),
 
