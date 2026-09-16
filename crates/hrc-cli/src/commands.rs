@@ -131,7 +131,49 @@ pub fn init(context: &Context) -> Result<Value> {
 /// Publication comes before the local record. A channel registered locally
 /// but never published would be one this installation believes in and nobody
 /// else can see.
+/// Expands the `owner/name` shorthand the CLI asks for into a URL git can use.
+///
+/// Section 22.4 and `--help` both spell the argument `owner/name`, and that
+/// form did not work: nothing expanded it, so the locator reached git as
+/// written and git resolved it as a relative path on the local filesystem.
+/// The first real channel created from the documented form failed with a
+/// path error, and only a full URL succeeded.
+///
+/// Anything already carrying a scheme, an SCP-style `host:path`, or a
+/// filesystem path is left exactly as given: a local bare repository is a
+/// legitimate transport and must not be rewritten into a GitHub URL. Only the
+/// unambiguous two-segment shorthand is expanded — the same shape npm reads as
+/// `owner/repo`, which this repository has already been bitten by once
+/// (decision DEC-060).
+fn canonical_repository(repo: &str) -> String {
+    let trimmed = repo.trim();
+
+    let looks_like_a_path = trimmed.starts_with('/')
+        || trimmed.starts_with('.')
+        || trimmed.starts_with('~')
+        || trimmed.starts_with('\\')
+        || trimmed.as_bytes().get(1).is_some_and(|byte| *byte == b':');
+
+    if trimmed.contains("://") || trimmed.contains('@') || looks_like_a_path {
+        return trimmed.to_owned();
+    }
+
+    let mut segments = trimmed.split('/');
+    let (Some(owner), Some(name), None) = (segments.next(), segments.next(), segments.next())
+    else {
+        return trimmed.to_owned();
+    };
+
+    if owner.is_empty() || name.is_empty() {
+        return trimmed.to_owned();
+    }
+
+    let name = name.strip_suffix(".git").unwrap_or(name);
+    format!("https://github.com/{owner}/{name}.git")
+}
+
 pub fn create(context: &Context, repo: &str, local_name: Option<&str>) -> Result<Value> {
+    let repo = &canonical_repository(repo);
     let paths = &context.paths;
     paths.ensure()?;
 
@@ -4543,5 +4585,71 @@ mod time_tests {
         assert!(!name.contains('\\'));
         assert!(!name.contains(".."));
         assert!(name.starts_with("invite-"));
+    }
+}
+
+#[cfg(test)]
+mod repository_tests {
+    use super::canonical_repository;
+
+    #[test]
+    fn the_documented_shorthand_becomes_a_url_git_can_use() {
+        // `--help` and PRD section 22.4 both ask for `owner/name`, and nothing
+        // expanded it, so git resolved it as a relative path and the first
+        // channel created from the documented form failed. Only a full URL
+        // worked, which made the documentation wrong about its own CLI.
+        assert_eq!(
+            canonical_repository("czinegeroland/hrc-test"),
+            "https://github.com/czinegeroland/hrc-test.git"
+        );
+        assert_eq!(
+            canonical_repository("  owner/name  "),
+            "https://github.com/owner/name.git"
+        );
+        assert_eq!(
+            canonical_repository("owner/name.git"),
+            "https://github.com/owner/name.git"
+        );
+    }
+
+    #[test]
+    fn anything_already_addressable_is_left_alone() {
+        // A locator that already says where it points must survive untouched.
+        // Rewriting one would silently move a channel to a different remote,
+        // which is worse than refusing it.
+        for locator in [
+            "https://github.com/owner/name.git",
+            "https://gitlab.com/owner/name.git",
+            "ssh://git@github.com/owner/name.git",
+            "git@github.com:owner/name.git",
+        ] {
+            assert_eq!(canonical_repository(locator), locator);
+        }
+    }
+
+    #[test]
+    fn a_local_repository_is_not_rewritten_into_a_github_url() {
+        // A bare repository on disk is a legitimate transport, and the tests
+        // in this crate use one. Expanding a path into a GitHub URL would
+        // point a working channel at a repository nobody owns.
+        for locator in [
+            "/tmp/channel.git",
+            "./channel.git",
+            "../channel.git",
+            "~/channels/one.git",
+            "C:\\channels\\one.git",
+            "\\\\server\\share\\one.git",
+        ] {
+            assert_eq!(canonical_repository(locator), locator);
+        }
+    }
+
+    #[test]
+    fn something_that_is_not_the_shorthand_is_passed_through() {
+        // Guessing which two of three segments were meant is how a channel
+        // ends up addressed to the wrong repository.
+        for locator in ["owner", "owner/name/extra", "owner/", "/name"] {
+            assert_eq!(canonical_repository(locator), locator);
+        }
     }
 }
