@@ -1946,8 +1946,8 @@ fn recipient_ordering_bootstraps_from_an_accepted_legacy_link() {
 fn recipient_ordering_adopts_an_authenticated_legacy_held_predecessor() {
     let mut database = database();
     let local = recipient("local");
-    let first = arrival(1);
-    let second = arrival(2);
+    let first = arrival(2);
+    let second = arrival(3);
     let missing = canonical::sha256_hex(b"message for another recipient");
     let held = InboundMessage {
         previous_chain_id: Some(&missing),
@@ -1982,6 +1982,64 @@ fn recipient_ordering_adopts_an_authenticated_legacy_held_predecessor() {
             .collect::<Vec<_>>(),
         vec![first.message_id, second.message_id]
     );
+}
+
+#[test]
+fn recipient_ordering_adopts_a_contiguous_legacy_held_chain_oldest_first() {
+    let mut database = database();
+    let local = recipient("local");
+    let first = arrival(2);
+    let second = arrival(3);
+    let successor = arrival(4);
+    let missing = canonical::sha256_hex(b"message for another recipient");
+    let first_held = InboundMessage {
+        previous_chain_id: Some(&missing),
+        ..first.message()
+    };
+
+    database.record_inbound(&first_held, NOW).unwrap();
+    database.record_inbound(&second.message(), NOW).unwrap();
+    let outcome = database
+        .record_inbound(
+            &recipient_message(&successor, &local, Some(&second.chain_id)),
+            NOW,
+        )
+        .unwrap();
+
+    assert!(matches!(outcome, InboundOutcome::Accepted { .. }));
+    assert!(database.held_inbound(CHANNEL).unwrap().is_empty());
+    assert_eq!(
+        database
+            .inbox_entries(CHANNEL)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.message_id)
+            .collect::<Vec<_>>(),
+        vec![first.message_id, second.message_id, successor.message_id]
+    );
+}
+
+#[test]
+fn recipient_ordering_rejects_backwards_legacy_adoption() {
+    let mut database = database();
+    let local = recipient("local");
+    let held = arrival(5);
+    let successor = arrival(4);
+    let missing = canonical::sha256_hex(b"message for another recipient");
+    let held = InboundMessage {
+        previous_chain_id: Some(&missing),
+        ..held.message()
+    };
+
+    database.record_inbound(&held, NOW).unwrap();
+    let error = database
+        .record_inbound(
+            &recipient_message(&successor, &local, Some(held.chain_id)),
+            NOW,
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, StorageError::InboundForked { .. }));
 }
 
 // --- Receipts (PRD sections 18.2 and 18.3) ---
