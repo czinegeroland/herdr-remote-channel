@@ -157,14 +157,32 @@ fn the_skill_tells_an_agent_not_to_route_around_refusals() {
 
 #[test]
 fn the_skill_documents_only_commands_the_cli_actually_has() {
-    // A skill that invents a command teaches an agent to fail. Every `hrc`
-    // invocation the file shows must parse.
+    // A skill that invents a command teaches an agent to fail, and it fails
+    // in the worst way: the agent quotes the skill confidently and the CLI
+    // rejects it.
+    //
+    // This checked the first word after `hrc` and nothing else, so it passed
+    // while the skill documented `hrc create <name> --remote <git-url>` and
+    // `hrc invite --principal <name>` — neither of which parses. `create`
+    // takes `--repo <owner/name>` and has no positional name, and `invite`
+    // requires a subcommand. A real agent read both and stopped, which is the
+    // outcome this file exists to prevent.
+    //
+    // So every documented invocation is now resolved against the help of the
+    // subcommand it names: each flag must exist there, and a command group
+    // must be given one of its subcommands. Help is used rather than running
+    // the commands, because a test that executes what a skill documents would
+    // create identities and publish to transports.
     let text = skill();
-    let help = std::process::Command::new(env!("CARGO_BIN_EXE_hrc"))
-        .arg("--help")
-        .output()
-        .expect("the binary should run");
-    let help = String::from_utf8(help.stdout).expect("help should be UTF-8");
+
+    let help_for = |chain: &[String]| -> String {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_hrc"))
+            .args(chain)
+            .arg("--help")
+            .output()
+            .expect("the binary should run");
+        String::from_utf8(output.stdout).expect("help should be UTF-8")
+    };
 
     let mut checked = 0;
     for line in text.lines() {
@@ -173,21 +191,118 @@ fn the_skill_documents_only_commands_the_cli_actually_has() {
             continue;
         };
 
-        let Some(command) = rest.split_whitespace().next() else {
-            continue;
-        };
-        if command.starts_with('-') {
+        // A trailing `# ...` is prose about the command, not part of it.
+        let invocation = rest.split('#').next().unwrap_or(rest).trim();
+        let tokens: Vec<&str> = invocation.split_whitespace().collect();
+        if tokens.is_empty() || tokens[0].starts_with('-') {
             continue;
         }
 
+        // Walk as far down the subcommand tree as the line actually goes. A
+        // bare word is a subcommand only while the current help lists it;
+        // anything else is a placeholder or an argument value.
+        let mut chain: Vec<String> = Vec::new();
+        let mut help = help_for(&chain);
+        for token in &tokens {
+            if token.starts_with('-') || token.starts_with('<') {
+                break;
+            }
+            let candidate = format!("  {token}");
+            if !help.contains(&candidate) {
+                break;
+            }
+            chain.push((*token).to_string());
+            help = help_for(&chain);
+        }
+
         assert!(
-            help.contains(command),
-            "the skill uses `hrc {command}`, which the CLI does not define"
+            !chain.is_empty(),
+            "the skill uses `hrc {invocation}`, whose command the CLI does not define"
         );
+
+        // A group such as `hrc invite` cannot be run on its own. Clap spells
+        // that in the usage line, so a skill that stops at the group is
+        // teaching an agent a usage error.
+        if help.contains("<COMMAND>") {
+            assert!(
+                tokens.len() > chain.len(),
+                "the skill uses `hrc {invocation}`, but `hrc {}` needs a subcommand",
+                chain.join(" ")
+            );
+        }
+
+        for token in &tokens[chain.len()..] {
+            let Some(flag) = token.strip_prefix("--") else {
+                continue;
+            };
+            let flag = flag.split('=').next().unwrap_or(flag);
+            if flag.is_empty() {
+                continue;
+            }
+            assert!(
+                help.contains(&format!("--{flag}")),
+                "the skill uses `--{flag}` with `hrc {}`, which does not accept it",
+                chain.join(" ")
+            );
+        }
+
         checked += 1;
     }
 
     assert!(checked >= 8, "expected the skill to show real commands");
+}
+
+#[test]
+fn the_skill_names_every_pane_the_plugin_installs() {
+    // Seven panes shipped before the skill mentioned any of them, so an agent
+    // reading this file could not know they existed and fell back to telling
+    // the user to open a terminal — the exact thing the panes were built to
+    // remove. That is the same failure as a pane with no action to open it,
+    // one layer up: built, installed, and unreachable because nothing said so.
+    //
+    // The manifest is the authority on what is installed, so a pane added
+    // there and not described here fails this.
+    let skill = skill();
+    let manifest = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../herdr-plugin.toml"),
+    )
+    .expect("the generated plugin manifest should be readable");
+
+    let mut titles: Vec<&str> = manifest
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("title = \""))
+        .filter_map(|rest| rest.strip_suffix('"'))
+        .collect();
+    titles.sort_unstable();
+    titles.dedup();
+
+    assert!(!titles.is_empty(), "the manifest should declare titles");
+
+    for title in titles {
+        assert!(
+            skill.contains(title),
+            "the plugin installs `{title}`, which the skill never names, so an \
+             agent cannot send anyone to it"
+        );
+    }
+}
+
+#[test]
+fn the_skill_gathers_what_it_needs_instead_of_delegating_the_work() {
+    // The user's standing requirement is that installing the plugin is
+    // enough. An agent that answers "here are the commands, run them
+    // yourself" has handed the work back, and the first real session did
+    // exactly that.
+    let skill = skill().to_lowercase();
+
+    assert!(
+        skill.contains("ask for everything you need"),
+        "the skill should tell the agent to gather its inputs and proceed"
+    );
+    assert!(
+        skill.contains("never ask for the key store passphrase"),
+        "the one input the agent must not gather should be named"
+    );
 }
 
 #[test]

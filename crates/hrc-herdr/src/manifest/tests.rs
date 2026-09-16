@@ -59,8 +59,9 @@ fn installing_the_plugin_needs_no_compiler() {
             );
         }
         assert!(
-            step.command.iter().any(|argument| argument == "npm"),
-            "build step `{command}` should install the published executable"
+            step.command.iter().any(|argument| argument == "npm")
+                || step.command.iter().any(|argument| argument == "npx"),
+            "build step `{command}` should install the executable or the skill"
         );
     }
 }
@@ -73,10 +74,59 @@ fn the_installed_version_is_pinned_to_this_build() {
     let expected = format!("{PACKAGE}@{}", env!("CARGO_PKG_VERSION"));
 
     for step in &manifest().build {
+        // The skill comes from a repository rather than a registry, and
+        // `skills add` takes no tag or commit, so only the executable step
+        // has a version to pin (decision DEC-079).
+        if step.command.iter().any(|argument| argument == "skills") {
+            continue;
+        }
         assert!(
             step.command.contains(&expected),
             "build step `{}` should pin `{expected}`",
             step.command.join(" ")
+        );
+    }
+}
+
+#[test]
+fn installing_the_plugin_installs_the_agent_skill() {
+    // Installing the plugin used to leave the panes reachable and the agent
+    // unable to drive the CLI: the skill was a separate `npx skills add` the
+    // user had to know about, so "install the plugin and it works" was true
+    // of the panes and false of everything an agent does. A platform that
+    // installs the executable and not the skill is half a plugin.
+    let manifest = manifest();
+
+    for platform in &manifest.platforms {
+        let installs = manifest
+            .build
+            .iter()
+            .filter(|step| step.command.iter().any(|argument| argument == "skills"))
+            .filter(|step| match &step.platforms {
+                Some(platforms) => platforms.contains(platform),
+                None => true,
+            })
+            .count();
+
+        assert_eq!(
+            installs, 1,
+            "`{platform}` should install the agent skill exactly once"
+        );
+    }
+
+    let step = manifest
+        .build
+        .iter()
+        .find(|step| step.command.iter().any(|argument| argument == "skills"))
+        .expect("a skill install step");
+
+    // A build step has nobody to answer a prompt, and a plugin install has no
+    // business writing a skill into every agent on the machine.
+    for argument in ["--yes", "--global", "--agent", "claude-code"] {
+        assert!(
+            step.command.iter().any(|entry| entry == argument),
+            "the skill install should pass `{argument}`: {:?}",
+            step.command
         );
     }
 }

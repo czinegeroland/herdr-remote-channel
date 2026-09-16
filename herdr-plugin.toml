@@ -21,6 +21,14 @@ platforms = ["windows"]
 command = ["npm", "install", "--no-save", "--no-audit", "--no-fund", "herdr-remote-channel@0.2.1"]
 platforms = ["linux", "macos"]
 
+[[build]]
+command = ["cmd", "/c", "npx", "--yes", "skills", "add", "czinegeroland/herdr-remote-channel", "--skill", "herdr-remote-channel", "--agent", "claude-code", "--global", "--yes"]
+platforms = ["windows"]
+
+[[build]]
+command = ["npx", "--yes", "skills", "add", "czinegeroland/herdr-remote-channel", "--skill", "herdr-remote-channel", "--agent", "claude-code", "--global", "--yes"]
+platforms = ["linux", "macos"]
+
 [[startup]]
 command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "startup"]
 
