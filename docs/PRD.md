@@ -11,7 +11,7 @@
 | PRD version | 0.3.0 |
 | Delivery phase | M0 - Product and protocol definition |
 | Target branch | `docs/product-requirements` |
-| Last updated | 2026-09-17T01:55:00+02:00 |
+| Last updated | 2026-09-17T02:00:00+02:00 |
 | Product owner | TBD |
 | Technical owner | TBD |
 
