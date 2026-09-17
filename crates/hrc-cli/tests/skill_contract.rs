@@ -253,6 +253,40 @@ fn the_skill_documents_only_commands_the_cli_actually_has() {
 }
 
 #[test]
+fn setup_does_not_demand_more_than_the_user_asked_for() {
+    // The form asked for a repository and an invitee as though both were
+    // required, so setting up an installation meant naming someone to invite
+    // and having a repository ready. Neither is true: issuing an invite is a
+    // separate act that can happen days later, and a person who only wants
+    // this machine working needs neither.
+    //
+    // A channel does need a repository, and when there is none the answer is
+    // a local bare repository rather than a refusal — with its limit stated,
+    // because one only reaches installations that can see that filesystem.
+    // Prose wraps, so a phrase can span a newline. Collapsing whitespace
+    // asserts on what the sentence says rather than on where it was broken.
+    let skill = skill().to_lowercase();
+    let skill = skill.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    assert!(
+        skill.contains("nothing here is mandatory"),
+        "the skill should say the form's fields are optional"
+    );
+    assert!(
+        skill.contains("do not refuse to proceed without one"),
+        "the skill should not stop on a field the user left blank"
+    );
+    assert!(
+        skill.contains("git init --bare"),
+        "the skill should offer a local repository when there is no hosted one"
+    );
+    assert!(
+        skill.contains("only reaches installations that can see that filesystem"),
+        "a local repository's limit should be stated rather than discovered"
+    );
+}
+
+#[test]
 fn the_skill_names_every_pane_the_plugin_installs() {
     // Seven panes shipped before the skill mentioned any of them, so an agent
     // reading this file could not know they existed and fell back to telling
