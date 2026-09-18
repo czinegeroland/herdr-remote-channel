@@ -87,7 +87,9 @@ as "$alice" init --json >/dev/null || die "alice could not initialize"
 as "$bob"   init --json >/dev/null || die "bob could not initialize"
 alice_id="$(as "$alice" whoami --json | json '["signingKey"]')"
 bob_id="$(as "$bob" whoami --json | json '["signingKey"]')"
-[ -n "$alice_id" ] && [ -n "$bob_id" ] || die "an installation has no principal"
+if [ -z "$alice_id" ] || [ -z "$bob_id" ]; then
+    die "an installation has no principal"
+fi
 [ "$alice_id" != "$bob_id" ] || die "both installations share a principal"
 ok "alice $alice_id"
 ok "bob   $bob_id"
@@ -103,6 +105,11 @@ alice_principal="$(as "$alice" members --json | json '["members"][0]["principalI
 ok "channel $channel_id"
 ok "alice is $alice_principal in the roster"
 
+# The three checks below are written as `if ...; then die; fi` rather than
+# `... && die`. Both work, but the second leans on which command in a `&&`
+# list `set -e` exempts, and these are the assertions that a secret did not
+# leak. An assertion that quietly stops asserting is worse than no assertion,
+# so they say what they mean.
 step "alice invites bob, and the code is shown once"
 invite_output="$(as "$alice" invite create --github-user bob-e2e 2>&1)" \
     || die "invite create failed: $invite_output"
@@ -111,8 +118,9 @@ invite_code="$(printf '%s' "$invite_output" | grep -oE '[A-Za-z0-9_.:-]{24,}' | 
 ok "an invite was issued"
 
 # The secret must not be recoverable from anything an agent can read.
-as "$alice" invite list --json | grep -q "$invite_code" \
-    && die "invite list disclosed the secret"
+if as "$alice" invite list --json | grep -q "$invite_code"; then
+    die "invite list disclosed the secret"
+fi
 ok "invite list does not carry the code"
 
 step "bob joins with the code"
@@ -185,8 +193,9 @@ as "$bob" sync --once --json >/dev/null || die "bob could not synchronize"
 inbox="$(as "$bob" inbox --json)"
 message_id="$(printf '%s' "$inbox" | json '["entries"][0]["messageId"]')"
 [ -n "$message_id" ] || die "nothing arrived: $inbox"
-printf '%s' "$inbox" | grep -q "$note" \
-    && die "the inbox disclosed a body nobody approved"
+if printf '%s' "$inbox" | grep -q "$note"; then
+    die "the inbox disclosed a body nobody approved"
+fi
 ok "message $message_id is present and its body is not"
 
 step "an agent cannot read the body before a human releases it"
@@ -276,8 +285,9 @@ as "$bob" sync --once --json >/dev/null 2>&1 || true
 after_count="$(as "$bob" inbox --json | json '["entries"].__len__()')"
 [ "$after_count" = "$before_count" ] \
     || die "a revoked device received $((after_count - before_count)) new message(s)"
-as "$bob" inbox --json | grep -q "after the revocation" \
-    && die "a revoked device read content published after its revocation"
+if as "$bob" inbox --json | grep -q "after the revocation"; then
+    die "a revoked device read content published after its revocation"
+fi
 ok "the revoked device gained nothing"
 
 step "the boundary holds for an agent"
