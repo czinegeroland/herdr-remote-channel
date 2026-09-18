@@ -548,3 +548,40 @@ fn the_npm_shim_does_not_orphan_the_executable_it_launches() {
         "the shim should exit by the executable's own outcome"
     );
 }
+
+#[test]
+fn extending_the_end_to_end_suite_is_a_written_rule_and_runs_on_every_change() {
+    // A convention nobody wrote down is a convention that lasts until the
+    // next contributor. The end-to-end suite is the only test that runs what
+    // a person installs, so a feature it does not drive is one nobody has
+    // confirmed outside a build tree -- and that is where `--repo
+    // owner/name` and the orphaning npm shim both hid.
+    let prd = read("docs/PRD.md");
+    let template = read(".github/pull_request_template.md");
+    let workflow = read(".github/workflows/end-to-end.yml");
+
+    assert!(
+        prd.contains("The end-to-end suite grows with the product"),
+        "the working agreement should say the suite grows with the product"
+    );
+    assert!(
+        template.contains("End-to-end coverage"),
+        "the pull request template should ask what the suite now drives"
+    );
+
+    // A rule that only fires when someone remembers it is a suggestion. The
+    // suite runs on every pull request, not only when the suite changes,
+    // which is what makes the rule checkable rather than hoped for.
+    let triggers = workflow
+        .split("jobs:")
+        .next()
+        .expect("a workflow has triggers before its jobs");
+    assert!(
+        triggers.contains("pull_request:"),
+        "the suite should run on every pull request"
+    );
+    assert!(
+        !triggers.contains("paths:"),
+        "a path filter would skip the suite for the changes it most needs to see"
+    );
+}

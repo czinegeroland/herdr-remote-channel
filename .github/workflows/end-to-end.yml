@@ -16,17 +16,15 @@ on:
   workflow_run:
     workflows: [Publish to npm]
     types: [completed]
-  # Also when the suite itself changes. A test that has never run is a
-  # guess, and this one cannot be run any other way before it reaches the
-  # default branch: `workflow_dispatch` does not reach a workflow that is
-  # not there yet. Scoped to these paths so an unrelated change does not
-  # pay for a full install; on a pull request it verifies the current
-  # release rather than an unpublished one, which is the right subject
-  # either way.
+  # And on every pull request, because a change that breaks the product end
+  # to end should fail before it merges rather than after it publishes.
+  #
+  # On a pull request the conversation runs against a binary built from the
+  # branch, so it tests the change. The install half -- Herdr, the plugin,
+  # the skill -- still comes from the published release, because that half is
+  # about what a person receives and a branch has not published anything. On
+  # a release run both halves are the published artifact.
   pull_request:
-    paths:
-      - .github/workflows/end-to-end.yml
-      - scripts/e2e/**
   workflow_dispatch:
     inputs:
       version:
@@ -101,8 +99,35 @@ jobs:
           grep -q "hrc create --repo" "$skill" \
             || { echo "::error::the installed skill documents the wrong create"; exit 1; }
 
+      - name: Install the pinned toolchain
+        if: github.event_name == 'pull_request'
+        # Same as the other workflows: `rust-toolchain.toml` names the exact
+        # version (decision DEC-050), so this builds with the compiler the
+        # releases are built with rather than whatever `stable` is today.
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+
+      - name: Cache cargo build output
+        if: github.event_name == 'pull_request'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Build this branch's executable
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          # Only the one binary: the conversation drives `hrc` and nothing
+          # here needs the test harnesses built.
+          cargo build --locked --bin hrc
+          # Ahead of the published one, so the conversation exercises this
+          # branch while the install assertions above kept their subject.
+          echo "$PWD/target/debug" >> "$GITHUB_PATH"
+
       - name: A whole conversation, two installations, one repository
-        run: bash scripts/e2e/conversation.sh
+        run: |
+          set -euo pipefail
+          echo "driving: $(command -v hrc) ($(hrc --version))"
+          bash scripts/e2e/conversation.sh
 
       - name: Report what was verified
         if: always()
