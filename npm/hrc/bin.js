@@ -14,7 +14,7 @@
 // and `scripts/build-npm-packages.mjs` has already checked each executable
 // against its published SHA-256 before it was ever packed.
 
-import { spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
@@ -59,13 +59,40 @@ try {
 // `stdio: inherit` so the CLI owns the terminal: `hrc review` drives a
 // trusted full-screen interface, and a wrapper that buffered its output
 // would break it.
-const result = spawnSync(resolved, process.argv.slice(2), { stdio: 'inherit' })
+//
+// Asynchronous rather than `spawnSync`, because this process has to stay
+// responsive to signals. `spawnSync` blocks the event loop for the whole run,
+// so a handler registered here could never fire, and killing this shim left
+// the real executable running as an orphan: `kill <pid of hrc>` reaped node
+// and the daemon underneath it carried on holding its socket. That is the
+// same shape as the Windows orphan that withdrew daemon autostart in
+// decision DEC-068, and it is why the end-to-end run reported
+// `Terminate orphan process: (hrc)` on a green job.
+const child = spawn(resolved, process.argv.slice(2), { stdio: 'inherit' })
 
-if (result.error) {
-  console.error(`hrc: could not run ${resolved}: ${result.error.message}`)
+child.on('error', (error) => {
+  console.error(`hrc: could not run ${resolved}: ${error.message}`)
   process.exit(1)
+})
+
+// Forward what a supervisor actually sends. The child gets the signal and
+// decides what it means -- the daemon, for one, shuts down cleanly on
+// SIGTERM -- and this process then exits by the child's own outcome below,
+// so the exit code still describes the executable rather than the wrapper.
+//
+// SIGINT from a terminal already reaches the child through the foreground
+// process group, so forwarding it is belt and braces; a `kill` aimed at this
+// pid is the case that was broken.
+for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+  process.on(signal, () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill(signal)
+    }
+  })
 }
 
 // Signals do not survive as exit codes. Report them the way a shell does, so
 // a daemon stopped with SIGTERM is not mistaken for a clean exit.
-process.exit(result.status === null ? 128 + (result.signal ? 15 : 0) : result.status)
+child.on('exit', (status, signal) => {
+  process.exit(status === null ? 128 + (signal === 'SIGINT' ? 2 : 15) : status)
+})

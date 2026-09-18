@@ -506,3 +506,45 @@ fn the_end_to_end_suite_verifies_what_is_installed_rather_than_what_is_built() {
         );
     }
 }
+
+#[test]
+fn the_npm_shim_does_not_orphan_the_executable_it_launches() {
+    // The shim used `spawnSync`, which blocks node's event loop for the whole
+    // run. No signal handler could fire, so nothing was forwarded: killing
+    // the `hrc` a supervisor can see reaped node and left the real executable
+    // running underneath it, still holding its socket.
+    //
+    // The end-to-end job found it -- a green run whose log ended
+    // `Terminate orphan process: (hrc)` twice -- and it is the same shape as
+    // the Windows orphan that withdrew daemon autostart in decision DEC-068.
+    // An orphaned daemon is not a tidiness problem: it holds a socket and an
+    // inherited handle, and the last one cost six hours of CI.
+    let shim = code_only(&read("npm/hrc/bin.js"));
+
+    assert!(
+        !shim.contains("spawnSync"),
+        "`spawnSync` blocks the event loop, so no signal can be forwarded"
+    );
+    assert!(
+        shim.contains("spawn("),
+        "the shim should launch the executable asynchronously"
+    );
+
+    for signal in ["SIGTERM", "SIGINT", "SIGHUP"] {
+        assert!(
+            shim.contains(signal),
+            "the shim should forward `{signal}` to the executable"
+        );
+    }
+    assert!(
+        shim.contains("child.kill("),
+        "forwarding means sending the signal on, not just observing it"
+    );
+
+    // Whatever the shim does with signals, the exit code has to keep
+    // describing the executable rather than the wrapper.
+    assert!(
+        shim.contains("child.on('exit'"),
+        "the shim should exit by the executable's own outcome"
+    );
+}
