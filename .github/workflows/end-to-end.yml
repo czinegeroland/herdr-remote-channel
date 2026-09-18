@@ -16,6 +16,17 @@ on:
   workflow_run:
     workflows: [Publish to npm]
     types: [completed]
+  # Also when the suite itself changes. A test that has never run is a
+  # guess, and this one cannot be run any other way before it reaches the
+  # default branch: `workflow_dispatch` does not reach a workflow that is
+  # not there yet. Scoped to these paths so an unrelated change does not
+  # pay for a full install; on a pull request it verifies the current
+  # release rather than an unpublished one, which is the right subject
+  # either way.
+  pull_request:
+    paths:
+      - .github/workflows/end-to-end.yml
+      - scripts/e2e/**
   workflow_dispatch:
     inputs:
       version:
@@ -33,7 +44,7 @@ jobs:
     # A failed publish has nothing worth verifying, and would report a release
     # failure twice.
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      github.event_name != 'workflow_run' ||
       github.event.workflow_run.conclusion == 'success'
     timeout-minutes: 20
 
