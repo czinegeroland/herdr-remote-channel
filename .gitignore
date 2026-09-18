@@ -49,3 +49,9 @@ desktop.ini
 /tmp/
 /scratch/
 *.log
+
+# Python bytecode. `scripts/e2e/trusted-call.py` is run directly and imports
+# nothing, but running it through `py_compile` to check syntax leaves a
+# `__pycache__` beside it, and one of those reached a commit.
+__pycache__/
+*.pyc
