@@ -1,0 +1,107 @@
+name: End to end
+
+# Verifies the thing a person actually installs.
+#
+# Every other suite runs against a build tree. This one installs Herdr, installs
+# this plugin through Herdr the way a user does, and then drives two
+# installations through a whole conversation with the published executable. The
+# gap between those is where the expensive bugs have lived: `--repo owner/name`
+# was documented, specified and unit-tested, and failed the first time it met a
+# real remote, because every test until then had used a local path.
+#
+# It runs after a release rather than on every pull request. The subject is the
+# published artifact, so there is nothing to verify until one exists, and a
+# pull request cannot change what npm is already serving.
+on:
+  workflow_run:
+    workflows: [Publish to npm]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: npm version to verify, for example 0.2.3. Defaults to latest.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  conversation:
+    name: A whole conversation
+    runs-on: ubuntu-latest
+    # A failed publish has nothing worth verifying, and would report a release
+    # failure twice.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out the driver
+        uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install Herdr
+        run: |
+          set -euo pipefail
+          curl -fsSL https://herdr.dev/install.sh | sh
+          # The installer does not necessarily land on the PATH this shell
+          # inherited, so find it rather than assume.
+          for candidate in "$HOME/.local/bin" "$HOME/.herdr/bin" /usr/local/bin; do
+            [ -x "$candidate/herdr" ] && echo "$candidate" >> "$GITHUB_PATH"
+          done
+          "$(command -v herdr || echo "$HOME/.local/bin/herdr")" --version
+
+      - name: Install the published CLI
+        run: |
+          set -euo pipefail
+          version="${{ inputs.version }}"
+          if [ -n "$version" ]; then
+            npm install -g "herdr-remote-channel@$version"
+          else
+            npm install -g herdr-remote-channel
+          fi
+          hrc --version
+
+      - name: Install this plugin the way a person does
+        run: herdr plugin install czinegeroland/herdr-remote-channel --yes
+
+      - name: Herdr registered the plugin
+        run: |
+          set -euo pipefail
+          herdr plugin list | tee /tmp/plugins.txt
+          grep -q herdr-remote-channel /tmp/plugins.txt \
+            || { echo "::error::Herdr did not register the plugin"; exit 1; }
+
+      - name: Installing the plugin installed the agent skill
+        run: |
+          set -euo pipefail
+          skill="$HOME/.claude/skills/herdr-remote-channel/SKILL.md"
+          [ -f "$skill" ] \
+            || { echo "::error::the plugin did not install the skill (decision DEC-079)"; exit 1; }
+          # The skill that cannot drive the CLI is the one that shipped for a
+          # week, so check the content rather than the file's existence.
+          grep -qi "collect every input in one structured question" "$skill" \
+            || { echo "::error::the installed skill is not the form-driven one"; exit 1; }
+          grep -q "hrc create --repo" "$skill" \
+            || { echo "::error::the installed skill documents the wrong create"; exit 1; }
+
+      - name: A whole conversation, two installations, one repository
+        run: bash scripts/e2e/conversation.sh
+
+      - name: Report what was verified
+        if: always()
+        run: |
+          {
+            echo "### End to end"
+            echo
+            echo "- Herdr: \`$(herdr --version 2>/dev/null || echo unavailable)\`"
+            echo "- CLI: \`$(hrc --version 2>/dev/null || echo unavailable)\`"
+            echo "- Plugin and skill installed through \`herdr plugin install\`"
+            echo "- Two installations enrolled, exchanged a note and a reply,"
+            echo "  and the prompt gate released exactly one body"
+          } >> "$GITHUB_STEP_SUMMARY"

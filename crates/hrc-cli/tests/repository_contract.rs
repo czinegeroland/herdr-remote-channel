@@ -456,3 +456,53 @@ fn a_publish_refused_by_the_registry_is_retried_rather_than_reported() {
         "a publish that landed despite an error should not be retried"
     );
 }
+
+#[test]
+fn the_end_to_end_suite_verifies_what_is_installed_rather_than_what_is_built() {
+    // The point of this suite is that it does not use the build tree. Every
+    // expensive bug this project has shipped was invisible to a test of the
+    // build tree: `--repo owner/name` was specified, documented and
+    // unit-tested and failed on its first real remote; the skill documented
+    // commands that did not parse; the plugin installed no skill at all.
+    //
+    // So the properties worth holding are that it installs the real things
+    // and drives the real boundary, and a future edit that quietly points it
+    // at `target/debug` would keep passing while testing nothing new.
+    let workflow = read(".github/workflows/end-to-end.yml");
+    let driver = read("scripts/e2e/conversation.sh");
+
+    for installed in [
+        "herdr.dev/install.sh",
+        "npm install -g",
+        "herdr plugin install",
+        ".claude/skills/herdr-remote-channel/SKILL.md",
+    ] {
+        assert!(
+            workflow.contains(installed),
+            "the end-to-end workflow should install `{installed}`"
+        );
+    }
+
+    assert!(
+        workflow.contains("scripts/e2e/conversation.sh"),
+        "the workflow should run the conversation driver"
+    );
+    assert!(
+        !driver.contains("target/debug") && !driver.contains("cargo run"),
+        "the driver must use the installed `hrc`, not the build tree"
+    );
+
+    // The trusted interface is the only path that admits a member or releases
+    // a body. A suite that stopped short of it would be testing the easy half.
+    for boundary in [
+        "approve_join",
+        "show_approved",
+        "revoke_device",
+        "hrc-agent.sock",
+    ] {
+        assert!(
+            driver.contains(boundary),
+            "the driver should exercise `{boundary}`"
+        );
+    }
+}
