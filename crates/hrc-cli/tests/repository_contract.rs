@@ -456,3 +456,132 @@ fn a_publish_refused_by_the_registry_is_retried_rather_than_reported() {
         "a publish that landed despite an error should not be retried"
     );
 }
+
+#[test]
+fn the_end_to_end_suite_verifies_what_is_installed_rather_than_what_is_built() {
+    // The point of this suite is that it does not use the build tree. Every
+    // expensive bug this project has shipped was invisible to a test of the
+    // build tree: `--repo owner/name` was specified, documented and
+    // unit-tested and failed on its first real remote; the skill documented
+    // commands that did not parse; the plugin installed no skill at all.
+    //
+    // So the properties worth holding are that it installs the real things
+    // and drives the real boundary, and a future edit that quietly points it
+    // at `target/debug` would keep passing while testing nothing new.
+    let workflow = read(".github/workflows/end-to-end.yml");
+    let driver = read("scripts/e2e/conversation.sh");
+
+    for installed in [
+        "herdr.dev/install.sh",
+        "npm install -g",
+        "herdr plugin install",
+        ".claude/skills/herdr-remote-channel/SKILL.md",
+    ] {
+        assert!(
+            workflow.contains(installed),
+            "the end-to-end workflow should install `{installed}`"
+        );
+    }
+
+    assert!(
+        workflow.contains("scripts/e2e/conversation.sh"),
+        "the workflow should run the conversation driver"
+    );
+    assert!(
+        !driver.contains("target/debug") && !driver.contains("cargo run"),
+        "the driver must use the installed `hrc`, not the build tree"
+    );
+
+    // The trusted interface is the only path that admits a member or releases
+    // a body. A suite that stopped short of it would be testing the easy half.
+    for boundary in [
+        "approve_join",
+        "show_approved",
+        "revoke_device",
+        "hrc-agent.sock",
+    ] {
+        assert!(
+            driver.contains(boundary),
+            "the driver should exercise `{boundary}`"
+        );
+    }
+}
+
+#[test]
+fn the_npm_shim_does_not_orphan_the_executable_it_launches() {
+    // The shim used `spawnSync`, which blocks node's event loop for the whole
+    // run. No signal handler could fire, so nothing was forwarded: killing
+    // the `hrc` a supervisor can see reaped node and left the real executable
+    // running underneath it, still holding its socket.
+    //
+    // The end-to-end job found it -- a green run whose log ended
+    // `Terminate orphan process: (hrc)` twice -- and it is the same shape as
+    // the Windows orphan that withdrew daemon autostart in decision DEC-068.
+    // An orphaned daemon is not a tidiness problem: it holds a socket and an
+    // inherited handle, and the last one cost six hours of CI.
+    let shim = code_only(&read("npm/hrc/bin.js"));
+
+    assert!(
+        !shim.contains("spawnSync"),
+        "`spawnSync` blocks the event loop, so no signal can be forwarded"
+    );
+    assert!(
+        shim.contains("spawn("),
+        "the shim should launch the executable asynchronously"
+    );
+
+    for signal in ["SIGTERM", "SIGINT", "SIGHUP"] {
+        assert!(
+            shim.contains(signal),
+            "the shim should forward `{signal}` to the executable"
+        );
+    }
+    assert!(
+        shim.contains("child.kill("),
+        "forwarding means sending the signal on, not just observing it"
+    );
+
+    // Whatever the shim does with signals, the exit code has to keep
+    // describing the executable rather than the wrapper.
+    assert!(
+        shim.contains("child.on('exit'"),
+        "the shim should exit by the executable's own outcome"
+    );
+}
+
+#[test]
+fn extending_the_end_to_end_suite_is_a_written_rule_and_runs_on_every_change() {
+    // A convention nobody wrote down is a convention that lasts until the
+    // next contributor. The end-to-end suite is the only test that runs what
+    // a person installs, so a feature it does not drive is one nobody has
+    // confirmed outside a build tree -- and that is where `--repo
+    // owner/name` and the orphaning npm shim both hid.
+    let prd = read("docs/PRD.md");
+    let template = read(".github/pull_request_template.md");
+    let workflow = read(".github/workflows/end-to-end.yml");
+
+    assert!(
+        prd.contains("The end-to-end suite grows with the product"),
+        "the working agreement should say the suite grows with the product"
+    );
+    assert!(
+        template.contains("End-to-end coverage"),
+        "the pull request template should ask what the suite now drives"
+    );
+
+    // A rule that only fires when someone remembers it is a suggestion. The
+    // suite runs on every pull request, not only when the suite changes,
+    // which is what makes the rule checkable rather than hoped for.
+    let triggers = workflow
+        .split("jobs:")
+        .next()
+        .expect("a workflow has triggers before its jobs");
+    assert!(
+        triggers.contains("pull_request:"),
+        "the suite should run on every pull request"
+    );
+    assert!(
+        !triggers.contains("paths:"),
+        "a path filter would skip the suite for the changes it most needs to see"
+    );
+}

@@ -29,6 +29,11 @@ clarification, decision, or delivery-ledger entry in the PRD.
 - Tests:
 - Manual scenarios:
 - Compatibility checks:
+- End-to-end coverage: <!-- What `scripts/e2e/conversation.sh` now drives that
+  it did not before, or why this change has nothing to add to it. A new
+  feature, a changed command, or a new surface a person can reach extends the
+  suite; a refactor or a version bump does not. It is the only test that runs
+  what a person installs. -->
 
 ## Security and privacy impact
 
@@ -52,6 +57,8 @@ Use `None` only when the change has no security or privacy impact.
 
 - [ ] Implementation matches the referenced PRD requirements.
 - [ ] Tests cover changed behavior.
+- [ ] `scripts/e2e/conversation.sh` covers any new or changed behaviour a
+      person can reach, or the PR says why it does not apply.
 - [ ] Error and recovery behavior is defined.
 - [ ] No private key, invite secret, token, or decrypted message was committed.
 - [ ] Documentation and skill instructions are updated where applicable.

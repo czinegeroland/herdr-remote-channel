@@ -62,21 +62,49 @@ prevent: if you find yourself writing "you need to run", stop and ask instead.
 
 Ask once, in a single form, for whichever of these apply:
 
-| Field | Notes |
-|---|---|
-| **Repository**, as `owner/name` | Must already exist and should be private. `hrc create` records the locator and creates nothing, so if they have not made it yet, that is the one thing to wait for. |
-| **Invitee**, a GitHub username | Only when starting a channel. |
-| **Invite code** | Only when joining one someone else started. |
-| **Key store passphrase** | Only when `hrc doctor` reports no key store. See below. |
+| Field | Required | Notes |
+|---|---|---|
+| **Repository**, as `owner/name` | No | Must already exist; `hrc create` records the locator and creates nothing. Offer the local option below when they have not made one. |
+| **Invitee**, a GitHub username | **No** | Leave it out and no invite is issued. Setting up alone is an ordinary thing to do. |
+| **Invite code** | No | Only when joining a channel someone else started. |
+| **Key store passphrase** | No | Only when `hrc doctor` reports no key store. See below. |
 
-Then run all of it, without stopping in between:
+**Nothing here is mandatory beyond what the user actually wants to do.** A
+person who only wants this installation working needs none of it; someone
+setting up a channel to use later needs a repository and no invitee. Do not
+ask again for a field they left blank, and do not refuse to proceed without
+one — issue the invite whenever they are ready, which may be days later:
+
+```bash
+hrc invite create --github-user <user>
+```
+
+Then run what they asked for, without stopping in between:
 
 ```bash
 hrc doctor                                # first, and again after any failure
 hrc init                                  # only when doctor says the key store is missing
-hrc create --repo <owner/name>            # private unless --visibility says otherwise
-hrc invite create --github-user <user>    # the code prints once and is never shown again
+hrc create --repo <owner/name>            # only when they gave a repository
+hrc invite create --github-user <user>    # only when they named someone
 ```
+
+### When there is no repository
+
+A channel needs a Git repository both sides can reach, and a private one on a
+host like GitHub is the usual answer. When the user has not got one, offer a
+local bare repository instead of stopping:
+
+```bash
+git init --bare <path>                    # for example C:\hrc\channel.git
+hrc create --repo <path>
+```
+
+`hrc` still creates nothing — git does, and `hrc create` records the path it
+made. Say plainly what this is worth: a local repository only reaches
+installations that can see that filesystem, so it is right for two instances
+on one machine or a shared drive, and no use at all for a collaborator
+elsewhere. Anyone in that position needs a hosted repository, and the channel
+can be created later once they have one.
 
 ### The passphrase
 
