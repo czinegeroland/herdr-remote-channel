@@ -309,3 +309,78 @@ fn the_manifest_renders_as_toml_with_the_host_tables() {
         "the file should say it is generated"
     );
 }
+
+#[test]
+fn opening_the_review_popup_names_a_pane_the_manifest_registers() {
+    // A pane Herdr does not know about is a command that fails at the moment
+    // a person presses Enter on a message. Holding the argv to the manifest
+    // means the two cannot drift.
+    let argv = open_review("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+    let manifest = manifest();
+
+    let plugin = position(&argv, "--plugin");
+    assert_eq!(argv[plugin + 1], manifest.id);
+
+    let entrypoint = position(&argv, "--entrypoint");
+    assert!(
+        manifest
+            .panes
+            .iter()
+            .any(|pane| pane.id == argv[entrypoint + 1]),
+        "`{}` is not a registered pane",
+        argv[entrypoint + 1]
+    );
+
+    // The popup placement is what makes the revealed body session-modal.
+    // Opening the review pane as a split would leave a decrypted message
+    // sitting in the tiled workspace.
+    let placement = position(&argv, "--placement");
+    assert_eq!(argv[placement + 1], "popup");
+    assert_eq!(
+        manifest
+            .panes
+            .iter()
+            .find(|pane| pane.id == argv[entrypoint + 1])
+            .map(|pane| pane.placement.as_str()),
+        Some("popup"),
+        "the manifest and the open request must agree about modality"
+    );
+}
+
+#[test]
+fn the_review_popup_is_handed_an_identifier_and_nothing_else() {
+    // Everything on this command line is fixed text except the identifier,
+    // and the caller has already established that it is a ULID. Nothing a
+    // sender wrote can reach the host through here.
+    let argv = open_review("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+
+    let environment = position(&argv, "--env");
+    assert_eq!(
+        argv[environment + 1],
+        format!("{REVIEW_TARGET_ENV}=01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    );
+
+    assert_eq!(
+        argv.iter()
+            .filter(|argument| argument.starts_with(REVIEW_TARGET_ENV))
+            .count(),
+        1,
+        "exactly one target reaches the popup"
+    );
+
+    // The fallback carries no target at all, rather than an empty one that
+    // the popup would have to decide how to read.
+    assert!(
+        !open_review_list()
+            .iter()
+            .any(|argument| argument.contains(REVIEW_TARGET_ENV))
+    );
+}
+
+/// Where one flag sits in an argv, so the test reads the value beside it
+/// rather than a hard-coded index that a reordering would silently break.
+fn position(argv: &[String], flag: &str) -> usize {
+    argv.iter()
+        .position(|argument| argument == flag)
+        .unwrap_or_else(|| panic!("`{flag}` is missing from {argv:?}"))
+}

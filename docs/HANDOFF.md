@@ -142,12 +142,17 @@ request as the work it describes, or it will lie.*
 **94 of 94 requirement rows Implemented.** Milestones: **M0 90%, M1 100%,
 M2 100%, M3 100%, M4 100%, M5 0%.**
 
-PR #65 was merged. A post-merge review found five upgrade and multi-device
-edges now fixed on `fix/positive-path-upgrade-gaps`: stale in-memory pending
-snapshots after resealing, schema-10 queued envelopes misclassified as current,
-legacy held predecessors unable to enter recipient ordering, receipts mixing
-two devices of one principal, and `wait` returning a rejection when another
-report had satisfied the requested milestone.
+The Herdr inbox pane is now an interactive split rather than a JSON snapshot
+a host printed once. It reloads on a one-second tick, keeps its selection by
+message identifier across reloads, and opens the trusted review popup on the
+exact selected message through `herdr plugin pane open --env`, which is the
+host API the planning handoff could not confirm and which is now verified
+against Herdr 0.9.1 and against the `github-link-preview` example plugin
+(decisions DEC-086 to DEC-088). The metadata-only boundary is expressed as a
+type: `hrc_tui::InboxOutcome` has two variants, and neither is a decision.
+
+Still to come from that plan: a local delivery destination picker in place of
+the one fixed agent string, and durable notification deduplication.
 
 Outgoing composition is now one transaction: recipient validation, sequence
 allocation, recipient-scoped predecessor derivation, sealing, recipient facts,
@@ -245,12 +250,13 @@ host with no toolchain.
 - **`OQ-014`** is new and open: whether a sender should see its own messages
   in `hrc thread`. Today it sees only what arrived, because an installation
   keeps ciphertext and a payload hash for what it sent, not plaintext.
-- **Nothing has been run against a real Herdr.** The manifest matches the
-  0.8.0 plugin reference and every command in it is exercised by tests, but
-  no `herdr plugin install` has been performed. The most likely thing to be
-  wrong is a detail the reference does not state: whether `bin/hrc` resolves
-  without an `.exe` suffix on Windows, and whether `contexts = ["pane"]` is
-  accepted.
+- **The inbox split has not been watched inside a real Herdr.** The state
+  machine, the renderer and the argv that opens the review popup are all
+  tested, and `herdr plugin install` has been performed, but nobody has yet
+  sat in front of the split while a message arrived. The most likely thing
+  to be wrong is a detail no document states: whether a popup opened from a
+  plugin pane inherits that pane's terminal cleanly, and what Herdr answers
+  when `plugin pane open` is refused as `ui_busy`.
 
 ### Two operational things the next session must know
 

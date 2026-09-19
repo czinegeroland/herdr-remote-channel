@@ -4320,7 +4320,17 @@ pub fn herdr_pane(context: &Context, pane: &str) -> Result<Value> {
         // The trusted approval screen. Herdr opens this as a session-modal
         // popup, which is a real terminal, so the screen runs here rather
         // than rendering rows for the host to print.
-        hrc_herdr::Pane::Review => review::review(context, None, &review::local_agent()),
+        //
+        // The inbox side view asks Herdr for this popup with the selected
+        // message in an environment variable, which is how a registered pane
+        // takes a local argument (decision DEC-086). Without one the screen
+        // lists everything pending, which is what opening the pane directly
+        // does.
+        hrc_herdr::Pane::Review => review::review(
+            context,
+            review::review_target().as_deref(),
+            &review::local_agent(),
+        ),
 
         // Membership approval, the other decision a human owns.
         hrc_herdr::Pane::Joins => review::review_joins(context),
@@ -4339,52 +4349,9 @@ pub fn herdr_pane(context: &Context, pane: &str) -> Result<Value> {
         // Getting a channel in the first place.
         hrc_herdr::Pane::Setup => review::setup(context),
 
-        hrc_herdr::Pane::Inbox => {
-            let database = Database::open(context.paths.database())?;
-            let channel = only_channel(&database)?;
-            let now = database.utc_now()?;
-
-            let rows: Vec<hrc_herdr::InboxRow> = database
-                .plugin_inbox(&channel.channel_id)?
-                .iter()
-                .map(|entry| {
-                    // No local alias store exists yet, so the verified
-                    // principal ID stands in for the display name. It is
-                    // locally resolved either way, which is what section
-                    // 19.1 requires; what it must never become is a name the
-                    // sender chose.
-                    hrc_herdr::InboxRow::from_entry(
-                        entry,
-                        &entry.sender_principal,
-                        &channel.local_name,
-                        &now,
-                    )
-                })
-                .collect();
-
-            let notifications: Vec<Value> = rows
-                .iter()
-                .filter(|row| row.awaiting_decision())
-                .filter_map(hrc_herdr::Notification::for_message)
-                .map(|notification| {
-                    json!({
-                        "text": notification.render(),
-                        "urgent": notification.is_urgent(),
-                    })
-                })
-                .collect();
-
-            let view = hrc_herdr::InboxView { rows };
-
-            Ok(json!({
-                "status": "ok",
-                "pane": "inbox",
-                "channel": channel.local_name,
-                "pending": view.pending(),
-                "rows": view.rows,
-                "notifications": notifications,
-            }))
-        }
+        // The inbox. Interactive when a person is at the terminal, and the
+        // same rows as JSON when something else is reading them.
+        hrc_herdr::Pane::Inbox => review::inbox(context),
     }
 }
 

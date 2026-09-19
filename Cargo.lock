@@ -1371,6 +1371,7 @@ version = "0.2.3"
 dependencies = [
  "crossterm",
  "hrc-core",
+ "hrc-herdr",
  "hrc-protocol",
  "ratatui",
 ]

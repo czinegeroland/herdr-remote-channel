@@ -55,6 +55,14 @@ pub const UNKNOWN_ENDPOINT: &str = "unknown endpoint";
 /// The label shown instead of a thread identifier that fails validation.
 pub const UNKNOWN_THREAD: &str = "unknown thread";
 
+/// The label shown instead of a message identifier that fails validation.
+///
+/// A `messageId` travels in the envelope and the protocol only checks that
+/// it is non-empty, so it is sender-chosen text until something narrows it.
+/// The stored identifier still keys the row locally — this is only what a
+/// surface may *print*.
+pub const UNKNOWN_MESSAGE: &str = "unknown message";
+
 /// The one capability the PRD names (section 18.1).
 pub const PROMPT_CAPABILITY: &str = "prompt:request";
 
@@ -305,6 +313,21 @@ pub fn thread_label(thread_id: Option<&str>) -> String {
     match thread_id {
         Some(thread_id) if hrc_protocol::ulid::is_ulid(thread_id) => thread_id.to_owned(),
         _ => UNKNOWN_THREAD.to_owned(),
+    }
+}
+
+/// The message label a surface may show, given what the sender sent.
+///
+/// Separate from the identifier a surface *selects* by. The inbox has to
+/// track which row is selected across a refresh, and it has to do that by a
+/// stable key even when the sender chose a malformed one; what it must not
+/// do is put that key on screen. Splitting the two means a row can be
+/// targeted precisely and still show nothing the sender wrote.
+pub fn message_label(message_id: &str) -> String {
+    if hrc_protocol::ulid::is_ulid(message_id) {
+        message_id.to_owned()
+    } else {
+        UNKNOWN_MESSAGE.to_owned()
     }
 }
 

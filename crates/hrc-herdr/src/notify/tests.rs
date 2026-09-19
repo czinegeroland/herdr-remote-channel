@@ -1,9 +1,11 @@
 use super::*;
 
-use crate::inbox::{InboxRow, LocalDecision, SecretScan, Verification};
+use crate::inbox::{InboxDisposition, InboxRow, LocalDecision, SecretScan, Verification};
 
 fn row(kind: &str, prompt_request: bool) -> InboxRow {
     InboxRow {
+        message_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+        message_label: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
         sender_principal: "principal-alice".to_owned(),
         sender_local_name: "Alice".to_owned(),
         kind: kind.to_owned(),
@@ -17,6 +19,7 @@ fn row(kind: &str, prompt_request: bool) -> InboxRow {
         attachment_bytes: 0,
         verification: Verification::Verified,
         secret_scan: SecretScan::NotApplicable,
+        disposition: InboxDisposition::Pending,
         decisions: vec![LocalDecision::KeepInInbox],
     }
 }

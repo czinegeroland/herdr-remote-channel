@@ -2050,6 +2050,26 @@ fn the_herdr_inbox_pane_never_renders_a_pending_body() {
                 "an inbox row must not carry `{forbidden}`"
             );
         }
+
+        // The identifier the side view selects by and targets the trusted
+        // review popup with, and the state it shows. Named here because the
+        // end-to-end suite reads these exact keys out of this exact command
+        // (PRD section 23.2); a rename that only broke a shell script would
+        // otherwise be found on a runner rather than here.
+        assert!(
+            object["message_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty()),
+            "a row must carry the identifier review is opened on"
+        );
+        assert_eq!(
+            object["disposition"], "pending",
+            "a quarantined message is awaiting a decision"
+        );
+        assert!(
+            object.contains_key("message_label"),
+            "a row must carry the identifier it is allowed to print"
+        );
     }
 }
 

@@ -198,6 +198,24 @@ if printf '%s' "$inbox" | grep -q "$note"; then
 fi
 ok "message $message_id is present and its body is not"
 
+step "the Herdr inbox pane offers the row a person would select"
+# The pane a person keeps open is interactive on a terminal and the same rows
+# as JSON otherwise, so this drives the half a script can reach: that the row
+# carries the identifier the side view selects and targets review by, that it
+# reports a disposition, and that neither the rows nor the notifications
+# disclose anything nobody approved.
+pane="$(as "$bob" herdr pane inbox --json)"
+pane_id="$(printf '%s' "$pane" | json '["rows"][0]["message_id"]')"
+[ "$pane_id" = "$message_id" ] \
+    || die "the pane row does not name the message it is about: $pane"
+pane_state="$(printf '%s' "$pane" | json '["rows"][0]["disposition"]')"
+[ "$pane_state" = "pending" ] \
+    || die "a quarantined message should read as pending, not $pane_state"
+if printf '%s' "$pane" | grep -q "$note"; then
+    die "the Herdr inbox pane disclosed a body nobody approved"
+fi
+ok "the pane row targets $pane_id and is $pane_state"
+
 step "an agent cannot read the body before a human releases it"
 start_daemon "$bob"
 if python3 "$here/trusted-call.py" "$bob/run/hrc-agent.sock" show_approved \

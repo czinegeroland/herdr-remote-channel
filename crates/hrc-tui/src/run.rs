@@ -12,6 +12,7 @@
 //! were deciding whether to disclose something.
 
 use std::io::{self, Stdout};
+use std::time::{Duration, Instant};
 
 use crossterm::{
     event::{self, Event},
@@ -94,6 +95,58 @@ pub fn run<S: Screen>(screen: &mut S) -> io::Result<S::Outcome> {
             && let Some(outcome) = screen.on_key(key)
         {
             return Ok(outcome);
+        }
+    }
+}
+
+/// A screen that also wants to be told when time has passed.
+///
+/// [`run`] blocks in `event::read` until a key arrives, which is right for a
+/// screen a person is deciding on: it costs nothing while they read. It is
+/// wrong for a side view that sits open in a tiled workspace, because a
+/// message arriving would not appear until the person happened to press a
+/// key — and the key they are most likely to press first is `Enter`, on
+/// whatever row was selected before the new arrival.
+///
+/// The tick does not reach into storage from here. The implementation owns
+/// whatever handle it needs and this only says when to use it, which is what
+/// keeps the UI state machine free of I/O.
+pub trait Ticking: Screen {
+    /// Called when the interval elapses, before the next draw.
+    fn on_tick(&mut self) -> Option<Self::Outcome>;
+}
+
+/// Shows a screen until the human decides or leaves, ticking meanwhile.
+///
+/// Redrawing every pass rather than tracking a dirty flag is deliberate:
+/// ratatui keeps the previous frame and writes only the cells that differ,
+/// so a tick that changed nothing sends no bytes to the terminal. A dirty
+/// flag would add a second, hand-maintained answer to "did anything change",
+/// and the cost it would save is already zero.
+pub fn run_ticking<S: Ticking>(screen: &mut S, interval: Duration) -> io::Result<S::Outcome> {
+    let mut guard = TerminalGuard::enter()?;
+    let mut due = Instant::now() + interval;
+
+    loop {
+        guard.terminal.draw(|frame| screen.draw(frame))?;
+
+        // A resize wakes the poll and falls through to the redraw above on
+        // the next pass, which is all a resize needs.
+        if event::poll(due.saturating_duration_since(Instant::now()))?
+            && let Event::Key(key) = event::read()?
+            && let Some(outcome) = screen.on_key(key)
+        {
+            return Ok(outcome);
+        }
+
+        let now = Instant::now();
+        if now >= due {
+            // Reset from now rather than adding to the old deadline, so a
+            // slow tick does not leave a backlog of immediately-due ones.
+            due = now + interval;
+            if let Some(outcome) = screen.on_tick() {
+                return Ok(outcome);
+            }
         }
     }
 }

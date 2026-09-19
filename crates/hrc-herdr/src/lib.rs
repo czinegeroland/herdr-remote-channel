@@ -38,8 +38,10 @@ pub mod sidebar;
 
 pub use agent::LocalAgent;
 pub use event::{HostEvent, Reaction, reaction_to};
-pub use inbox::{InboxRow, InboxView, agent_view};
-pub use manifest::{Manifest, manifest};
+pub use inbox::{InboxDisposition, InboxRow, InboxView, agent_view};
+pub use manifest::{
+    Manifest, PLUGIN_ID, REVIEW_TARGET_ENV, manifest, open_review, open_review_list,
+};
 pub use notify::Notification;
 pub use pane::Pane;
 pub use sidebar::Sidebar;
