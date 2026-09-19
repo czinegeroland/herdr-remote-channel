@@ -59,10 +59,20 @@ The plugin registers a startup hook, a `workspace.focused` event hook, an
 and seven panes, each with an action of the same name:
 
 - **Remote channel inbox** — a split pane showing what has arrived, who sent
-  it, and what is waiting on you. It never shows an unapproved body.
+  it, and what is waiting on you. It never shows an unapproved body. It is
+  interactive and refreshes on its own, so a message that arrives while you
+  are working appears without you touching it: move with the arrows or
+  `j`/`k`, filter with `p`/`u`/`a`, and press Enter to open the trusted
+  review screen on the message you selected. Nothing in this pane can
+  approve, reveal, decline or deliver anything — that is a property of its
+  type, not a rule it follows.
 - **Remote channel review** — the trusted approval screen, opened as a modal
   popup. This is the one surface where a quarantined body is displayed, and
-  the only place a decision about one is made.
+  the only place a decision about one is made. Once the body is on screen,
+  `Tab` chooses which of your local Herdr sessions a delivery would go to;
+  the list is what Herdr actually has, the session you are working in comes
+  first, and the confirmation names the exact one. Approved text reaches that
+  session over Herdr's socket, never as a command-line argument.
 - **Remote channel join requests** — admit or refuse someone joining the
   channel, after comparing the safety phrase with them out of band.
 - **Remote channel compose** — write a note or a question and send it, or
@@ -85,6 +95,18 @@ anything by accident.
 `authorization_required` unless a human is actually there: standard input and
 standard output must both be a terminal, which a pipe, a captured subprocess,
 and an agent's tool call are not.
+
+The inbox pane raises a Herdr notification when something new needs you, and
+raises it **once**: the record of having notified lives in the local database,
+so refreshing the pane does not repeat it and neither does restarting. A burst
+of ordinary arrivals becomes one line with a count; a tamper halt or a prompt
+request is never folded into one. A notification carries locally resolved
+names, counts and fixed wording — never a subject, a body, an excerpt or an
+attachment name — and cannot approve, reveal, decline or deliver anything.
+
+Reading the pane non-interactively — `hrc herdr pane inbox --json`, which is
+what an agent or a script gets — returns the same rows as JSON. It is the same
+closed metadata set either way.
 
 ### For local development
 

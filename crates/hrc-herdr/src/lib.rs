@@ -30,16 +30,20 @@
 
 pub mod agent;
 pub mod event;
+pub mod host;
 pub mod inbox;
 pub mod manifest;
 pub mod notify;
 pub mod pane;
 pub mod sidebar;
 
-pub use agent::LocalAgent;
+pub use agent::{LocalAgent, Selection};
 pub use event::{HostEvent, Reaction, reaction_to};
-pub use inbox::{InboxRow, InboxView, agent_view};
-pub use manifest::{Manifest, manifest};
-pub use notify::Notification;
+pub use host::HostError;
+pub use inbox::{InboxDisposition, InboxRow, InboxView, agent_view};
+pub use manifest::{
+    Manifest, PLUGIN_ID, REVIEW_TARGET_ENV, manifest, open_review, open_review_list,
+};
+pub use notify::{Coalesced, Notification, coalesce};
 pub use pane::Pane;
 pub use sidebar::Sidebar;

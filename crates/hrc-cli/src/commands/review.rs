@@ -66,11 +66,42 @@ pub fn review(context: &Context, message_id: Option<&str>, agent: &str) -> Resul
         }));
     }
 
-    let mut app = App::new(pending, agent);
+    // Enumerated here, so the screen offers what Herdr has right now rather
+    // than a name this process guessed from its own environment. When Herdr
+    // is not reachable the list is empty and the screen says so: keeping and
+    // declining still work, and delivering refuses instead of failing after
+    // the person has confirmed it.
+    let destinations = destinations(agent);
+    let bodies: std::collections::HashMap<String, String> = pending
+        .iter()
+        .map(|item| (item.message_id.clone(), item.body.clone()))
+        .collect();
+
+    let mut app = App::new(pending, destinations);
     let outcome = hrc_tui::run(&mut app).map_err(|source| CliError::Io {
         action: "run the trusted approval screen",
         source,
     })?;
+
+    let delivery = match &outcome {
+        Outcome::DeliverToAgent {
+            message_id, target, ..
+        } => Some((message_id.clone(), target.clone())),
+        _ => None,
+    };
+
+    // Re-checked after the screen closes, because the list it offered was
+    // read when the screen opened and a person may have spent minutes
+    // reading. A pane closed in between would otherwise be approved into:
+    // the daemon would record a delivery, the hand-over would fail, and the
+    // message would sit approved with nothing holding it. Nothing has been
+    // recorded yet at this point, so refusing here leaves it pending —
+    // which is the state a person can act on again.
+    if let Some((_, target)) = &delivery
+        && let Some(gone) = departed(target)
+    {
+        return Err(gone);
+    }
 
     let Some((message_id, decision, action)) = wire_decision(outcome) else {
         return Ok(json!({
@@ -81,12 +112,109 @@ pub fn review(context: &Context, message_id: Option<&str>, agent: &str) -> Resul
 
     let applied = runtime.block_on(apply(&endpoint, &message_id, decision))?;
 
+    // Only after the daemon recorded the approval. The order is the point:
+    // a body handed to a local session before the trusted path accepted the
+    // decision would be a delivery the audit log does not know about.
+    let delivered = delivery.map(|(message_id, target)| {
+        hand_to_herdr(
+            &target,
+            bodies
+                .get(&message_id)
+                .map(String::as_str)
+                .unwrap_or_default(),
+        )
+    });
+
     Ok(json!({
         "status": "ok",
         "messageId": message_id,
         "decided": action,
         "daemon": applied,
+        "delivered": delivered,
     }))
+}
+
+/// Every local session an approved message could be delivered to.
+///
+/// `fallback` is what [`local_agent`] read out of the plugin context, used
+/// only when Herdr answers nothing: a single destination named the way the
+/// person's own Herdr names it beats an empty list that makes delivery
+/// impossible. It is marked not ready, because nothing has confirmed
+/// anything can receive there.
+fn destinations(fallback: &str) -> Vec<hrc_herdr::LocalAgent> {
+    let listed = crate::herdr_host::Host::connect()
+        .and_then(|mut host| host.destinations())
+        .unwrap_or_default();
+
+    if !listed.is_empty() {
+        return listed;
+    }
+
+    vec![
+        hrc_herdr::LocalAgent::new(fallback, fallback)
+            .as_current(true)
+            .when_ready(false),
+    ]
+}
+
+/// Why a chosen destination can no longer receive, if it cannot.
+///
+/// `None` means go ahead: either Herdr still lists the target and says it can
+/// take input, or Herdr could not be asked at all. The second case is
+/// deliberate — an unreachable host is not evidence that a destination
+/// vanished, and refusing a decision a person already made because a status
+/// query failed would be the check doing more harm than the race it guards.
+fn departed(target: &str) -> Option<CliError> {
+    let Ok(listed) = crate::herdr_host::Host::connect().and_then(|mut host| host.destinations())
+    else {
+        return None;
+    };
+
+    // An empty listing from a reachable Herdr is not evidence either: the
+    // fallback destination exists precisely because `agent.list` can be empty
+    // while a session is still there.
+    if listed.is_empty() {
+        return None;
+    }
+
+    match listed.iter().find(|agent| agent.local_target() == target) {
+        Some(agent) if agent.is_ready() => None,
+        Some(agent) => Some(CliError::DestinationUnavailable {
+            destination: agent.label().to_owned(),
+            reason: "it cannot take input right now",
+        }),
+        None => Some(CliError::DestinationUnavailable {
+            destination: target.to_owned(),
+            reason: "it is no longer there",
+        }),
+    }
+}
+
+/// Hands approved text to the chosen local session.
+///
+/// Reports what happened rather than returning an error. The decision is
+/// already recorded and is not undone by a delivery that did not land: the
+/// message was approved, and a person who was told "approved" and then saw
+/// an error would not know which of the two is true. What they need is both
+/// facts, which is what this puts in the answer.
+fn hand_to_herdr(target: &str, text: &str) -> Value {
+    if text.is_empty() {
+        return json!({
+            "handedOver": false,
+            "reason": "the approved content was not available to hand over",
+        });
+    }
+
+    // Reconnected rather than reusing the connection the list came from,
+    // because the screen may have been open for minutes and a server that
+    // restarted in between would leave a dead socket behind.
+    match crate::herdr_host::Host::connect().and_then(|mut host| host.deliver(target, text)) {
+        Ok(()) => json!({ "handedOver": true }),
+        Err(error) => json!({
+            "handedOver": false,
+            "reason": error.to_string(),
+        }),
+    }
 }
 
 /// Whether a human is actually at this terminal.
@@ -196,7 +324,9 @@ async fn connect(endpoint: &Endpoint) -> Result<Client> {
 /// recording one would put a choice in the audit log that nobody made.
 fn wire_decision(outcome: Outcome) -> Option<(String, WireDecision, &'static str)> {
     match outcome {
-        Outcome::DeliverToAgent { message_id, agent } => Some((
+        Outcome::DeliverToAgent {
+            message_id, agent, ..
+        } => Some((
             message_id,
             WireDecision::DeliverToAgent { agent },
             "deliver_to_agent",
@@ -1035,9 +1165,411 @@ pub fn members(context: &Context) -> Result<Value> {
     }))
 }
 
+/// How often the inbox side view reloads its rows.
+///
+/// A second is fast enough that an arrival appears while a person is still
+/// looking at the pane, and slow enough that the cost is one indexed read of
+/// a local SQLite file per second. The alternative the PRD rules out is a
+/// frequently fired Herdr host event, which would spawn a process per tick
+/// (section 13.2).
+const INBOX_REFRESH: Duration = Duration::from_secs(1);
+
+/// The inbox side view, wired to storage and to the Herdr host.
+///
+/// [`hrc_tui::InboxApp`] is the state machine and knows nothing about either.
+/// This owns the database handle and the path back to Herdr, which is what
+/// keeps reloading out of the UI and makes the UI testable without a
+/// database.
+struct InboxScreen {
+    app: hrc_tui::InboxApp,
+    database: Database,
+    channel_id: String,
+    channel_local_name: String,
+    now: String,
+    /// Each message the popup was opened for, in order, so the command can
+    /// report what a person actually looked at.
+    reviewed: Vec<String>,
+}
+
+impl InboxScreen {
+    /// Reloads the rows, keeping the last good ones when the read fails.
+    fn reload(&mut self) {
+        match inbox_rows(&self.database, &self.channel_id, &self.channel_local_name) {
+            Ok((rows, now)) => {
+                self.now = now;
+                self.announce(&rows);
+                self.app.refresh(rows);
+            }
+            // A failed read must not look like an empty inbox. The rows
+            // already on screen stay, and the status line says why they may
+            // be out of date.
+            Err(error) => self.app.refresh_failed(error.to_string()),
+        }
+    }
+
+    /// Raises a Herdr notification for anything newly actionable.
+    ///
+    /// The ledger decides what is new, so a pane refreshing once a second
+    /// raises nothing on the refreshes where nothing changed — which is
+    /// almost all of them, and is the behaviour people turn notifications
+    /// off over when it is missing.
+    ///
+    /// A failure here is deliberately swallowed. The message is in the inbox
+    /// whether or not a toast appeared, and the pane in front of the person
+    /// already shows it; failing a refresh because a notification did not
+    /// land would replace a missing toast with a missing inbox.
+    fn announce(&mut self, rows: &[hrc_herdr::InboxRow]) {
+        let Ok(notices) = raise_notifications(&self.database, &self.channel_id, rows) else {
+            return;
+        };
+
+        if notices.is_empty() {
+            return;
+        }
+
+        let Ok(mut host) = crate::herdr_host::Host::connect() else {
+            return;
+        };
+
+        for notice in notices {
+            let (Some(text), Some(urgent)) = (
+                notice.get("text").and_then(Value::as_str),
+                notice.get("urgent").and_then(Value::as_bool),
+            ) else {
+                continue;
+            };
+
+            let _ = host.notify(text, urgent);
+        }
+    }
+
+    /// Asks Herdr to open the trusted review popup on one message.
+    ///
+    /// The side view stays open behind it. Returning the outcome from the
+    /// runner instead would restore the terminal and exit, which in a Herdr
+    /// split means closing the pane the person was working out of.
+    fn open_review(&mut self, message_id: &str) {
+        // Only a well-formed ULID is handed to the host. A `messageId`
+        // arrives in the envelope and the protocol checks only that it is
+        // non-empty, so it is sender-chosen text; the popup opens on the
+        // unfocused pending list rather than carrying that text onto a
+        // command line (decision DEC-087).
+        if !hrc_protocol::is_ulid(message_id) {
+            self.status("That message has a malformed identifier. Opening the full pending list.");
+            self.spawn_review(None);
+            return;
+        }
+
+        self.reviewed.push(message_id.to_owned());
+        self.spawn_review(Some(message_id));
+    }
+
+    /// Runs `herdr plugin pane open`, reporting a refusal rather than hiding it.
+    fn spawn_review(&mut self, message_id: Option<&str>) {
+        let herdr = std::env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_owned());
+        let arguments = match message_id {
+            Some(message_id) => hrc_herdr::open_review(message_id),
+            None => hrc_herdr::open_review_list(),
+        };
+
+        match std::process::Command::new(&herdr)
+            .args(&arguments)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+        {
+            Ok(output) if output.status.success() => {}
+            // Herdr answers `ui_busy` while Settings, Copy mode, or another
+            // modal is up. Saying so leaves the person able to dismiss that
+            // and press Enter again; a silent failure would look like a pane
+            // that ignores the key.
+            Ok(output) => {
+                let reason = String::from_utf8_lossy(&output.stderr);
+                let reason = reason.trim();
+                self.status(&format!(
+                    "Herdr did not open the review popup{}{}",
+                    if reason.is_empty() { "" } else { ": " },
+                    reason
+                ));
+            }
+            Err(error) => self.status(&format!("Could not run {herdr}: {error}")),
+        }
+    }
+
+    /// Puts one fixed local line in front of the person.
+    fn status(&mut self, text: &str) {
+        self.app.refresh_failed(text.to_owned());
+    }
+}
+
+impl hrc_tui::Screen for InboxScreen {
+    type Outcome = hrc_tui::InboxOutcome;
+
+    fn draw(&self, frame: &mut hrc_tui::ratatui::Frame<'_>) {
+        hrc_tui::render_inbox(frame, &self.app, &self.now);
+    }
+
+    fn on_key(&mut self, key: hrc_tui::crossterm::event::KeyEvent) -> Option<Self::Outcome> {
+        let outcome = self.app.on_key(key);
+
+        if self.app.refresh_requested() {
+            self.reload();
+        }
+
+        match outcome {
+            Some(hrc_tui::InboxOutcome::Review { message_id }) => {
+                self.open_review(&message_id);
+                // Deliberately not propagated. The only outcome that ends the
+                // side view is leaving it.
+                None
+            }
+            Some(hrc_tui::InboxOutcome::Quit) => Some(hrc_tui::InboxOutcome::Quit),
+            None => None,
+        }
+    }
+}
+
+impl hrc_tui::Ticking for InboxScreen {
+    fn on_tick(&mut self) -> Option<Self::Outcome> {
+        self.reload();
+        None
+    }
+}
+
+/// Reads the inbox rows for the one configured channel, with the time used
+/// to judge expiry and render ages.
+fn inbox_rows(
+    database: &Database,
+    channel_id: &str,
+    channel_local_name: &str,
+) -> Result<(Vec<hrc_herdr::InboxRow>, String)> {
+    let now = database.utc_now()?;
+
+    let rows = database
+        .plugin_inbox(channel_id)?
+        .iter()
+        .map(|entry| {
+            // No local alias store exists yet, so the verified principal ID
+            // stands in for the display name. It is locally resolved either
+            // way, which is what section 19.1 requires; what it must never
+            // become is a name the sender chose.
+            hrc_herdr::InboxRow::from_entry(
+                entry,
+                &entry.sender_principal,
+                channel_local_name,
+                &now,
+            )
+        })
+        .collect();
+
+    Ok((hrc_herdr::InboxView::new(rows).rows, now))
+}
+
+/// Builds the inbox snapshot a non-interactive caller receives.
+///
+/// The same rows the side view draws, as JSON. This is the agent-safe
+/// surface and stays exactly as wide as it was: metadata only, no body, no
+/// field that could hold one.
+pub fn inbox_snapshot(context: &Context) -> Result<Value> {
+    let database = Database::open(context.paths.database())?;
+    let channel = crate::commands::only_channel(&database)?;
+    let (rows, _) = inbox_rows(&database, &channel.channel_id, &channel.local_name)?;
+
+    let notifications = raise_notifications(&database, &channel.channel_id, &rows)?;
+    let view = hrc_herdr::InboxView::new(rows);
+
+    Ok(json!({
+        "status": "ok",
+        "pane": "inbox",
+        "channel": channel.local_name,
+        "pending": view.pending(),
+        "rows": view.rows,
+        "notifications": notifications,
+    }))
+}
+
+/// The notices this refresh should raise, recording that it raised them.
+///
+/// Called on every read of the inbox, which is once a second while the side
+/// view is open. What makes that safe is that the ledger is in the database
+/// rather than in this process: `record_notification` returns true the first
+/// time a message-and-kind pair is seen and false every time after, across
+/// refreshes and across restarts.
+///
+/// Messages that are no longer awaiting a decision have their notices
+/// resolved in the same pass. A person who declined something should not be
+/// told about it again by a pane that has not caught up, and a resolved row
+/// stays in the ledger so that being decided is distinguishable from never
+/// having been notified.
+fn raise_notifications(
+    database: &Database,
+    channel_id: &str,
+    rows: &[hrc_herdr::InboxRow],
+) -> Result<Vec<Value>> {
+    let now = database.utc_now()?;
+    let mut fresh = Vec::new();
+
+    for row in rows {
+        let Some(notification) = hrc_herdr::Notification::for_message(row) else {
+            continue;
+        };
+
+        if !row.awaiting_decision() {
+            database.resolve_notifications(&row.message_id, &now)?;
+            continue;
+        }
+
+        if database.record_notification(channel_id, &row.message_id, notification.kind(), &now)? {
+            fresh.push(notification);
+        }
+    }
+
+    Ok(hrc_herdr::coalesce(fresh)
+        .into_iter()
+        .map(|notice| {
+            json!({
+                "text": notice.text,
+                "urgent": notice.urgent,
+                "covers": notice.covers,
+            })
+        })
+        .collect())
+}
+
+/// Opens the inbox side view (PRD section 23.2).
+///
+/// Interactive when a person is at the terminal, and the JSON snapshot
+/// otherwise. Both show the same closed metadata set, so this is a choice
+/// about presentation rather than about what is disclosed: a pipe gets rows
+/// it can parse, a person gets rows they can move through. Refusing the
+/// non-interactive case would break the agent-safe read that section 19.1
+/// exists to allow, which is the opposite of what section 22.7 protects.
+pub fn inbox(context: &Context) -> Result<Value> {
+    if !is_a_terminal() {
+        return inbox_snapshot(context);
+    }
+
+    let database = Database::open(context.paths.database())?;
+    let channel = crate::commands::only_channel(&database)?;
+    let (rows, now) = inbox_rows(&database, &channel.channel_id, &channel.local_name)?;
+
+    let mut screen = InboxScreen {
+        app: hrc_tui::InboxApp::new(channel.local_name.clone(), rows),
+        database,
+        channel_id: channel.channel_id.clone(),
+        channel_local_name: channel.local_name.clone(),
+        now,
+        reviewed: Vec::new(),
+    };
+
+    hrc_tui::run_ticking(&mut screen, INBOX_REFRESH).map_err(|source| CliError::Io {
+        action: "run the inbox side view",
+        source,
+    })?;
+
+    Ok(json!({
+        "status": "ok",
+        "pane": "inbox",
+        "channel": channel.local_name,
+        "pending": screen.app.pending(),
+        "reviewed": screen.reviewed,
+    }))
+}
+
+/// The message the review popup was opened for, if Herdr passed one.
+///
+/// Read from the environment Herdr set on this process alone, so it cannot
+/// come from another workspace, another popup, or a file a second Herdr
+/// session could reach. A value that is not a well-formed ULID is dropped
+/// rather than used: the popup then lists everything pending, which is the
+/// unfocused screen a person can still work from, not a wrong message
+/// (decision DEC-087).
+pub fn review_target() -> Option<String> {
+    review_target_from(std::env::var(hrc_herdr::REVIEW_TARGET_ENV).ok())
+}
+
+/// The checking half of [`review_target`], separated from the environment.
+///
+/// Reading a process environment variable in a test means mutating global
+/// state that every other test in the binary shares, which `unsafe_code =
+/// "forbid"` rules out here anyway. Splitting the decision from where the
+/// value came from lets the rule that matters — missing, empty, malformed
+/// and already-consumed all fail closed — be tested directly.
+fn review_target_from(value: Option<String>) -> Option<String> {
+    let target = value?;
+    hrc_protocol::is_ulid(&target).then_some(target)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_departed_destination_is_reported_by_the_name_the_person_saw() {
+        // The error is raised before the daemon is asked, so nothing is
+        // recorded and the message stays pending. What it must not do is name
+        // the pane: PRD section 23.4 keeps local topology local, and an error
+        // string is as public as any other output.
+        let gone = CliError::DestinationUnavailable {
+            destination: "reviewer".to_owned(),
+            reason: "it is no longer there",
+        };
+
+        let rendered = gone.to_string();
+        assert!(rendered.contains("reviewer"), "{rendered}");
+        assert!(
+            rendered.contains("still waiting in your inbox"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("w1:p"), "{rendered}");
+        assert_eq!(gone.code(), "destination_unavailable");
+    }
+
+    #[test]
+    fn an_unreachable_herdr_is_not_evidence_that_a_destination_vanished() {
+        // `departed` guards a race, and a status query that could not run is
+        // not the race happening. Refusing a decision a person already made
+        // because Herdr could not be asked would be the check doing more harm
+        // than the thing it guards against.
+        //
+        // This process is not running under Herdr, so `Host::connect` fails
+        // and the guard must wave the delivery through.
+        assert!(
+            super::departed("reviewer").is_none(),
+            "an unreachable host must not block a decision"
+        );
+    }
+
+    #[test]
+    fn a_review_target_that_is_not_a_ulid_opens_the_unfocused_list() {
+        // Everything that is not a well-formed identifier fails the same
+        // way, and failing means "list what is pending" rather than "review
+        // something else". A wrong body in a trusted popup is the one
+        // outcome this must never produce.
+        assert_eq!(
+            review_target_from(Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned())).as_deref(),
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+        );
+
+        for malformed in [
+            None,
+            Some(String::new()),
+            Some("  ".to_owned()),
+            Some("not-a-ulid".to_owned()),
+            // Long enough, wrong alphabet: `I`, `L`, `O` and `U` are not
+            // Crockford base32.
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FIU".to_owned()),
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FAV extra".to_owned()),
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FAV\nHRC_PASSPHRASE=x".to_owned()),
+        ] {
+            assert_eq!(
+                review_target_from(malformed.clone()),
+                None,
+                "{malformed:?} should not target a message"
+            );
+        }
+    }
 
     use std::process::Command as ProcessCommand;
 

@@ -22,15 +22,96 @@ pub struct LocalAgent {
     pane_id: String,
     /// The name the local human knows it by.
     label: String,
+    /// What `agent.prompt` is addressed to: the agent's unique live name
+    /// when it has one, and the pane it occupies otherwise.
+    ///
+    /// Local-only, for the same reason `pane_id` is. It is separate from
+    /// `pane_id` because Herdr resolves a named agent through its name even
+    /// after it moves between panes, and addressing the pane instead would
+    /// deliver to whatever occupies it now.
+    target: String,
+    /// The local workspace it belongs to, when Herdr said.
+    ///
+    /// Local-only. Shown so that two agents with the same name in different
+    /// workspaces are distinguishable on the confirmation.
+    workspace_id: Option<String>,
+    /// Whether this is the session the person is working in.
+    current: bool,
+    /// Whether Herdr says it can take input right now.
+    ready: bool,
 }
 
 impl LocalAgent {
     /// Registers a locally discovered agent.
+    ///
+    /// The pane doubles as the delivery target and the agent is assumed
+    /// ready, which is what a caller that knows nothing more can say. The
+    /// discovery path in [`crate::host`] fills the rest in from what Herdr
+    /// actually reported.
     pub fn new(pane_id: impl Into<String>, label: impl Into<String>) -> Self {
+        let pane_id = pane_id.into();
         Self {
-            pane_id: pane_id.into(),
+            target: pane_id.clone(),
+            pane_id,
             label: label.into(),
+            workspace_id: None,
+            current: false,
+            ready: true,
         }
+    }
+
+    /// Sets what `agent.prompt` is addressed to.
+    #[must_use]
+    pub fn with_target(mut self, target: impl Into<String>) -> Self {
+        self.target = target.into();
+        self
+    }
+
+    /// Records the local workspace this agent belongs to.
+    #[must_use]
+    pub fn in_workspace(mut self, workspace_id: Option<String>) -> Self {
+        self.workspace_id = workspace_id;
+        self
+    }
+
+    /// Marks this as the session the person is working in.
+    #[must_use]
+    pub fn as_current(mut self, current: bool) -> Self {
+        self.current = current;
+        self
+    }
+
+    /// Records whether Herdr says it can take input right now.
+    #[must_use]
+    pub fn when_ready(mut self, ready: bool) -> Self {
+        self.ready = ready;
+        self
+    }
+
+    /// What a local delivery is addressed to.
+    ///
+    /// Named for what it must not be used for, like [`Self::local_pane_id`].
+    pub fn local_target(&self) -> &str {
+        &self.target
+    }
+
+    /// The local workspace, for telling two same-named agents apart.
+    pub fn local_workspace_id(&self) -> Option<&str> {
+        self.workspace_id.as_deref()
+    }
+
+    /// Whether this is the session the person is working in.
+    pub fn is_current(&self) -> bool {
+        self.current
+    }
+
+    /// Whether Herdr said it can take input right now.
+    ///
+    /// A blocked or not-yet-interactive agent is still listed rather than
+    /// hidden, because a destination that silently disappears is harder to
+    /// understand than one that says why it cannot be chosen.
+    pub fn is_ready(&self) -> bool {
+        self.ready
     }
 
     /// The pane this agent occupies, for local delivery only.

@@ -1420,6 +1420,64 @@ impl Database {
             .map_err(Into::into)
     }
 
+    /// Records that a notification was raised, and says whether it is new.
+    ///
+    /// Returns `true` the first time a message-and-kind pair is seen and
+    /// `false` every time after, including after a restart — which is the
+    /// whole point. Deduplication held in a process that lives for one pane
+    /// render is no deduplication at all.
+    ///
+    /// One statement rather than a read and a write, so two panes refreshing
+    /// at the same moment cannot both decide they are the first.
+    /// `ON CONFLICT DO NOTHING` makes the insert the test: the row is
+    /// created and the notification is new, or the row was already there and
+    /// it is not.
+    pub fn record_notification(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        kind: &str,
+        now: &str,
+    ) -> Result<bool> {
+        let inserted = self.connection.execute(
+            "INSERT INTO notification (message_id, kind, channel_id, notified_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (message_id, kind) DO NOTHING",
+            params![message_id, kind, channel_id, now],
+        )?;
+
+        Ok(inserted == 1)
+    }
+
+    /// Marks every notification about a message as no longer outstanding.
+    ///
+    /// Called when a message is decided or expires. The row stays, carrying
+    /// the time it was resolved: a deleted row and a row that was never
+    /// written are indistinguishable, and telling them apart is what stops a
+    /// decided message being announced again.
+    pub fn resolve_notifications(&self, message_id: &str, now: &str) -> Result<usize> {
+        Ok(self.connection.execute(
+            "UPDATE notification SET resolved_at = ?2
+             WHERE message_id = ?1 AND resolved_at IS NULL",
+            params![message_id, now],
+        )?)
+    }
+
+    /// The notifications raised about a channel and not yet resolved.
+    ///
+    /// Returns `(message_id, kind)` pairs, oldest first.
+    pub fn outstanding_notifications(&self, channel_id: &str) -> Result<Vec<(String, String)>> {
+        let mut statement = self.connection.prepare(
+            "SELECT message_id, kind FROM notification
+             WHERE channel_id = ?1 AND resolved_at IS NULL
+             ORDER BY notified_at, message_id",
+        )?;
+        let rows =
+            statement.query_map(params![channel_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     /// Returns every body still owned by the trusted prompt gate.
     pub fn pending_inbound(&self) -> Result<Vec<PendingInbound>> {
         let mut statement = self.connection.prepare(

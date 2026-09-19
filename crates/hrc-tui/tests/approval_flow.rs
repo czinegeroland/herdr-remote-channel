@@ -43,6 +43,18 @@ fn view(sender: &str, kind: &str) -> AgentView {
     }
 }
 
+/// The destinations Herdr would have reported, as the screen receives them.
+fn destinations() -> Vec<hrc_herdr::LocalAgent> {
+    vec![
+        hrc_herdr::LocalAgent::new("w1:p1", "reviewer-pane")
+            .with_target("reviewer-pane")
+            .as_current(true),
+        hrc_herdr::LocalAgent::new("w2:p4", "builder")
+            .with_target("builder")
+            .in_workspace(Some("w2".to_owned())),
+    ]
+}
+
 fn app() -> App {
     App::new(
         vec![
@@ -57,7 +69,7 @@ fn app() -> App {
                 body: "a second message".into(),
             },
         ],
-        "reviewer-pane",
+        destinations(),
     )
 }
 
@@ -151,7 +163,8 @@ fn approval_takes_two_deliberate_presses() {
         outcome,
         Some(Outcome::DeliverToAgent {
             message_id: "msg-1".into(),
-            agent: "reviewer-pane".into()
+            agent: "reviewer-pane".into(),
+            target: "reviewer-pane".into(),
         })
     );
 }
@@ -211,6 +224,7 @@ fn every_decision_in_section_19_2_is_reachable() {
             Outcome::DeliverToAgent {
                 message_id: "msg-1".into(),
                 agent: "reviewer-pane".into(),
+                target: "reviewer-pane".into(),
             },
         ),
         (
@@ -307,7 +321,7 @@ fn control_c_leaves_from_anywhere_without_deciding() {
 
 #[test]
 fn an_empty_inbox_renders_and_decides_nothing() {
-    let mut app = App::new(Vec::new(), "reviewer-pane");
+    let mut app = App::new(Vec::new(), destinations());
 
     assert!(app.on_key(key(KeyCode::Enter)).is_none());
     assert!(app.on_key(key(KeyCode::Char('a'))).is_none());
@@ -335,7 +349,7 @@ fn a_wrapped_body_can_be_scrolled_to_the_end_and_reflows_after_resize() {
             view: view("Alice", "question"),
             body,
         }],
-        "reviewer-pane",
+        destinations(),
     );
     app.on_key(key(KeyCode::Enter));
 
@@ -417,4 +431,198 @@ fn a_release_cannot_confirm_a_proposed_decision() {
         }),
         "the proposal should have survived the release"
     );
+}
+
+#[test]
+fn the_current_session_is_the_default_choice_but_not_an_automatic_decision() {
+    // Preselecting where a delivery would go is not the same as deciding to
+    // deliver. The screen still opens with nothing revealed and nothing
+    // proposed, and reaching a delivery still takes Enter, `a` and `y`.
+    let app = app();
+
+    assert_eq!(
+        app.destination().map(hrc_herdr::LocalAgent::label),
+        Some("reviewer-pane")
+    );
+    assert!(app.destination().unwrap().is_current());
+    assert!(!app.is_revealed());
+    assert!(app.proposed().is_none());
+}
+
+#[test]
+fn where_it_goes_can_only_be_chosen_once_the_body_is_on_screen() {
+    // A destination is half of a delivery decision. The other half is having
+    // read what is being delivered, so the key does nothing before the
+    // reveal — the same rule that governs `a`, `i` and `d`.
+    let mut app = app();
+
+    assert!(app.on_key(key(KeyCode::Tab)).is_none());
+    assert_eq!(
+        app.destination().map(hrc_herdr::LocalAgent::label),
+        Some("reviewer-pane"),
+        "Tab should do nothing before the body is revealed"
+    );
+
+    app.on_key(key(KeyCode::Enter));
+    app.on_key(key(KeyCode::Tab));
+
+    assert_eq!(
+        app.destination().map(hrc_herdr::LocalAgent::label),
+        Some("builder")
+    );
+}
+
+#[test]
+fn delivery_is_addressed_to_the_destination_that_was_chosen() {
+    let mut app = app();
+    app.on_key(key(KeyCode::Enter));
+    app.on_key(key(KeyCode::Tab));
+    app.on_key(key(KeyCode::Char('a')));
+
+    assert_eq!(
+        app.on_key(key(KeyCode::Char('y'))),
+        Some(Outcome::DeliverToAgent {
+            message_id: "msg-1".into(),
+            // The audit log gets the label the person saw...
+            agent: "builder".into(),
+            // ...and the delivery gets the local target, which never leaves
+            // this machine (PRD section 23.4).
+            target: "builder".into(),
+        })
+    );
+}
+
+#[test]
+fn the_confirmation_names_the_exact_local_destination() {
+    // Two agents can carry one name in two workspaces. "Deliver to builder?"
+    // would then be a question with two answers.
+    let mut app = app();
+    app.on_key(key(KeyCode::Enter));
+    app.on_key(key(KeyCode::Tab));
+    app.on_key(key(KeyCode::Char('a')));
+
+    let prompt = &app.proposed().unwrap().prompt;
+    assert!(prompt.contains("Alice"), "{prompt}");
+    assert!(prompt.contains("builder"), "{prompt}");
+    assert!(prompt.contains("workspace w2"), "{prompt}");
+}
+
+#[test]
+fn changing_the_destination_withdraws_the_confirmation() {
+    // A confirmation names one exact destination. Once the destination
+    // changes it is a question about something else, and answering `y` to
+    // the old question would deliver somewhere the person never read.
+    let mut app = app();
+    app.on_key(key(KeyCode::Enter));
+    app.on_key(key(KeyCode::Char('a')));
+    assert_eq!(app.focus(), Focus::Confirm);
+
+    app.on_key(key(KeyCode::Tab));
+
+    assert!(app.proposed().is_none());
+    assert_ne!(app.focus(), Focus::Confirm);
+    assert!(
+        app.on_key(key(KeyCode::Char('y'))).is_none(),
+        "`y` must not deliver anything after the destination moved"
+    );
+}
+
+#[test]
+fn a_destination_that_cannot_take_input_is_not_proposed() {
+    // Herdr refuses a prompt to a blocked agent outright. Proposing anyway
+    // would put a confirmation in front of a person that could only fail
+    // after they answered it, leaving the message in a state neither chose.
+    let mut app = App::new(
+        vec![PendingItem {
+            message_id: "msg-1".into(),
+            view: view("Alice", "question"),
+            body: BODY.into(),
+        }],
+        vec![
+            hrc_herdr::LocalAgent::new("w1:p1", "busy")
+                .with_target("busy")
+                .as_current(true)
+                .when_ready(false),
+        ],
+    );
+
+    app.on_key(key(KeyCode::Enter));
+    assert!(app.on_key(key(KeyCode::Char('a'))).is_none());
+
+    assert!(app.proposed().is_none());
+    assert_ne!(app.focus(), Focus::Confirm);
+    assert!(
+        app.status().contains("cannot take input"),
+        "{}",
+        app.status()
+    );
+
+    // Keeping and declining are unaffected: they need no destination.
+    app.on_key(key(KeyCode::Char('i')));
+    assert_eq!(
+        app.on_key(key(KeyCode::Char('y'))),
+        Some(Outcome::KeepInInbox {
+            message_id: "msg-1".into()
+        })
+    );
+}
+
+#[test]
+fn with_no_destination_at_all_delivery_refuses_and_the_message_stays_pending() {
+    let mut app = App::new(
+        vec![PendingItem {
+            message_id: "msg-1".into(),
+            view: view("Alice", "question"),
+            body: BODY.into(),
+        }],
+        Vec::new(),
+    );
+
+    app.on_key(key(KeyCode::Enter));
+    assert!(app.on_key(key(KeyCode::Char('a'))).is_none());
+    assert!(app.proposed().is_none());
+
+    // And the screen says so rather than looking like a key that does
+    // nothing.
+    assert!(
+        app.status().contains("no local session"),
+        "{}",
+        app.status()
+    );
+    assert!(screen(&app).contains("no local session to deliver to"));
+}
+
+#[test]
+fn the_destination_is_on_screen_at_the_moment_the_delivery_key_is_pressed() {
+    let mut app = app();
+    app.on_key(key(KeyCode::Enter));
+
+    let rendered = screen(&app);
+    assert!(rendered.contains("delivers to"), "{rendered}");
+    assert!(rendered.contains("reviewer-pane"), "{rendered}");
+}
+
+#[test]
+fn a_local_pane_identifier_never_reaches_the_screen() {
+    // PRD section 4 constraint 8 and section 23.4. The pane is local
+    // topology; the label is what a person chose. Only the label is drawn,
+    // and only the label goes in the decision record.
+    let mut app = App::new(
+        vec![PendingItem {
+            message_id: "msg-1".into(),
+            view: view("Alice", "question"),
+            body: BODY.into(),
+        }],
+        vec![
+            hrc_herdr::LocalAgent::new("w9:p42", "reviewer")
+                .with_target("reviewer")
+                .as_current(true),
+        ],
+    );
+
+    app.on_key(key(KeyCode::Enter));
+    app.on_key(key(KeyCode::Char('a')));
+
+    assert!(!screen(&app).contains("w9:p42"));
+    assert!(!app.proposed().unwrap().prompt.contains("w9:p42"));
 }

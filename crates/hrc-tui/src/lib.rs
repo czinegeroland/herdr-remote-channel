@@ -22,6 +22,7 @@
 pub mod app;
 pub mod compose;
 pub mod context;
+pub mod inbox;
 pub mod join;
 pub mod members;
 pub mod passphrase;
@@ -29,15 +30,24 @@ pub mod run;
 pub mod setup;
 pub mod view;
 
+// Re-exported so a [`Screen`] can be implemented outside this crate. The
+// trait's methods name a `KeyEvent` and a `Frame`, and a crate that could not
+// name those types could not implement it — which would push every screen
+// back in here, including the ones that need a database handle this crate
+// deliberately does not have.
+pub use crossterm;
+pub use ratatui;
+
 pub use app::{App, Focus, Outcome, PendingItem};
 pub use compose::{ComposeApp, ComposeKind, ComposeOutcome, Recipient};
 pub use context::{ContextApp, ContextDraft, ContextOutcome, ContextPreview};
+pub use inbox::{InboxApp, InboxFilter, InboxOutcome};
 pub use join::{JoinApp, JoinOutcome, PendingJoin};
 pub use members::{Member, MemberDevice, MemberOutcome, MembersApp};
 pub use passphrase::{PassphraseApp, PassphraseOutcome};
-pub use run::{Screen, run};
+pub use run::{Screen, Ticking, run, run_ticking};
 pub use setup::{SetupApp, SetupOutcome, SetupStep};
 pub use view::{
-    render, render_compose, render_context, render_joins, render_members, render_passphrase,
-    render_setup,
+    render, render_compose, render_context, render_inbox, render_joins, render_members,
+    render_passphrase, render_setup,
 };

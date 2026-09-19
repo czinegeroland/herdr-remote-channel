@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 crossterm = { workspace = true }
 hrc-core = { workspace = true }
+hrc-herdr = { workspace = true }
 hrc-protocol = { workspace = true }
 ratatui = { workspace = true }
 

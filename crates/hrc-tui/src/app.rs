@@ -8,6 +8,7 @@ use std::cell::Cell;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use hrc_core::gate::AgentView;
+use hrc_herdr::LocalAgent;
 
 /// One entry awaiting a human decision.
 ///
@@ -46,8 +47,17 @@ pub enum Outcome {
     DeliverToAgent {
         /// The message.
         message_id: String,
-        /// The agent the human picked.
+        /// The agent the human picked, as they saw it named.
+        ///
+        /// This is what the decision record carries, and a decision record
+        /// can be read by an auditor — so it is the human-chosen label and
+        /// never the local pane (PRD section 23.4).
         agent: String,
+        /// What a local delivery is addressed to.
+        ///
+        /// Local topology: an agent name or a pane. It never leaves this
+        /// machine and is not what the audit log records.
+        target: String,
     },
     /// Keep it in the human inbox.
     KeepInInbox {
@@ -62,6 +72,10 @@ pub enum Outcome {
     /// Leave the screen without deciding anything.
     Quit,
 }
+
+/// What the keys do once a body is on screen.
+const KEYS_REVEALED: &str =
+    "j/k/PgUp/PgDn: scroll   Tab: where to   a: deliver   i: inbox   d: decline   Esc: hide";
 
 /// A decision awaiting confirmation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,8 +94,14 @@ pub struct App {
     revealed: bool,
     focus: Focus,
     proposed: Option<Proposed>,
-    /// The agent a delivery would go to, chosen locally.
-    agent: String,
+    /// Every local place a delivery could go, enumerated by Herdr.
+    ///
+    /// Not a single fixed string any more. A person working in two
+    /// workspaces has two answers to "where should this go", and picking for
+    /// them was the screen deciding something only they can.
+    destinations: Vec<LocalAgent>,
+    /// Which of them is selected.
+    destination: usize,
     body_scroll: Cell<u16>,
     body_page_rows: Cell<u16>,
     body_max_scroll: Cell<u16>,
@@ -94,14 +114,19 @@ impl App {
     /// Nothing is revealed and nothing is proposed. A screen that opened with
     /// a body on display, or with an approval preselected, would make the
     /// next key press consequential before the human had read anything.
-    pub fn new(items: Vec<PendingItem>, agent: impl Into<String>) -> Self {
+    pub fn new(items: Vec<PendingItem>, destinations: Vec<LocalAgent>) -> Self {
         Self {
             items,
             selected: 0,
             revealed: false,
             focus: Focus::List,
             proposed: None,
-            agent: agent.into(),
+            // Position zero is the session the person is working in, which
+            // the discovery path sorts to the front. Preselecting it is not
+            // deciding: nothing is proposed, nothing is revealed, and
+            // delivering still takes three deliberate keys.
+            destinations,
+            destination: 0,
             body_scroll: Cell::new(0),
             body_page_rows: Cell::new(1),
             body_max_scroll: Cell::new(0),
@@ -142,6 +167,33 @@ impl App {
     /// The line shown to the human explaining what to do next.
     pub fn status(&self) -> &str {
         &self.status
+    }
+
+    /// The local destinations a delivery could go to.
+    pub fn destinations(&self) -> &[LocalAgent] {
+        &self.destinations
+    }
+
+    /// The destination a delivery would go to right now.
+    pub fn destination(&self) -> Option<&LocalAgent> {
+        self.destinations.get(self.destination)
+    }
+
+    /// Where the destination selection sits.
+    pub fn destination_index(&self) -> usize {
+        self.destination
+    }
+
+    /// How a destination reads to the person choosing it.
+    ///
+    /// The workspace is included when Herdr gave one, because two agents in
+    /// two workspaces can carry the same name and the confirmation has to
+    /// name the exact one.
+    pub fn destination_label(agent: &LocalAgent) -> String {
+        match agent.local_workspace_id() {
+            Some(workspace) => format!("{} in workspace {workspace}", agent.label()),
+            None => agent.label().to_owned(),
+        }
     }
 
     /// The first wrapped body row currently shown.
@@ -241,8 +293,20 @@ impl App {
                     self.revealed = true;
                     self.focus = Focus::Body;
                     self.body_scroll.set(0);
-                    self.status = "j/k/PgUp/PgDn: scroll   Up/Down: select   a: deliver   i: inbox   d: decline   Esc: hide".into();
+                    self.status = KEYS_REVEALED.into();
                 }
+                None
+            }
+
+            // Choosing where it goes. Only once the body is on screen,
+            // because a destination is half of a delivery decision and the
+            // other half is having read what is being delivered.
+            KeyCode::Tab if self.revealed => {
+                self.cycle_destination(1);
+                None
+            }
+            KeyCode::BackTab if self.revealed => {
+                self.cycle_destination(-1);
                 None
             }
 
@@ -250,18 +314,15 @@ impl App {
             // human approving something they have not been shown is the
             // failure this whole screen exists to prevent.
             KeyCode::Char('a') if self.revealed => {
-                self.propose(|message_id, agent| Outcome::DeliverToAgent {
-                    message_id,
-                    agent: agent.to_owned(),
-                });
+                self.propose_delivery();
                 None
             }
             KeyCode::Char('i') if self.revealed => {
-                self.propose(|message_id, _| Outcome::KeepInInbox { message_id });
+                self.propose(|message_id| Outcome::KeepInInbox { message_id });
                 None
             }
             KeyCode::Char('d') if self.revealed => {
-                self.propose(|message_id, _| Outcome::Decline { message_id });
+                self.propose(|message_id| Outcome::Decline { message_id });
                 None
             }
 
@@ -298,13 +359,101 @@ impl App {
             .set((current + delta).clamp(0, maximum) as u16);
     }
 
-    /// Proposes a decision about the selected item.
-    fn propose(&mut self, build: impl Fn(String, &str) -> Outcome) {
+    /// Moves to the next or previous destination.
+    ///
+    /// Any pending confirmation is withdrawn. A confirmation names one exact
+    /// destination, so a changed destination makes it a question about
+    /// something else — and answering `y` to the old question would deliver
+    /// somewhere the person did not read.
+    fn cycle_destination(&mut self, delta: isize) {
+        if self.destinations.len() < 2 {
+            if self.destinations.is_empty() {
+                self.status = "Herdr reported no local session to deliver to.".into();
+            }
+            return;
+        }
+
+        let length = self.destinations.len();
+        self.destination = if delta < 0 {
+            (self.destination + length - 1) % length
+        } else {
+            (self.destination + 1) % length
+        };
+
+        self.proposed = None;
+        self.focus = Focus::Body;
+
+        let Some(destination) = self.destination() else {
+            return;
+        };
+
+        self.status = if destination.is_ready() {
+            format!(
+                "Delivery would go to {}.",
+                Self::destination_label(destination)
+            )
+        } else {
+            format!(
+                "{} cannot take input right now.",
+                Self::destination_label(destination)
+            )
+        };
+    }
+
+    /// Proposes delivering the revealed message to the chosen destination.
+    ///
+    /// Refuses rather than proposing when there is nowhere to deliver, or
+    /// when Herdr says the chosen destination cannot take input. Proposing
+    /// anyway would put a confirmation in front of a person that could only
+    /// fail after they answered it, and the message would be left in a state
+    /// neither of them chose.
+    fn propose_delivery(&mut self) {
+        let Some(item) = self.items.get(self.selected) else {
+            return;
+        };
+        let sender = item.view.sender_local_name.clone();
+        let message_id = item.message_id.clone();
+
+        let Some(destination) = self.destinations.get(self.destination) else {
+            self.status =
+                "There is no local session to deliver to. Keep it in your inbox or decline it."
+                    .into();
+            return;
+        };
+
+        if !destination.is_ready() {
+            self.status = format!(
+                "{} cannot take input right now. Tab for another, or keep it in your inbox.",
+                Self::destination_label(destination)
+            );
+            return;
+        }
+
+        let label = destination.label().to_owned();
+        let prompt = format!(
+            "Deliver this message from {sender} to {}? [y/N]",
+            Self::destination_label(destination)
+        );
+
+        self.status = prompt.clone();
+        self.proposed = Some(Proposed {
+            outcome: Outcome::DeliverToAgent {
+                message_id,
+                agent: label,
+                target: destination.local_target().to_owned(),
+            },
+            prompt,
+        });
+        self.focus = Focus::Confirm;
+    }
+
+    /// Proposes a decision that needs no destination.
+    fn propose(&mut self, build: impl Fn(String) -> Outcome) {
         let Some(item) = self.items.get(self.selected) else {
             return;
         };
 
-        let outcome = build(item.message_id.clone(), &self.agent);
+        let outcome = build(item.message_id.clone());
         let prompt = match &outcome {
             Outcome::DeliverToAgent { agent, .. } => format!(
                 "Deliver this message from {} to {agent}? [y/N]",

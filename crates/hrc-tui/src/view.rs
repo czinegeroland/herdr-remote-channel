@@ -87,6 +87,23 @@ fn render_body(frame: &mut Frame<'_>, app: &App, area: Rect) {
         _ => ("Message body", "No message selected.".to_owned()),
     };
 
+    // The destination rides in the title rather than in a fourth pane. It
+    // has to be visible at the moment a person presses `a`, and that moment
+    // is spent reading the body — a line below the status would be the one
+    // part of the screen their eye is furthest from.
+    let title = match (app.is_revealed(), app.destination()) {
+        (true, Some(destination)) => {
+            let where_to = App::destination_label(destination);
+            if destination.is_ready() {
+                format!("{title} — delivers to {where_to} (Tab to change)")
+            } else {
+                format!("{title} — {where_to} CANNOT TAKE INPUT (Tab to change)")
+            }
+        }
+        (true, None) => format!("{title} — no local session to deliver to"),
+        (false, _) => title.to_owned(),
+    };
+
     let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(area);
     let lines = wrapped_lines(&text, inner.width);
@@ -675,4 +692,115 @@ pub fn render_members(frame: &mut Frame<'_>, app: &crate::members::MembersApp) {
             .wrap(Wrap { trim: false }),
         areas[2],
     );
+}
+
+/// Draws the metadata-only inbox side view.
+///
+/// `now` is the current RFC 3339 UTC time, passed in rather than read here
+/// so the rendered buffer is a pure function of its inputs and the age column
+/// can be asserted in a test.
+///
+/// Every string that reaches the buffer is either a fixed local word, a
+/// locally resolved name, a validated identifier, or a number. Nothing on
+/// this screen is derived from a body, a subject, an attachment name, or any
+/// other field a sender chose — the row type does not carry one to derive it
+/// from.
+pub fn render_inbox(frame: &mut Frame<'_>, app: &crate::inbox::InboxApp, now: &str) {
+    let areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(2),
+        ])
+        .split(frame.area());
+
+    let visible = app.visible();
+
+    frame.render_widget(
+        Paragraph::new(Line::from(format!(
+            "{} pending - {} shown{}",
+            app.pending(),
+            visible.len(),
+            if app.stale() { " - STALE" } else { "" },
+        ))),
+        areas[0],
+    );
+
+    // A split can be one column wide. Every row is built to the width the
+    // pane actually has rather than to a fixed layout, so a narrow pane loses
+    // the columns on the right instead of wrapping each message across three
+    // lines and making the list unreadable.
+    let width = areas[1].width.saturating_sub(2) as usize;
+
+    let items: Vec<ListItem<'_>> = if visible.is_empty() {
+        vec![ListItem::new(Line::from(match app.filter() {
+            crate::inbox::InboxFilter::All => "Nothing has arrived yet.",
+            _ => "No messages match this filter.",
+        }))]
+    } else {
+        visible
+            .iter()
+            .map(|row| {
+                let selected = app.selected_message_id() == Some(row.message_id.as_str());
+                let marker = if selected { "> " } else { "  " };
+
+                let line = format!(
+                    "{marker}{} {} {} {}",
+                    clamp(&row.sender_local_name, 10),
+                    clamp(&row.kind, 8),
+                    clamp(&crate::inbox::age(&row.arrival_at, now), 4),
+                    row.disposition.as_str(),
+                );
+
+                let style = if selected {
+                    Style::default().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+
+                ListItem::new(Line::from(Span::styled(clamp(&line, width), style)))
+            })
+            .collect()
+    };
+
+    frame.render_widget(
+        List::new(items).block(Block::default().borders(Borders::ALL).title(format!(
+            "{} ({})",
+            app.channel_local_name(),
+            app.filter().as_str()
+        ))),
+        areas[1],
+    );
+
+    frame.render_widget(
+        Paragraph::new(app.status().to_owned()).wrap(Wrap { trim: false }),
+        areas[2],
+    );
+}
+
+/// Pads or truncates to an exact display width.
+///
+/// Truncation rather than wrapping, because a wrapped row in a narrow split
+/// would push the rows below it out of alignment and make the list harder to
+/// scan than a shortened name is to read. `chars` rather than bytes so a
+/// multi-byte name is cut at a character boundary.
+fn clamp(value: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let characters: Vec<char> = value.chars().collect();
+
+    if characters.len() <= width {
+        let mut padded: String = characters.into_iter().collect();
+        padded.extend(std::iter::repeat_n(' ', width - padded.chars().count()));
+        return padded;
+    }
+
+    if width == 1 {
+        return "…".to_owned();
+    }
+
+    characters[..width - 1].iter().collect::<String>() + "…"
 }

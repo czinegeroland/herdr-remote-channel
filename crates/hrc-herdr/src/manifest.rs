@@ -24,6 +24,23 @@ use serde::Serialize;
 /// The npm package that carries the executable.
 pub const PACKAGE: &str = "herdr-remote-channel";
 
+/// The plugin identifier Herdr registers this plugin under.
+///
+/// Named here rather than written inline in the manifest, because the inbox
+/// pane has to name the plugin back to Herdr when it asks for the review
+/// popup. Two spellings of one id would mean an inbox that silently fails to
+/// open anything.
+pub const PLUGIN_ID: &str = "herdr-remote-channel";
+
+/// The environment variable that carries the message the review popup opens.
+///
+/// Herdr's `plugin pane open --env KEY=VALUE` sets it on the launched
+/// process, so the value reaches exactly that popup and no other pane, no
+/// other workspace, and nothing that reads a file. It carries an identifier,
+/// never a body: a body in an environment variable would be readable from
+/// the process table of the machine, which is the opposite of quarantine.
+pub const REVIEW_TARGET_ENV: &str = "HRC_REVIEW_MESSAGE";
+
 /// The GitHub repository the agent skill is installed from.
 ///
 /// `skills add` takes `owner/repo` and has no flag for a tag or a commit, so
@@ -213,6 +230,61 @@ fn skill_install(prefix: &[&str]) -> Vec<String> {
     command
 }
 
+/// The argv that asks Herdr to open the review popup on one message.
+///
+/// Run against `HERDR_BIN_PATH`, which Herdr injects into every plugin
+/// command and which resolves the same way on a Unix socket and a Windows
+/// named pipe. This is the documented host API for opening a registered pane
+/// with a local-only argument (decision DEC-086); the `github-link-preview`
+/// example plugin routes a clicked URL into a split the same way.
+///
+/// `message_id` must already be a well-formed ULID. The caller checks, and
+/// opens the unfocused pending list when it is not, so the only thing this
+/// puts on a host command line is 26 characters of Crockford base32
+/// (decision DEC-087).
+pub fn open_review(message_id: &str) -> Vec<String> {
+    [
+        "plugin",
+        "pane",
+        "open",
+        "--plugin",
+        PLUGIN_ID,
+        "--entrypoint",
+        crate::pane::Pane::Review.as_str(),
+        "--placement",
+        "popup",
+        "--focus",
+        "--env",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .chain(std::iter::once(format!("{REVIEW_TARGET_ENV}={message_id}")))
+    .collect()
+}
+
+/// The argv that asks Herdr to open the review popup with nothing selected.
+///
+/// The fallback when a row's identifier cannot be handed to the host. A
+/// person still reaches every pending message from it, which is the failure
+/// this code wants: an unfocused list rather than the wrong body.
+pub fn open_review_list() -> Vec<String> {
+    [
+        "plugin",
+        "pane",
+        "open",
+        "--plugin",
+        PLUGIN_ID,
+        "--entrypoint",
+        crate::pane::Pane::Review.as_str(),
+        "--placement",
+        "popup",
+        "--focus",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
 /// The argv for one `hrc herdr ...` entry point.
 fn invoke(arguments: &[&str]) -> Vec<String> {
     let mut command = vec!["node".to_owned(), LAUNCHER.to_owned(), "herdr".to_owned()];
@@ -237,7 +309,7 @@ fn pane_title(pane: crate::pane::Pane) -> String {
 /// The manifest this build advertises.
 pub fn manifest() -> Manifest {
     Manifest {
-        id: "herdr-remote-channel".to_owned(),
+        id: PLUGIN_ID.to_owned(),
         name: "Herdr Remote Channel".to_owned(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
         min_herdr_version: MIN_HERDR_VERSION.to_owned(),

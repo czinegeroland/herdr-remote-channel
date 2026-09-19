@@ -198,6 +198,52 @@ if printf '%s' "$inbox" | grep -q "$note"; then
 fi
 ok "message $message_id is present and its body is not"
 
+step "the Herdr inbox pane offers the row a person would select"
+# The pane a person keeps open is interactive on a terminal and the same rows
+# as JSON otherwise, so this drives the half a script can reach: that the row
+# carries the identifier the side view selects and targets review by, that it
+# reports a disposition, and that neither the rows nor the notifications
+# disclose anything nobody approved.
+pane="$(as "$bob" herdr pane inbox --json)"
+pane_id="$(printf '%s' "$pane" | json '["rows"][0]["message_id"]')"
+[ "$pane_id" = "$message_id" ] \
+    || die "the pane row does not name the message it is about: $pane"
+pane_state="$(printf '%s' "$pane" | json '["rows"][0]["disposition"]')"
+[ "$pane_state" = "pending" ] \
+    || die "a quarantined message should read as pending, not $pane_state"
+if printf '%s' "$pane" | grep -q "$note"; then
+    die "the Herdr inbox pane disclosed a body nobody approved"
+fi
+ok "the pane row targets $pane_id and is $pane_state"
+
+step "a note is not announced, and a question is announced once"
+# Section 23.3 lists what notifies. A note is not on that list: it is not
+# urgent, and interrupting someone over one is the behaviour that makes people
+# turn notifications off. A question is on the list.
+#
+# The second read is the point of the durable ledger. The side view reloads
+# once a second and a plugin pane process lives for one render, so "already
+# announced" has to survive both — reading the pane twice must announce a
+# message once.
+quiet="$(printf '%s' "$pane" | json '["notifications"]')"
+[ "$quiet" = "[]" ] || die "a note should not notify: $quiet"
+
+question="does the notification fire exactly once"
+as "$alice" ask "$bob_principal" "$question" --json >/dev/null || die "ask failed"
+as "$alice" sync --once --json >/dev/null
+as "$bob" sync --once --json >/dev/null
+
+announced="$(as "$bob" herdr pane inbox --json | json '["notifications"]')"
+[ "$announced" != "[]" ] || die "a question raised nothing: $announced"
+if printf '%s' "$announced" | grep -q "$question"; then
+    die "a notification carried the message text"
+fi
+
+again="$(as "$bob" herdr pane inbox --json | json '["notifications"]')"
+[ "$again" = "[]" ] \
+    || die "reading the pane a second time announced the same message again: $again"
+ok "announced once: $announced"
+
 step "an agent cannot read the body before a human releases it"
 start_daemon "$bob"
 if python3 "$here/trusted-call.py" "$bob/run/hrc-agent.sock" show_approved \

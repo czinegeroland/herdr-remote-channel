@@ -1255,6 +1255,7 @@ dependencies = [
  "hrc-transport",
  "hrc-transport-git",
  "hrc-tui",
+ "interprocess",
  "predicates",
  "secrecy",
  "serde_json",
@@ -1371,6 +1372,7 @@ version = "0.2.3"
 dependencies = [
  "crossterm",
  "hrc-core",
+ "hrc-herdr",
  "hrc-protocol",
  "ratatui",
 ]

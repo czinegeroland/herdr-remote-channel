@@ -23,6 +23,7 @@ hrc-storage = { workspace = true }
 hrc-tui = { workspace = true }
 hrc-transport = { workspace = true }
 hrc-transport-git = { workspace = true }
+interprocess = { workspace = true }
 secrecy = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

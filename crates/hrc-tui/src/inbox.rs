@@ -1,0 +1,413 @@
+//! The metadata-only inbox side view.
+//!
+//! This is the only long-lived surface the plugin draws, and it is the one
+//! that must never show a body. Herdr keeps it as a split, so it sits in the
+//! tiled layout while a person works; anything visible in it is visible for
+//! as long as that split is open, to anyone who can see the screen and to
+//! any agent sharing the workspace.
+//!
+//! So the separation this module enforces is not a convenience. [`InboxApp`]
+//! holds [`hrc_herdr::InboxRow`]s, which carry the closed metadata set of PRD
+//! section 19.1 and nothing else, and its outcome type has exactly two
+//! variants: open the trusted review popup for one message, or leave. There
+//! is no key that reveals, approves, declines, or delivers, and no variant
+//! that could carry a decision — not because the screen declines to offer
+//! one, but because [`InboxOutcome`] cannot express one. Revealing a body
+//! stays with `crate::app::App`, behind a popup, where the pane identity
+//! itself tells a reviewer that remote content may be on screen.
+//!
+//! Selection is tracked by message identifier rather than by row index. The
+//! side view reloads while it is open, and a reload may insert a new arrival,
+//! drop an expired row, or reorder what is left; an index would then point at
+//! a different message than the one the person was looking at, and `Enter`
+//! would open the wrong body.
+
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use hrc_herdr::{InboxDisposition, InboxRow};
+
+/// Which rows the side view is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboxFilter {
+    /// Only rows still awaiting a human decision.
+    Pending,
+    /// Only rows this installation has not opened yet.
+    Unread,
+    /// Everything the channel holds.
+    All,
+}
+
+impl InboxFilter {
+    /// The fixed local word shown in the title.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            InboxFilter::Pending => "pending",
+            InboxFilter::Unread => "unread",
+            InboxFilter::All => "all",
+        }
+    }
+
+    /// Whether a row belongs in this filter.
+    fn admits(self, row: &InboxRow) -> bool {
+        match self {
+            InboxFilter::Pending => row.disposition == InboxDisposition::Pending,
+            // Durable read state is not recorded yet, so "unread" is defined
+            // as what has not been decided and has not expired. Saying that
+            // plainly beats inventing a read flag the database cannot back:
+            // the transition that marks a row read has to be written down in
+            // the PRD before a surface can claim to know it (section 23.2).
+            InboxFilter::Unread => matches!(
+                row.disposition,
+                InboxDisposition::Pending | InboxDisposition::Unsupported
+            ),
+            InboxFilter::All => true,
+        }
+    }
+}
+
+/// What the side view can ask for.
+///
+/// Two variants, and neither is a decision. This type is the security
+/// boundary of the pane: a reviewer can read it and know that no sequence of
+/// key presses in the inbox can approve, decline, reveal, or deliver
+/// anything, without reading the key handler at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InboxOutcome {
+    /// Open the trusted review popup, focused on one message.
+    Review {
+        /// The stored identifier of the selected row.
+        message_id: String,
+    },
+    /// Close the side view.
+    Quit,
+}
+
+/// The default status line, repeated after a transient message clears.
+const KEYS: &str = "Enter: review   R: refresh   p/u/a: filter   q: close   ?: keys";
+
+/// Shown between asking for a reload and the reload finishing.
+const REFRESHING: &str = "Refreshing...";
+
+/// The age column for a row whose arrival time this build cannot parse.
+///
+/// `arrival_at` is written by this installation through
+/// `Database::utc_now`, so a value that does not parse is a local fault
+/// rather than sender-chosen text. It still gets a fixed label instead of
+/// being printed raw, because the rule the side view keeps is about what
+/// reaches the screen, not about who is at fault for it.
+const UNKNOWN_AGE: &str = "  ?";
+
+/// How long ago a row arrived, in the three characters the column has.
+///
+/// `arrival_at` and `now` are the fixed `YYYY-MM-DDTHH:MM:SSZ` shape that
+/// `Database::utc_now` writes. Parsed by position rather than with a
+/// date-time crate: the shape is this project's own, the arithmetic is
+/// days-from-civil, and adding a dependency to print `2m` in a sidebar would
+/// be the larger change.
+pub fn age(arrival_at: &str, now: &str) -> String {
+    let (Some(arrived), Some(current)) = (epoch_seconds(arrival_at), epoch_seconds(now)) else {
+        return UNKNOWN_AGE.to_owned();
+    };
+
+    // A row that claims to have arrived in the future is a clock that moved,
+    // not a negative age.
+    let seconds = current.saturating_sub(arrived).max(0);
+
+    match seconds {
+        0..=59 => format!("{seconds}s"),
+        60..=3599 => format!("{}m", seconds / 60),
+        3600..=86_399 => format!("{}h", seconds / 3600),
+        _ => format!("{}d", seconds / 86_400),
+    }
+}
+
+/// Seconds since the Unix epoch for one `YYYY-MM-DDTHH:MM:SSZ` timestamp.
+fn epoch_seconds(timestamp: &str) -> Option<i64> {
+    let bytes = timestamp.as_bytes();
+    if bytes.len() != 20 || bytes[4] != b'-' || bytes[10] != b'T' || bytes[19] != b'Z' {
+        return None;
+    }
+
+    let field = |from: usize, to: usize| timestamp.get(from..to)?.parse::<i64>().ok();
+
+    let (year, month, day) = (field(0, 4)?, field(5, 7)?, field(8, 10)?);
+    let (hour, minute, second) = (field(11, 13)?, field(14, 16)?, field(17, 19)?);
+
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+
+    Some(days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second)
+}
+
+/// Days since 1970-01-01 for a proleptic Gregorian date.
+///
+/// Howard Hinnant's `days_from_civil`, which is the standard way to do this
+/// without a calendar library and is exact for every year this code will
+/// ever see.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// The inbox side view.
+#[derive(Debug, Clone)]
+pub struct InboxApp {
+    rows: Vec<InboxRow>,
+    selected_message_id: Option<String>,
+    filter: InboxFilter,
+    status: String,
+    channel_local_name: String,
+    /// Set when the last reload failed, so the rows on screen can be labelled
+    /// as stale without being thrown away.
+    stale: bool,
+    /// Set by the refresh key and cleared by the runner that performs it.
+    refresh_requested: bool,
+}
+
+impl InboxApp {
+    /// Builds the side view over a first snapshot.
+    pub fn new(channel_local_name: impl Into<String>, rows: Vec<InboxRow>) -> Self {
+        let mut app = Self {
+            rows,
+            selected_message_id: None,
+            filter: InboxFilter::Pending,
+            status: KEYS.to_owned(),
+            channel_local_name: channel_local_name.into(),
+            stale: false,
+            refresh_requested: false,
+        };
+        app.settle_selection(None);
+        app
+    }
+
+    /// The rows the current filter admits, in order.
+    pub fn visible(&self) -> Vec<&InboxRow> {
+        self.rows
+            .iter()
+            .filter(|row| self.filter.admits(row))
+            .collect()
+    }
+
+    /// The selected row, if the filter still shows one.
+    pub fn selected(&self) -> Option<&InboxRow> {
+        let selected = self.selected_message_id.as_deref()?;
+        self.visible()
+            .into_iter()
+            .find(|row| row.message_id == selected)
+    }
+
+    /// The stored identifier of the selected row.
+    pub fn selected_message_id(&self) -> Option<&str> {
+        self.selected().map(|row| row.message_id.as_str())
+    }
+
+    /// Which rows are on show.
+    pub fn filter(&self) -> InboxFilter {
+        self.filter
+    }
+
+    /// The channel this side view belongs to.
+    pub fn channel_local_name(&self) -> &str {
+        &self.channel_local_name
+    }
+
+    /// The line telling the human what to do next.
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+
+    /// Whether the rows on screen are from a reload that then failed.
+    pub fn stale(&self) -> bool {
+        self.stale
+    }
+
+    /// How many rows still await a human decision, across every filter.
+    pub fn pending(&self) -> usize {
+        self.rows
+            .iter()
+            .filter(|row| row.disposition == InboxDisposition::Pending)
+            .count()
+    }
+
+    /// Replaces the rows with a fresh snapshot, keeping the selection.
+    ///
+    /// The selected message is looked up again by identifier. If it is still
+    /// there it stays selected wherever it moved to; if it is gone — decided
+    /// elsewhere, expired, filtered out — the nearest row at or after its old
+    /// position takes the selection, which is what a person reaching for the
+    /// next item expects and is deterministic rather than "whatever index 0
+    /// now holds".
+    pub fn refresh(&mut self, rows: Vec<InboxRow>) {
+        let previous = self.visible_position();
+        self.rows = rows;
+        self.stale = false;
+        self.refresh_requested = false;
+        if self.status == REFRESHING {
+            self.status = KEYS.to_owned();
+        }
+        self.settle_selection(previous);
+    }
+
+    /// Reports that a reload failed, keeping the last good rows on screen.
+    ///
+    /// An empty inbox and an inbox that could not be read look identical if
+    /// the failure is swallowed, and they mean opposite things. The rows
+    /// stay, the status line says what happened, and the title says the rows
+    /// are stale.
+    pub fn refresh_failed(&mut self, reason: impl Into<String>) {
+        self.stale = true;
+        self.refresh_requested = false;
+        self.status = format!(
+            "Refresh failed: {}. Showing the last rows read.",
+            reason.into()
+        );
+    }
+
+    /// Handles one key press.
+    pub fn on_key(&mut self, key: KeyEvent) -> Option<InboxOutcome> {
+        // Windows delivers a release event for every press. Acting on both
+        // would move the selection twice per key and, once `Enter` opens a
+        // popup, would open it twice.
+        if key.kind != KeyEventKind::Press {
+            return None;
+        }
+
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            return Some(InboxOutcome::Quit);
+        }
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => Some(InboxOutcome::Quit),
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.move_selection(1);
+                None
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.move_selection(-1);
+                None
+            }
+            KeyCode::Char('p') => {
+                self.set_filter(InboxFilter::Pending);
+                None
+            }
+            KeyCode::Char('u') => {
+                self.set_filter(InboxFilter::Unread);
+                None
+            }
+            KeyCode::Char('a') => {
+                self.set_filter(InboxFilter::All);
+                None
+            }
+            KeyCode::Char('R') | KeyCode::Char('r') => {
+                // The reload itself belongs to the caller, which owns the
+                // database handle. This only records that one was asked for.
+                self.refresh_requested = true;
+                self.status = REFRESHING.to_owned();
+                None
+            }
+            KeyCode::Char('?') => {
+                self.status = KEYS.to_owned();
+                None
+            }
+            KeyCode::Enter => match self.selected_message_id() {
+                Some(message_id) => Some(InboxOutcome::Review {
+                    message_id: message_id.to_owned(),
+                }),
+                None => {
+                    self.status = "Nothing selected.".to_owned();
+                    None
+                }
+            },
+            _ => None,
+        }
+    }
+
+    /// Whether a key press asked for a reload that has not happened yet.
+    ///
+    /// Read by the runner after `on_key` returns `None`, so that the reload
+    /// happens where the database handle lives rather than in here.
+    pub fn refresh_requested(&self) -> bool {
+        self.refresh_requested
+    }
+
+    /// Changes which rows are shown, keeping the selection when it survives.
+    fn set_filter(&mut self, filter: InboxFilter) {
+        if self.filter == filter {
+            return;
+        }
+        let previous = self.visible_position();
+        self.filter = filter;
+        self.status = KEYS.to_owned();
+        self.settle_selection(previous);
+    }
+
+    /// Where the selected row sits in the visible list right now.
+    fn visible_position(&self) -> Option<usize> {
+        let selected = self.selected_message_id.as_deref()?;
+        self.visible()
+            .iter()
+            .position(|row| row.message_id == selected)
+    }
+
+    /// Puts the selection on a row that exists.
+    ///
+    /// `fallback` is where the previously selected row used to sit. When it
+    /// is gone, the row now at that position takes the selection, and the
+    /// last row when the list shrank past it.
+    fn settle_selection(&mut self, fallback: Option<usize>) {
+        let visible: Vec<String> = self
+            .visible()
+            .into_iter()
+            .map(|row| row.message_id.clone())
+            .collect();
+
+        if visible.is_empty() {
+            self.selected_message_id = None;
+            return;
+        }
+
+        if let Some(selected) = self.selected_message_id.as_deref()
+            && visible.iter().any(|id| id == selected)
+        {
+            return;
+        }
+
+        let index = fallback.unwrap_or(0).min(visible.len() - 1);
+        self.selected_message_id = Some(visible[index].clone());
+    }
+
+    /// Moves the selection one row.
+    fn move_selection(&mut self, delta: isize) {
+        let visible: Vec<String> = self
+            .visible()
+            .into_iter()
+            .map(|row| row.message_id.clone())
+            .collect();
+
+        if visible.is_empty() {
+            return;
+        }
+
+        let current = self
+            .selected_message_id
+            .as_deref()
+            .and_then(|selected| visible.iter().position(|id| id == selected))
+            .unwrap_or(0);
+
+        let next = if delta < 0 {
+            current.saturating_sub(1)
+        } else {
+            (current + 1).min(visible.len() - 1)
+        };
+
+        self.selected_message_id = Some(visible[next].clone());
+        self.status = KEYS.to_owned();
+    }
+}
+
+#[cfg(test)]
+mod tests;
