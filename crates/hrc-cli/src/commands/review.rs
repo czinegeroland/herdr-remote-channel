@@ -90,6 +90,19 @@ pub fn review(context: &Context, message_id: Option<&str>, agent: &str) -> Resul
         _ => None,
     };
 
+    // Re-checked after the screen closes, because the list it offered was
+    // read when the screen opened and a person may have spent minutes
+    // reading. A pane closed in between would otherwise be approved into:
+    // the daemon would record a delivery, the hand-over would fail, and the
+    // message would sit approved with nothing holding it. Nothing has been
+    // recorded yet at this point, so refusing here leaves it pending —
+    // which is the state a person can act on again.
+    if let Some((_, target)) = &delivery
+        && let Some(gone) = departed(target)
+    {
+        return Err(gone);
+    }
+
     let Some((message_id, decision, action)) = wire_decision(outcome) else {
         return Ok(json!({
             "status": "ok",
@@ -142,6 +155,39 @@ fn destinations(fallback: &str) -> Vec<hrc_herdr::LocalAgent> {
             .as_current(true)
             .when_ready(false),
     ]
+}
+
+/// Why a chosen destination can no longer receive, if it cannot.
+///
+/// `None` means go ahead: either Herdr still lists the target and says it can
+/// take input, or Herdr could not be asked at all. The second case is
+/// deliberate — an unreachable host is not evidence that a destination
+/// vanished, and refusing a decision a person already made because a status
+/// query failed would be the check doing more harm than the race it guards.
+fn departed(target: &str) -> Option<CliError> {
+    let Ok(listed) = crate::herdr_host::Host::connect().and_then(|mut host| host.destinations())
+    else {
+        return None;
+    };
+
+    // An empty listing from a reachable Herdr is not evidence either: the
+    // fallback destination exists precisely because `agent.list` can be empty
+    // while a session is still there.
+    if listed.is_empty() {
+        return None;
+    }
+
+    match listed.iter().find(|agent| agent.local_target() == target) {
+        Some(agent) if agent.is_ready() => None,
+        Some(agent) => Some(CliError::DestinationUnavailable {
+            destination: agent.label().to_owned(),
+            reason: "it cannot take input right now",
+        }),
+        None => Some(CliError::DestinationUnavailable {
+            destination: target.to_owned(),
+            reason: "it is no longer there",
+        }),
+    }
 }
 
 /// Hands approved text to the chosen local session.
@@ -1458,6 +1504,42 @@ fn review_target_from(value: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_departed_destination_is_reported_by_the_name_the_person_saw() {
+        // The error is raised before the daemon is asked, so nothing is
+        // recorded and the message stays pending. What it must not do is name
+        // the pane: PRD section 23.4 keeps local topology local, and an error
+        // string is as public as any other output.
+        let gone = CliError::DestinationUnavailable {
+            destination: "reviewer".to_owned(),
+            reason: "it is no longer there",
+        };
+
+        let rendered = gone.to_string();
+        assert!(rendered.contains("reviewer"), "{rendered}");
+        assert!(
+            rendered.contains("still waiting in your inbox"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("w1:p"), "{rendered}");
+        assert_eq!(gone.code(), "destination_unavailable");
+    }
+
+    #[test]
+    fn an_unreachable_herdr_is_not_evidence_that_a_destination_vanished() {
+        // `departed` guards a race, and a status query that could not run is
+        // not the race happening. Refusing a decision a person already made
+        // because Herdr could not be asked would be the check doing more harm
+        // than the thing it guards against.
+        //
+        // This process is not running under Herdr, so `Host::connect` fails
+        // and the guard must wave the delivery through.
+        assert!(
+            super::departed("reviewer").is_none(),
+            "an unreachable host must not block a decision"
+        );
+    }
 
     #[test]
     fn a_review_target_that_is_not_a_ulid_opens_the_unfocused_list() {

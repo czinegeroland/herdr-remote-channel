@@ -118,6 +118,24 @@ pub enum CliError {
         reason: String,
     },
 
+    /// The local session a delivery was confirmed for is no longer usable.
+    ///
+    /// Raised before the daemon is asked, so nothing is recorded and the
+    /// message stays pending. A person spends minutes in the review screen;
+    /// the pane they chose can close while they read, and approving into a
+    /// destination that has gone would leave a message recorded as delivered
+    /// with nothing holding it.
+    #[error(
+        "`{destination}` can no longer receive this message: {reason}. Nothing was \
+         decided, so it is still waiting in your inbox"
+    )]
+    DestinationUnavailable {
+        /// The destination as the human saw it named. Never a pane ID.
+        destination: String,
+        /// Fixed local wording saying what changed.
+        reason: &'static str,
+    },
+
     /// A Herdr manifest named an action or pane this build does not have.
     #[error("`{name}` is not a Herdr {kind} this build provides")]
     UnknownHerdrTarget {
@@ -217,6 +235,7 @@ impl CliError {
             CliError::NoContextAuthorization => "no_context_authorization",
             CliError::AmbiguousChannel => "ambiguous_channel",
             CliError::PublicationUnavailable { .. } => "publication_unavailable",
+            CliError::DestinationUnavailable { .. } => "destination_unavailable",
             CliError::UnknownHerdrTarget { .. } => "unknown_herdr_target",
             CliError::ChannelNotPublished { .. } => "channel_not_published",
             CliError::LocalDeviceNotInChannel => "device_not_in_channel",
@@ -261,7 +280,8 @@ impl CliError {
             | CliError::InviteChannelMismatch { .. }
             | CliError::DaemonUnavailable
             | CliError::NoContextAuthorization
-            | CliError::PublicationUnavailable { .. } => exit::FAILURE,
+            | CliError::PublicationUnavailable { .. }
+            | CliError::DestinationUnavailable { .. } => exit::FAILURE,
 
             // Same reasoning as the code above: to a program this is the
             // authorization boundary refusing, and it must exit like one.
