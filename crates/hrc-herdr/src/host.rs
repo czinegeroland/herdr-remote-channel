@@ -36,6 +36,14 @@ pub const SOCKET_ENV: &str = "HERDR_SOCKET_PATH";
 /// The environment variable naming the pane a plugin command runs in.
 pub const PANE_ENV: &str = "HERDR_PANE_ID";
 
+/// The environment variable naming where a plugin keeps its local state.
+///
+/// Herdr creates the directory and never looks inside it. The inbox pane's
+/// identifier is recorded there so a second Herdr server taking over during a
+/// live handoff — which re-runs startup hooks while keeping panes alive —
+/// does not open a second inbox beside the first.
+pub const STATE_ENV: &str = "HERDR_PLUGIN_STATE_DIR";
+
 /// Something the host said that this build cannot use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostError {
@@ -116,6 +124,48 @@ pub fn notify(id: &str, title: &str, urgent: bool) -> String {
             "sound": if urgent { "request" } else { "none" },
         }),
     )
+}
+
+/// Asks Herdr to place the inbox as a split.
+///
+/// Deliberately without focus. This runs while Herdr is starting and a person
+/// may already be typing somewhere; a side view that grabs the keyboard to
+/// announce itself is the behaviour that gets a plugin uninstalled.
+pub fn open_inbox(id: &str) -> String {
+    request(
+        id,
+        "plugin.pane.open",
+        json!({
+            "plugin_id": crate::manifest::PLUGIN_ID,
+            "entrypoint": crate::pane::Pane::Inbox.as_str(),
+            "placement": "split",
+            "direction": "right",
+            "focus": false,
+        }),
+    )
+}
+
+/// Asks Herdr whether one pane is still there.
+pub fn pane(id: &str, pane_id: &str) -> String {
+    request(id, "pane.get", json!({ "pane_id": pane_id }))
+}
+
+/// The identifier of the pane an open request created.
+pub fn opened_pane(line: &str, expected_id: &str) -> Result<String, HostError> {
+    let result = result(line, expected_id)?;
+
+    if result.get("type").and_then(Value::as_str) != Some("plugin_pane_opened") {
+        return Err(HostError::Unexpected);
+    }
+
+    result
+        .get("plugin_pane")
+        .and_then(|plugin_pane| plugin_pane.get("pane"))
+        .and_then(|pane| pane.get("pane_id"))
+        .and_then(Value::as_str)
+        .filter(|pane_id| !pane_id.is_empty())
+        .map(str::to_owned)
+        .ok_or(HostError::Unexpected)
 }
 
 /// Reads one response line, returning its `result` when it succeeded.

@@ -430,3 +430,65 @@ fn age_is_coarse_and_never_negative() {
     assert_eq!(age("whenever", "2026-01-01T10:00:00Z"), UNKNOWN_AGE);
     assert_eq!(age("2026-01-01T10:00:00Z", "whenever"), UNKNOWN_AGE);
 }
+
+#[test]
+fn a_long_channel_name_cannot_break_the_pane_border() {
+    // The real one, from the screenshot that found this: a channel created
+    // from `owner/name` is recorded under its expanded URL, and the title
+    // ran past the border and broke the frame.
+    let app = InboxApp::new(
+        "https://github.com/czinegeroland/hrc-test.git",
+        vec![row(
+            &ulid('A'),
+            "alice",
+            "2026-01-01T10:00:00Z",
+            InboxDisposition::Pending,
+        )],
+    );
+
+    let rendered = screen(&app, 46, 10);
+
+    // Shortened to something a person recognizes...
+    assert!(rendered.contains("czinegeroland/hrc-test"), "{rendered}");
+    // ...with no trace of the URL it came from.
+    assert!(!rendered.contains("https://"), "{rendered}");
+    assert!(!rendered.contains(".git"), "{rendered}");
+
+    // And the frame is intact: the top row is the border, one title aside,
+    // and no line is longer than the pane.
+    for line in rendered_lines(&rendered, 46) {
+        assert_eq!(line.chars().count(), 46, "a row outran the pane: {line:?}");
+    }
+}
+
+#[test]
+fn a_title_gives_up_the_name_before_the_filter() {
+    // Which rows are on show is the part a person needs when the list looks
+    // emptier than they expected, so it is the last thing to go.
+    let app = InboxApp::new("a-very-long-channel-name-indeed", vec![]);
+
+    for width in [40, 24, 16, 12, 8, 4, 2, 1] {
+        let rendered = screen(&app, width, 6);
+        for line in rendered_lines(&rendered, width) {
+            assert_eq!(
+                line.chars().count(),
+                width as usize,
+                "width {width} produced {line:?}"
+            );
+        }
+    }
+
+    // At a width that fits something, the filter survives and the name does
+    // not take the space from it.
+    assert!(screen(&app, 16, 6).contains("pending"));
+}
+
+/// The rendered buffer split back into rows.
+fn rendered_lines(rendered: &str, width: u16) -> Vec<String> {
+    rendered
+        .chars()
+        .collect::<Vec<char>>()
+        .chunks(width as usize)
+        .map(|chunk| chunk.iter().collect())
+        .collect()
+}

@@ -220,3 +220,55 @@ fn an_empty_installation_offers_no_destination() {
 
     assert!(destinations.is_empty());
 }
+
+#[test]
+fn opening_the_inbox_asks_for_a_split_without_focus() {
+    // On startup a person may already be typing. A side view that grabs the
+    // keyboard to announce itself is the behaviour that gets a plugin
+    // uninstalled.
+    let line = open_inbox("req-3");
+    let parsed: Value = serde_json::from_str(line.trim_end()).expect("a request is JSON");
+
+    assert_eq!(parsed["method"], "plugin.pane.open");
+    assert_eq!(parsed["params"]["entrypoint"], "inbox");
+    assert_eq!(parsed["params"]["placement"], "split");
+    assert_eq!(parsed["params"]["focus"], false);
+    assert_eq!(parsed["params"]["plugin_id"], crate::manifest::PLUGIN_ID);
+}
+
+#[test]
+fn the_pane_an_open_created_is_read_back() {
+    // Recorded so the live handoff that re-runs startup hooks while keeping
+    // panes alive does not leave two inboxes side by side.
+    let answer = json!({
+        "id": "req-3",
+        "result": {
+            "type": "plugin_pane_opened",
+            "plugin_pane": {
+                "plugin_id": "herdr-remote-channel",
+                "entrypoint": "inbox",
+                "pane": { "pane_id": "wG:p2", "tab_id": "wG:t1", "workspace_id": "wG" },
+            },
+        },
+    })
+    .to_string();
+
+    assert_eq!(opened_pane(&answer, "req-3").unwrap(), "wG:p2");
+}
+
+#[test]
+fn an_open_that_did_not_say_which_pane_is_not_guessed_at() {
+    // A remembered pane that is not the one Herdr opened would suppress the
+    // next startup's open while nothing is on screen.
+    for answer in [
+        json!({ "id": "req-3", "result": { "type": "plugin_pane_opened" } }),
+        json!({ "id": "req-3", "result": { "type": "plugin_pane_opened",
+            "plugin_pane": { "pane": { "pane_id": "" } } } }),
+        json!({ "id": "req-3", "result": { "type": "pong" } }),
+    ] {
+        assert_eq!(
+            opened_pane(&answer.to_string(), "req-3"),
+            Err(HostError::Unexpected)
+        );
+    }
+}

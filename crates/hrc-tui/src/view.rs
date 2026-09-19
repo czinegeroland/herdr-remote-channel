@@ -764,12 +764,20 @@ pub fn render_inbox(frame: &mut Frame<'_>, app: &crate::inbox::InboxApp, now: &s
             .collect()
     };
 
+    // Clamped, and shortened first. A channel's local name is whatever
+    // `hrc create` recorded, which for a channel made from `owner/name` is
+    // the expanded git URL — long enough to run past the border and break
+    // the frame. Shortening makes it readable; clamping makes it safe
+    // whatever it is, because the next unreadable name will be one nobody
+    // predicted (decision DEC-095).
+    let title = clamp_title(
+        &hrc_herdr::channel_display_name(app.channel_local_name()),
+        app.filter().as_str(),
+        areas[1].width,
+    );
+
     frame.render_widget(
-        List::new(items).block(Block::default().borders(Borders::ALL).title(format!(
-            "{} ({})",
-            app.channel_local_name(),
-            app.filter().as_str()
-        ))),
+        List::new(items).block(Block::default().borders(Borders::ALL).title(title)),
         areas[1],
     );
 
@@ -777,6 +785,32 @@ pub fn render_inbox(frame: &mut Frame<'_>, app: &crate::inbox::InboxApp, now: &s
         Paragraph::new(app.status().to_owned()).wrap(Wrap { trim: false }),
         areas[2],
     );
+}
+
+/// A block title that cannot outrun the border it sits in.
+///
+/// Two cells of the width are the corners and two more keep the title clear
+/// of them. The filter is never dropped: which rows are on show is the part
+/// a person needs when the list looks emptier than they expected, so the
+/// name gives way first and disappears entirely before the filter does.
+fn clamp_title(name: &str, filter: &str, width: u16) -> String {
+    let available = (width as usize).saturating_sub(4);
+    let suffix = format!(" ({filter})");
+
+    if available <= suffix.chars().count() {
+        return suffix.trim().to_owned();
+    }
+
+    let room = available - suffix.chars().count();
+    let shown: String = if name.chars().count() <= room {
+        name.to_owned()
+    } else if room <= 1 {
+        String::new()
+    } else {
+        name.chars().take(room - 1).collect::<String>() + "…"
+    };
+
+    format!("{shown}{suffix}")
 }
 
 /// Pads or truncates to an exact display width.
