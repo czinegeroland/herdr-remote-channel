@@ -59,6 +59,17 @@ def call(socket_path: str, method: str, params: dict) -> dict:
     return answer["result"]
 
 
+def find_placed(socket_path: str, label: str, seconds: float) -> str | None:
+    """The pane the startup hook placed, if it placed one in time."""
+    deadline = time.monotonic() + max(seconds, 1.0)
+    while time.monotonic() < deadline:
+        for pane in call(socket_path, "pane.list", {}).get("panes", []):
+            if pane.get("label") == label:
+                return pane["pane_id"]
+        time.sleep(0.25)
+    return None
+
+
 def wait_for(path: str, seconds: float) -> None:
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -78,6 +89,11 @@ def main() -> int:
     parser.add_argument("--settle", type=float, default=3.0)
     parser.add_argument("--keys", default="", help="keys to send before reading")
     parser.add_argument("--layout", action="store_true", help="report pane rects")
+    parser.add_argument(
+        "--label",
+        default="Remote channel inbox",
+        help="the pane title the startup hook gives what it places",
+    )
     parser.add_argument(
         "--hrc-home",
         default="",
@@ -116,18 +132,29 @@ def main() -> int:
     try:
         wait_for(socket_path, 30)
 
-        opened = call(
-            socket_path,
-            "plugin.pane.open",
-            {
-                "plugin_id": arguments.plugin,
-                "entrypoint": arguments.entrypoint,
-                "placement": "split",
-                "direction": "right",
-                "focus": True,
-            },
-        )
-        pane_id = opened["plugin_pane"]["pane"]["pane_id"]
+        # The startup hook places the inbox itself, which is the thing a
+        # person actually sees. Use that one rather than opening a second:
+        # two inboxes in one window is not a layout anybody has, and the
+        # three-way split it produces squeezes every pane into the narrow
+        # tier, so the test would only ever exercise the smallest layout.
+        pane_id = find_placed(socket_path, arguments.label, arguments.settle)
+
+        if pane_id is None:
+            opened = call(
+                socket_path,
+                "plugin.pane.open",
+                {
+                    "plugin_id": arguments.plugin,
+                    "entrypoint": arguments.entrypoint,
+                    "placement": "split",
+                    "direction": "right",
+                    "focus": True,
+                },
+            )
+            pane_id = opened["plugin_pane"]["pane"]["pane_id"]
+            sys.stderr.write(f"opened {pane_id}\n")
+        else:
+            sys.stderr.write(f"startup had already placed {pane_id}\n")
 
         # The interface has to paint before it can be read. A plugin pane is a
         # process Herdr spawns, so this waits for the program rather than for

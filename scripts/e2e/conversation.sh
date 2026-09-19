@@ -224,7 +224,13 @@ step "the interface a person sees is what Herdr actually drew"
 # startup, or a status line that wrapped and pushed the list up. All three
 # shipped, and a screenshot from a user found two of them.
 if command -v herdr >/dev/null 2>&1; then
-    frame="$(python3 "$here/ui-frame.py" --columns 120 --rows 18 \
+    # Wide enough that the quarter-width split lands in the widest row tier,
+    # where every column is on show. Herdr keeps about twenty-six columns for
+    # its own sidebar before the workspace is divided, so the terminal has to
+    # be generous for the pane to be ordinary. The narrow tiers are covered
+    # where they can be driven exactly: the buffer tests, at every width from
+    # eighty down to one.
+    frame="$(python3 "$here/ui-frame.py" --columns 200 --rows 20 \
         --session "hrc-e2e-$$" --hrc-home "$bob" 2>/dev/null)" || frame=""
 
     if [ -z "$frame" ]; then
@@ -251,9 +257,13 @@ if command -v herdr >/dev/null 2>&1; then
     printf '%s' "$frame" | grep -q "$(printf '%s' "$alice_principal" | cut -c1-8)" \
         || die "the sender does not appear in the drawn frame"
 
-    # The kind and the age are what make a row scannable, and the health line
-    # is the section 23.1 indicator on the only surface that can show it.
-    printf '%s' "$frame" | grep -q 'note' || die "the message kind is missing"
+    # The kind is what makes a row scannable, and the health line is the
+    # section 23.1 indicator on the only surface that can show it. The kind
+    # only appears in the wider tiers, which is why the terminal above is
+    # sized for one -- a narrower pane dropping this column is the design
+    # working, not a regression.
+    printf '%s' "$frame" | grep -q 'note' \
+        || die "the message kind is missing; is the pane in a narrow tier?"
     printf '%s' "$frame" | grep -q 'waiting on you' \
         || die "the channel health line is missing from the frame"
     if printf '%s' "$frame" | grep -qF "$note"; then
