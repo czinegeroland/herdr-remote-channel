@@ -129,18 +129,38 @@ and do not improvise around either.
 ## Panes: where a person decides
 
 The plugin ships seven panes. They are how someone does what you cannot,
-without leaving Herdr. Name the pane. Do not send anyone to a terminal for
-something a pane already does.
+without leaving Herdr.
 
-| Pane | For |
-|---|---|
-| `Remote channel setup` | Initializing the key store, creating a channel, inviting, redeeming an invite |
-| `Remote channel join requests` | Approving a join, after the safety phrase matches |
-| `Remote channel review` | Approving a quarantined message body |
-| `Remote channel members` | Removing a member or revoking a device |
-| `Remote channel compose` | Writing a note, question or reply, and sending it |
-| `Remote channel context` | Disclosing a context package |
-| `Remote channel inbox` | Reading what has arrived |
+**Open the pane. Do not just name it.** Herdr opens a registered pane on
+request, so telling someone to go and find one is the same failure as handing
+them a command list:
+
+```bash
+herdr plugin pane open --plugin herdr-remote-channel --entrypoint <id> --focus
+```
+
+Add `--placement split --direction right` for the inbox, which is a side view
+someone keeps open; the others are popups and need no placement. The
+entrypoint is the id in the table below, not the title. Use `$HERDR_BIN_PATH`
+when it is set, which is how a plugin command reaches the Herdr that launched
+it.
+
+Say what the pane is for and that you have opened it. Then stop: the decision
+inside it is theirs.
+
+| Entrypoint | Pane | For |
+|---|---|---|
+| `setup` | `Remote channel setup` | Initializing the key store, creating a channel, inviting, redeeming an invite |
+| `joins` | `Remote channel join requests` | Approving a join, after the safety phrase matches |
+| `review` | `Remote channel review` | Approving a quarantined message body |
+| `members` | `Remote channel members` | Removing a member or revoking a device |
+| `compose` | `Remote channel compose` | Writing a note, question or reply, and sending it |
+| `context` | `Remote channel context` | Disclosing a context package |
+| `inbox` | `Remote channel inbox` | Watching what arrives, and reaching review from it |
+
+The inbox opens on its own when Herdr starts, once a channel exists. Open it
+yourself when someone asks where it is, or after setting a channel up — they
+have not restarted Herdr since.
 
 Each exists because its decision belongs to a person at a real terminal. You
 can draft, and you can read agent-safe state. Point at the pane and stop.

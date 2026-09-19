@@ -150,3 +150,45 @@ fn a_rendered_row_carries_no_field_that_could_hold_a_body() {
         );
     }
 }
+
+#[test]
+fn a_channel_name_that_is_a_git_url_is_shortened_for_display() {
+    // Found on a real screen, not in a test: `hrc create` records the
+    // locator as the channel's name, and DEC-081 made that locator a full
+    // URL, which ran past the pane border and broke the frame.
+    assert_eq!(
+        channel_display_name("https://github.com/czinegeroland/hrc-test.git"),
+        "czinegeroland/hrc-test"
+    );
+    assert_eq!(
+        channel_display_name("https://github.com/owner/name"),
+        "owner/name"
+    );
+    assert_eq!(
+        channel_display_name("git@github.com:owner/name.git"),
+        "owner/name"
+    );
+    assert_eq!(
+        channel_display_name("ssh://git@example.com/team/repo.git"),
+        "team/repo"
+    );
+}
+
+#[test]
+fn a_local_repository_is_named_by_its_directory() {
+    assert_eq!(
+        channel_display_name(r"C:\claude_working_directory\remote_messaging_test"),
+        "remote_messaging_test"
+    );
+    assert_eq!(channel_display_name("/srv/hrc/channel.git"), "channel");
+    assert_eq!(channel_display_name("/srv/hrc/channel.git/"), "channel");
+}
+
+#[test]
+fn a_name_a_person_chose_is_left_alone() {
+    // The shortening exists for names nobody chose. One somebody did choose
+    // is theirs, however it is spelled.
+    for name in ["Team channel", "hrc", "owner/name"] {
+        assert_eq!(channel_display_name(name), name);
+    }
+}

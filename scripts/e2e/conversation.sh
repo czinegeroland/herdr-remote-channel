@@ -244,6 +244,22 @@ again="$(as "$bob" herdr pane inbox --json | json '["notifications"]')"
     || die "reading the pane a second time announced the same message again: $again"
 ok "announced once: $announced"
 
+step "the startup hook places the inbox rather than printing at it"
+# The defect a user found on the first real install: the hook computed a
+# sidebar line, returned JSON and exited, so opening Herdr placed nothing.
+# There is no Herdr server here, so what this can assert is the half that
+# does not need one -- that the hook reports what it did with the pane rather
+# than staying silent about it, and that it declines rather than erroring
+# when it cannot reach a host.
+startup="$(as "$bob" herdr startup --json)"
+printf '%s' "$startup" | json '["inbox"]' >/dev/null \
+    || die "the startup hook says nothing about the inbox: $startup"
+[ "$(printf '%s' "$startup" | json '["inbox"]["opened"]')" = "False" ] \
+    || die "there is no Herdr here; the hook must not claim it opened a pane"
+printf '%s' "$startup" | json '["inbox"]["reason"]' >/dev/null \
+    || die "a hook that did not place the pane must say why: $startup"
+ok "startup reported the inbox: $(printf '%s' "$startup" | json '["inbox"]["reason"]')"
+
 step "an agent cannot read the body before a human releases it"
 start_daemon "$bob"
 if python3 "$here/trusted-call.py" "$bob/run/hrc-agent.sock" show_approved \

@@ -4247,7 +4247,92 @@ pub fn herdr_startup(context: &Context) -> Result<Value> {
         "status": "ok",
         "manifest": manifest,
         "sidebar": sidebar.render(),
+        "inbox": place_inbox(context),
     }))
+}
+
+/// Puts the inbox on screen when Herdr starts (PRD section 23.2).
+///
+/// Without this the startup hook computed a sidebar line, returned JSON, and
+/// exited — so a person who opened Herdr saw nothing, and the side view they
+/// were meant to keep open existed only if they went and ran a command for it
+/// every session. That is the fifth time this project has shipped working
+/// code reachable from nothing, and the first one a user found rather than a
+/// test (decision DEC-094).
+///
+/// Three things stop it being intrusive. It opens without focus, because a
+/// split that grabs the keyboard while someone is typing is the behaviour
+/// that gets a plugin uninstalled. It opens nothing when no channel is
+/// configured, because a pane whose only content is an error is worse than no
+/// pane. And it records the pane it opened, so the live handoff that re-runs
+/// startup hooks while keeping panes alive does not leave two inboxes side by
+/// side.
+///
+/// Every failure is reported rather than raised. A failed startup hook shows
+/// a person a broken plugin, and not placing a pane is not a broken plugin.
+fn place_inbox(context: &Context) -> Value {
+    let database = match Database::open(context.paths.database()) {
+        Ok(database) => database,
+        Err(error) => return json!({ "opened": false, "reason": error.to_string() }),
+    };
+
+    match database.channels() {
+        Ok(channels) if channels.is_empty() => {
+            return json!({
+                "opened": false,
+                "reason": "no channel is configured yet; `Remote channel setup` is where that starts",
+            });
+        }
+        Ok(_) => {}
+        Err(error) => return json!({ "opened": false, "reason": error.to_string() }),
+    }
+
+    let mut host = match crate::herdr_host::Host::connect() {
+        Ok(host) => host,
+        Err(error) => return json!({ "opened": false, "reason": error.to_string() }),
+    };
+
+    if let Some(pane_id) = remembered_inbox_pane()
+        && host.pane_is_open(&pane_id)
+    {
+        return json!({ "opened": false, "reason": "already open", "pane": pane_id });
+    }
+
+    match host.open_inbox() {
+        Ok(pane_id) => {
+            remember_inbox_pane(&pane_id);
+            json!({ "opened": true, "pane": pane_id })
+        }
+        Err(error) => json!({ "opened": false, "reason": error.to_string() }),
+    }
+}
+
+/// Where the identifier of the inbox pane is kept between startups.
+///
+/// `HERDR_PLUGIN_STATE_DIR` is the directory Herdr creates for exactly this
+/// and never looks inside. A pane identifier is local topology and is the
+/// only thing written there.
+fn inbox_pane_record() -> Option<std::path::PathBuf> {
+    let directory = std::env::var(hrc_herdr::host::STATE_ENV).ok()?;
+    (!directory.is_empty()).then(|| std::path::Path::new(&directory).join("inbox-pane"))
+}
+
+/// The pane this plugin last placed the inbox in, if it recorded one.
+fn remembered_inbox_pane() -> Option<String> {
+    let recorded = std::fs::read_to_string(inbox_pane_record()?).ok()?;
+    let recorded = recorded.trim();
+
+    (!recorded.is_empty()).then(|| recorded.to_owned())
+}
+
+/// Records the pane the inbox was placed in.
+///
+/// A write that fails is ignored: the cost is a second inbox after a Herdr
+/// handoff, and failing the startup hook over it would cost the whole plugin.
+fn remember_inbox_pane(pane_id: &str) {
+    if let Some(path) = inbox_pane_record() {
+        let _ = std::fs::write(path, pane_id);
+    }
 }
 
 /// `hrc herdr action <name>`: run a named action from the manifest.
