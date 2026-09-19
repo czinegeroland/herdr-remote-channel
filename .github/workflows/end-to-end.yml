@@ -65,10 +65,66 @@ jobs:
           done
           "$(command -v herdr || echo "$HOME/.local/bin/herdr")" --version
 
+      - name: Wait for npm to serve the release
+        # `workflow_run` fires the instant the publish workflow completes, and
+        # the registry is eventually consistent: `npm install pkg@0.2.4` can
+        # still answer `notarget` for a few seconds after the publish that
+        # created it. The first release after this suite started running on
+        # `workflow_run` failed exactly there, ten seconds after a publish that
+        # had in fact succeeded -- a red end-to-end run reporting a healthy
+        # release as broken.
+        #
+        # So the version is waited for rather than assumed. The counterpart of
+        # decision DEC-077, which retries a refused publish: this retries the
+        # read.
+        #
+        # All five packages are checked, not just the launcher. `npm install`
+        # resolves the platform package through `optionalDependencies`, so the
+        # launcher appearing first would still leave the install failing.
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+
+          version="${{ inputs.version }}"
+          if [ -z "$version" ]; then
+            # The release that triggered this run is the one on the default
+            # branch, which is what `checkout` fetched for a `workflow_run`.
+            version="$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml \
+              | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)"
+          fi
+          [ -n "$version" ] || { echo "::error::could not determine the version"; exit 1; }
+          echo "waiting for $version"
+          echo "HRC_VERSION=$version" >> "$GITHUB_ENV"
+
+          packages="herdr-remote-channel
+          herdr-remote-channel-linux-x64
+          herdr-remote-channel-darwin-x64
+          herdr-remote-channel-darwin-arm64
+          herdr-remote-channel-win32-x64"
+
+          for package in $packages; do
+            delay=2
+            for attempt in $(seq 1 8); do
+              if npm view "$package@$version" version >/dev/null 2>&1; then
+                echo "  $package@$version"
+                break
+              fi
+              if [ "$attempt" -eq 8 ]; then
+                echo "::error::npm never served $package@$version"
+                exit 1
+              fi
+              sleep "$delay"
+              delay=$(( delay * 2 ))
+            done
+          done
+
       - name: Install the published CLI
         run: |
           set -euo pipefail
           version="${{ inputs.version }}"
+          if [ -z "$version" ]; then
+            version="${HRC_VERSION:-}"
+          fi
           if [ -n "$version" ]; then
             npm install -g "herdr-remote-channel@$version"
           else
