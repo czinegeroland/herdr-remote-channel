@@ -8,17 +8,17 @@
 
 id = "herdr-remote-channel"
 name = "Herdr Remote Channel"
-version = "0.2.3"
+version = "0.2.4"
 min_herdr_version = "0.8.0"
 description = "Secure asynchronous communication between independent Herdr installations."
 platforms = ["linux", "macos", "windows"]
 
 [[build]]
-command = ["cmd", "/c", "npm", "install", "--no-save", "--no-audit", "--no-fund", "herdr-remote-channel@0.2.3"]
+command = ["cmd", "/c", "npm", "install", "--no-save", "--no-audit", "--no-fund", "herdr-remote-channel@0.2.4"]
 platforms = ["windows"]
 
 [[build]]
-command = ["npm", "install", "--no-save", "--no-audit", "--no-fund", "herdr-remote-channel@0.2.3"]
+command = ["npm", "install", "--no-save", "--no-audit", "--no-fund", "herdr-remote-channel@0.2.4"]
 platforms = ["linux", "macos"]
 
 [[build]]
