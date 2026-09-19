@@ -216,6 +216,34 @@ if printf '%s' "$pane" | grep -q "$note"; then
 fi
 ok "the pane row targets $pane_id and is $pane_state"
 
+step "a note is not announced, and a question is announced once"
+# Section 23.3 lists what notifies. A note is not on that list: it is not
+# urgent, and interrupting someone over one is the behaviour that makes people
+# turn notifications off. A question is on the list.
+#
+# The second read is the point of the durable ledger. The side view reloads
+# once a second and a plugin pane process lives for one render, so "already
+# announced" has to survive both — reading the pane twice must announce a
+# message once.
+quiet="$(printf '%s' "$pane" | json '["notifications"]')"
+[ "$quiet" = "[]" ] || die "a note should not notify: $quiet"
+
+question="does the notification fire exactly once"
+as "$alice" ask "$bob_principal" "$question" --json >/dev/null || die "ask failed"
+as "$alice" sync --once --json >/dev/null
+as "$bob" sync --once --json >/dev/null
+
+announced="$(as "$bob" herdr pane inbox --json | json '["notifications"]')"
+[ "$announced" != "[]" ] || die "a question raised nothing: $announced"
+if printf '%s' "$announced" | grep -q "$question"; then
+    die "a notification carried the message text"
+fi
+
+again="$(as "$bob" herdr pane inbox --json | json '["notifications"]')"
+[ "$again" = "[]" ] \
+    || die "reading the pane a second time announced the same message again: $again"
+ok "announced once: $announced"
+
 step "an agent cannot read the body before a human releases it"
 start_daemon "$bob"
 if python3 "$here/trusted-call.py" "$bob/run/hrc-agent.sock" show_approved \

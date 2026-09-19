@@ -87,6 +87,23 @@ fn render_body(frame: &mut Frame<'_>, app: &App, area: Rect) {
         _ => ("Message body", "No message selected.".to_owned()),
     };
 
+    // The destination rides in the title rather than in a fourth pane. It
+    // has to be visible at the moment a person presses `a`, and that moment
+    // is spent reading the body — a line below the status would be the one
+    // part of the screen their eye is furthest from.
+    let title = match (app.is_revealed(), app.destination()) {
+        (true, Some(destination)) => {
+            let where_to = App::destination_label(destination);
+            if destination.is_ready() {
+                format!("{title} — delivers to {where_to} (Tab to change)")
+            } else {
+                format!("{title} — {where_to} CANNOT TAKE INPUT (Tab to change)")
+            }
+        }
+        (true, None) => format!("{title} — no local session to deliver to"),
+        (false, _) => title.to_owned(),
+    };
+
     let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(area);
     let lines = wrapped_lines(&text, inner.width);

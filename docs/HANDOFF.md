@@ -151,8 +151,25 @@ against Herdr 0.9.1 and against the `github-link-preview` example plugin
 (decisions DEC-086 to DEC-088). The metadata-only boundary is expressed as a
 type: `hrc_tui::InboxOutcome` has two variants, and neither is a decision.
 
-Still to come from that plan: a local delivery destination picker in place of
-the one fixed agent string, and durable notification deduplication.
+Delivery then stopped being a fixed string. The trusted screen enumerates the
+local sessions Herdr actually has through `agent.list`, preselects the one the
+person is working in without deciding for them, names the exact one (workspace
+included) on the confirmation, refuses one Herdr says cannot take input, and
+hands the approved text over the socket rather than through
+`herdr agent prompt` — whose text argument would sit in the process table
+(decisions DEC-089 and DEC-091).
+
+Notifications became a lifecycle rather than a side effect of rendering.
+Migration 012 adds a ledger keyed by message and notification kind, so a side
+view reloading once a second announces an arrival once, a restart does not
+announce it again, and a decided message is resolved rather than forgotten. A
+burst of ordinary arrivals coalesces into a count; urgent notices never do
+(decision DEC-090).
+
+The five-part inbox plan is delivered, with one part deliberately out of
+scope: creating a new pane as a delivery destination needs a choice of agent
+kind, which is a decision a person makes in Herdr rather than one this screen
+should make while they are deciding whether to disclose a message.
 
 Outgoing composition is now one transaction: recipient validation, sequence
 allocation, recipient-scoped predecessor derivation, sealing, recipient facts,

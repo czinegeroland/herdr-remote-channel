@@ -2530,3 +2530,139 @@ fn a_message_kept_in_the_inbox_still_lapses() {
         vec!["msg-1".to_owned()]
     );
 }
+
+#[test]
+fn a_notification_is_new_exactly_once() {
+    // The inbox side view reloads once a second. Without this, every one of
+    // those reloads raised every notification again.
+    let database = database();
+
+    assert!(
+        database
+            .record_notification(CHANNEL, "msg-1", "new_question", NOW)
+            .unwrap()
+    );
+
+    for _ in 0..5 {
+        assert!(
+            !database
+                .record_notification(CHANNEL, "msg-1", "new_question", NOW)
+                .unwrap(),
+            "a refresh must not re-raise a notification"
+        );
+    }
+}
+
+#[test]
+fn one_message_can_raise_two_different_notifications() {
+    // Keyed by message *and* kind. A message that arrived and whose channel
+    // later halted is two things a person needs told, and deduplicating on
+    // the message alone would swallow the second.
+    let database = database();
+
+    assert!(
+        database
+            .record_notification(CHANNEL, "msg-1", "new_question", NOW)
+            .unwrap()
+    );
+    assert!(
+        database
+            .record_notification(CHANNEL, "msg-1", "tamper_detected", NOW)
+            .unwrap()
+    );
+}
+
+#[test]
+fn a_notification_is_not_repeated_after_a_restart() {
+    // The reason this lives in the database rather than in the process that
+    // renders a pane. A plugin pane process lives for one render.
+    let directory = tempfile::tempdir().unwrap();
+
+    {
+        let database = file_database(&directory);
+        assert!(
+            database
+                .record_notification(CHANNEL, "msg-1", "new_prompt_request", NOW)
+                .unwrap()
+        );
+    }
+
+    let reopened = file_database(&directory);
+    assert!(
+        !reopened
+            .record_notification(CHANNEL, "msg-1", "new_prompt_request", NOW)
+            .unwrap(),
+        "restarting must not re-announce what was already announced"
+    );
+}
+
+#[test]
+fn resolving_clears_what_is_outstanding_without_forgetting_it() {
+    let database = database();
+    database
+        .record_notification(CHANNEL, "msg-1", "new_question", NOW)
+        .unwrap();
+    database
+        .record_notification(CHANNEL, "msg-2", "new_task_request", NOW)
+        .unwrap();
+
+    assert_eq!(
+        database.outstanding_notifications(CHANNEL).unwrap().len(),
+        2
+    );
+
+    let resolved = database
+        .resolve_notifications("msg-1", "2026-09-13T00:05:00Z")
+        .unwrap();
+    assert_eq!(resolved, 1);
+
+    let outstanding = database.outstanding_notifications(CHANNEL).unwrap();
+    assert_eq!(outstanding.len(), 1);
+    assert_eq!(outstanding[0].0, "msg-2");
+
+    // Resolved is not forgotten. A deleted row and a row that was never
+    // written are indistinguishable, and the difference is what stops a
+    // decided message being announced again by a stale pane.
+    assert!(
+        !database
+            .record_notification(CHANNEL, "msg-1", "new_question", NOW)
+            .unwrap(),
+        "a decided message must not become new again"
+    );
+
+    // Resolving twice changes nothing, so a pane that reads the same decided
+    // row on two refreshes does not churn the ledger.
+    assert_eq!(
+        database
+            .resolve_notifications("msg-1", "2026-09-13T00:06:00Z")
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn notifications_are_outstanding_per_channel() {
+    let database = database();
+    database
+        .insert_channel("channel-2", "git", "owner/other", "Other channel", NOW)
+        .unwrap();
+
+    database
+        .record_notification(CHANNEL, "msg-1", "new_question", NOW)
+        .unwrap();
+    database
+        .record_notification("channel-2", "msg-2", "new_question", NOW)
+        .unwrap();
+
+    assert_eq!(
+        database.outstanding_notifications(CHANNEL).unwrap().len(),
+        1
+    );
+    assert_eq!(
+        database
+            .outstanding_notifications("channel-2")
+            .unwrap()
+            .len(),
+        1
+    );
+}

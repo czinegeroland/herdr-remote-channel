@@ -1255,6 +1255,7 @@ dependencies = [
  "hrc-transport",
  "hrc-transport-git",
  "hrc-tui",
+ "interprocess",
  "predicates",
  "secrecy",
  "serde_json",

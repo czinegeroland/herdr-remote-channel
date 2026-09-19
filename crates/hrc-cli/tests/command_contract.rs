@@ -2074,6 +2074,56 @@ fn the_herdr_inbox_pane_never_renders_a_pending_body() {
 }
 
 #[test]
+fn the_herdr_inbox_pane_announces_an_arrival_once_and_never_its_body() {
+    // The side view reloads once a second and a plugin pane process lives for
+    // one render, so "already announced" cannot live in process memory. This
+    // drives the case that motivated the durable ledger: reading the pane
+    // twice announces the message once.
+    let (home, remote) = channel_fixture();
+    let principal = principal_of(home.path(), remote.path());
+
+    let question = "does the notification fire exactly once";
+    hrc_in(home.path())
+        .args(["ask", &principal, question])
+        .assert()
+        .success();
+    for _ in 0..2 {
+        hrc_in(home.path())
+            .args(["sync", "--once"])
+            .assert()
+            .success();
+    }
+
+    let pane = |home: &std::path::Path| -> Value {
+        let output = hrc_in(home)
+            .args(["herdr", "pane", "inbox", "--json"])
+            .output()
+            .expect("command should run");
+        serde_json::from_slice(&output.stdout).expect("stdout should be JSON")
+    };
+
+    let first = pane(home.path());
+    let announced = first["notifications"]
+        .as_array()
+        .expect("the pane returns notifications");
+    assert_eq!(announced.len(), 1, "{first}");
+
+    // Fixed local wording and a count. A notification reaches a human out of
+    // context and may be mirrored to a phone, so nothing a sender wrote may
+    // reach it.
+    let text = announced[0]["text"].as_str().expect("a notification line");
+    assert!(!text.contains(question), "{text}");
+    assert_eq!(announced[0]["covers"], 1);
+
+    let second = pane(home.path());
+    assert_eq!(
+        second["notifications"].as_array().map(Vec::len),
+        Some(0),
+        "a second read must not announce the same message again: {second}"
+    );
+}
+
+#[test]
 fn an_unknown_herdr_action_or_pane_is_a_usage_error() {
     // A manifest is a file a person can edit. Naming something this build
     // does not have should say so rather than draw an empty screen.

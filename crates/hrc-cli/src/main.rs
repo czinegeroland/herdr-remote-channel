@@ -10,6 +10,7 @@ mod commands;
 mod dispatch;
 mod error;
 mod exit;
+mod herdr_host;
 mod paths;
 mod render;
 

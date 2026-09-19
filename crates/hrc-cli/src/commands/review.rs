@@ -66,11 +66,29 @@ pub fn review(context: &Context, message_id: Option<&str>, agent: &str) -> Resul
         }));
     }
 
-    let mut app = App::new(pending, agent);
+    // Enumerated here, so the screen offers what Herdr has right now rather
+    // than a name this process guessed from its own environment. When Herdr
+    // is not reachable the list is empty and the screen says so: keeping and
+    // declining still work, and delivering refuses instead of failing after
+    // the person has confirmed it.
+    let destinations = destinations(agent);
+    let bodies: std::collections::HashMap<String, String> = pending
+        .iter()
+        .map(|item| (item.message_id.clone(), item.body.clone()))
+        .collect();
+
+    let mut app = App::new(pending, destinations);
     let outcome = hrc_tui::run(&mut app).map_err(|source| CliError::Io {
         action: "run the trusted approval screen",
         source,
     })?;
+
+    let delivery = match &outcome {
+        Outcome::DeliverToAgent {
+            message_id, target, ..
+        } => Some((message_id.clone(), target.clone())),
+        _ => None,
+    };
 
     let Some((message_id, decision, action)) = wire_decision(outcome) else {
         return Ok(json!({
@@ -81,12 +99,76 @@ pub fn review(context: &Context, message_id: Option<&str>, agent: &str) -> Resul
 
     let applied = runtime.block_on(apply(&endpoint, &message_id, decision))?;
 
+    // Only after the daemon recorded the approval. The order is the point:
+    // a body handed to a local session before the trusted path accepted the
+    // decision would be a delivery the audit log does not know about.
+    let delivered = delivery.map(|(message_id, target)| {
+        hand_to_herdr(
+            &target,
+            bodies
+                .get(&message_id)
+                .map(String::as_str)
+                .unwrap_or_default(),
+        )
+    });
+
     Ok(json!({
         "status": "ok",
         "messageId": message_id,
         "decided": action,
         "daemon": applied,
+        "delivered": delivered,
     }))
+}
+
+/// Every local session an approved message could be delivered to.
+///
+/// `fallback` is what [`local_agent`] read out of the plugin context, used
+/// only when Herdr answers nothing: a single destination named the way the
+/// person's own Herdr names it beats an empty list that makes delivery
+/// impossible. It is marked not ready, because nothing has confirmed
+/// anything can receive there.
+fn destinations(fallback: &str) -> Vec<hrc_herdr::LocalAgent> {
+    let listed = crate::herdr_host::Host::connect()
+        .and_then(|mut host| host.destinations())
+        .unwrap_or_default();
+
+    if !listed.is_empty() {
+        return listed;
+    }
+
+    vec![
+        hrc_herdr::LocalAgent::new(fallback, fallback)
+            .as_current(true)
+            .when_ready(false),
+    ]
+}
+
+/// Hands approved text to the chosen local session.
+///
+/// Reports what happened rather than returning an error. The decision is
+/// already recorded and is not undone by a delivery that did not land: the
+/// message was approved, and a person who was told "approved" and then saw
+/// an error would not know which of the two is true. What they need is both
+/// facts, which is what this puts in the answer.
+fn hand_to_herdr(target: &str, text: &str) -> Value {
+    if text.is_empty() {
+        return json!({
+            "handedOver": false,
+            "reason": "the approved content was not available to hand over",
+        });
+    }
+
+    // Reconnected rather than reusing the connection the list came from,
+    // because the screen may have been open for minutes and a server that
+    // restarted in between would leave a dead socket behind.
+    match crate::herdr_host::Host::connect().and_then(|mut host| host.deliver(target, text)) {
+        Ok(()) => json!({ "handedOver": true }),
+        Err(error) => json!({
+            "handedOver": false,
+            "reason": error.to_string(),
+        }),
+    }
 }
 
 /// Whether a human is actually at this terminal.
@@ -196,7 +278,9 @@ async fn connect(endpoint: &Endpoint) -> Result<Client> {
 /// recording one would put a choice in the audit log that nobody made.
 fn wire_decision(outcome: Outcome) -> Option<(String, WireDecision, &'static str)> {
     match outcome {
-        Outcome::DeliverToAgent { message_id, agent } => Some((
+        Outcome::DeliverToAgent {
+            message_id, agent, ..
+        } => Some((
             message_id,
             WireDecision::DeliverToAgent { agent },
             "deliver_to_agent",
@@ -1067,12 +1151,49 @@ impl InboxScreen {
         match inbox_rows(&self.database, &self.channel_id, &self.channel_local_name) {
             Ok((rows, now)) => {
                 self.now = now;
+                self.announce(&rows);
                 self.app.refresh(rows);
             }
             // A failed read must not look like an empty inbox. The rows
             // already on screen stay, and the status line says why they may
             // be out of date.
             Err(error) => self.app.refresh_failed(error.to_string()),
+        }
+    }
+
+    /// Raises a Herdr notification for anything newly actionable.
+    ///
+    /// The ledger decides what is new, so a pane refreshing once a second
+    /// raises nothing on the refreshes where nothing changed — which is
+    /// almost all of them, and is the behaviour people turn notifications
+    /// off over when it is missing.
+    ///
+    /// A failure here is deliberately swallowed. The message is in the inbox
+    /// whether or not a toast appeared, and the pane in front of the person
+    /// already shows it; failing a refresh because a notification did not
+    /// land would replace a missing toast with a missing inbox.
+    fn announce(&mut self, rows: &[hrc_herdr::InboxRow]) {
+        let Ok(notices) = raise_notifications(&self.database, &self.channel_id, rows) else {
+            return;
+        };
+
+        if notices.is_empty() {
+            return;
+        }
+
+        let Ok(mut host) = crate::herdr_host::Host::connect() else {
+            return;
+        };
+
+        for notice in notices {
+            let (Some(text), Some(urgent)) = (
+                notice.get("text").and_then(Value::as_str),
+                notice.get("urgent").and_then(Value::as_bool),
+            ) else {
+                continue;
+            };
+
+            let _ = host.notify(text, urgent);
         }
     }
 
@@ -1209,18 +1330,7 @@ pub fn inbox_snapshot(context: &Context) -> Result<Value> {
     let channel = crate::commands::only_channel(&database)?;
     let (rows, _) = inbox_rows(&database, &channel.channel_id, &channel.local_name)?;
 
-    let notifications: Vec<Value> = rows
-        .iter()
-        .filter(|row| row.awaiting_decision())
-        .filter_map(hrc_herdr::Notification::for_message)
-        .map(|notification| {
-            json!({
-                "text": notification.render(),
-                "urgent": notification.is_urgent(),
-            })
-        })
-        .collect();
-
+    let notifications = raise_notifications(&database, &channel.channel_id, &rows)?;
     let view = hrc_herdr::InboxView::new(rows);
 
     Ok(json!({
@@ -1231,6 +1341,54 @@ pub fn inbox_snapshot(context: &Context) -> Result<Value> {
         "rows": view.rows,
         "notifications": notifications,
     }))
+}
+
+/// The notices this refresh should raise, recording that it raised them.
+///
+/// Called on every read of the inbox, which is once a second while the side
+/// view is open. What makes that safe is that the ledger is in the database
+/// rather than in this process: `record_notification` returns true the first
+/// time a message-and-kind pair is seen and false every time after, across
+/// refreshes and across restarts.
+///
+/// Messages that are no longer awaiting a decision have their notices
+/// resolved in the same pass. A person who declined something should not be
+/// told about it again by a pane that has not caught up, and a resolved row
+/// stays in the ledger so that being decided is distinguishable from never
+/// having been notified.
+fn raise_notifications(
+    database: &Database,
+    channel_id: &str,
+    rows: &[hrc_herdr::InboxRow],
+) -> Result<Vec<Value>> {
+    let now = database.utc_now()?;
+    let mut fresh = Vec::new();
+
+    for row in rows {
+        let Some(notification) = hrc_herdr::Notification::for_message(row) else {
+            continue;
+        };
+
+        if !row.awaiting_decision() {
+            database.resolve_notifications(&row.message_id, &now)?;
+            continue;
+        }
+
+        if database.record_notification(channel_id, &row.message_id, notification.kind(), &now)? {
+            fresh.push(notification);
+        }
+    }
+
+    Ok(hrc_herdr::coalesce(fresh)
+        .into_iter()
+        .map(|notice| {
+            json!({
+                "text": notice.text,
+                "urgent": notice.urgent,
+                "covers": notice.covers,
+            })
+        })
+        .collect())
 }
 
 /// Opens the inbox side view (PRD section 23.2).

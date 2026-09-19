@@ -132,6 +132,25 @@ impl Notification {
         }
     }
 
+    /// The closed tag this notification is recorded under.
+    ///
+    /// The key the durable ledger deduplicates on, alongside the message. It
+    /// is a fixed word from this enum and never sender-chosen text, which is
+    /// what makes it safe to store and to compare — and what keeps a notice
+    /// about one message from suppressing a different notice about the same
+    /// message.
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Notification::NewQuestion { .. } => "new_question",
+            Notification::NewPromptRequest { .. } => "new_prompt_request",
+            Notification::NewTaskRequest { .. } => "new_task_request",
+            Notification::JoinAwaitingApproval { .. } => "join_awaiting_approval",
+            Notification::FailedDelivery { .. } => "failed_delivery",
+            Notification::MembershipChanged { .. } => "membership_changed",
+            Notification::TamperDetected { .. } => "tamper_detected",
+        }
+    }
+
     /// Whether this needs the human now rather than at their convenience.
     pub fn is_urgent(&self) -> bool {
         matches!(
@@ -141,6 +160,65 @@ impl Notification {
                 | Notification::JoinAwaitingApproval { .. }
         )
     }
+}
+
+/// What to raise for a batch of newly actionable messages.
+///
+/// A burst of arrivals is one notice, not one per message. Seven toasts in a
+/// row is the behaviour people turn notifications off over, and the thing
+/// that matters — something is waiting — is said once.
+///
+/// Urgent notices are never collapsed. A tamper halt and a prompt request
+/// each name a specific thing a person has to act on, and folding them into
+/// "4 new remote requests" would lose exactly the information that made them
+/// urgent. So urgent ones are returned as they are, and only the ordinary
+/// ones coalesce.
+///
+/// The coalesced line contains a count and fixed local wording. There is no
+/// path from a sender's text into it, because it is built from how many
+/// there are rather than from what any of them said.
+pub fn coalesce(pending: Vec<Notification>) -> Vec<Coalesced> {
+    let (urgent, ordinary): (Vec<_>, Vec<_>) = pending
+        .into_iter()
+        .partition(|notification| notification.is_urgent());
+
+    let mut raised: Vec<Coalesced> = urgent
+        .into_iter()
+        .map(|notification| Coalesced {
+            text: notification.render(),
+            urgent: true,
+            covers: 1,
+        })
+        .collect();
+
+    match ordinary.len() {
+        0 => {}
+        1 => {
+            raised.push(Coalesced {
+                text: ordinary[0].render(),
+                urgent: false,
+                covers: 1,
+            });
+        }
+        count => raised.push(Coalesced {
+            text: format!("{count} new remote requests"),
+            urgent: false,
+            covers: count,
+        }),
+    }
+
+    raised
+}
+
+/// One notice, after coalescing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Coalesced {
+    /// The line the human sees. Fixed local wording, names and counts only.
+    pub text: String,
+    /// Whether it needs them now.
+    pub urgent: bool,
+    /// How many messages it stands for.
+    pub covers: usize,
 }
 
 #[cfg(test)]
