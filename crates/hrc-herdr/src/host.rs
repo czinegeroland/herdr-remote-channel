@@ -145,6 +145,36 @@ pub fn open_inbox(id: &str) -> String {
     )
 }
 
+/// The share of its split the inbox takes.
+///
+/// Herdr splits evenly, which gave the side view half the window — too much
+/// for a list of names and ages beside the work it is meant to sit next to.
+/// A quarter is wide enough for sender, kind, age and state at the widest
+/// tier, and leaves three quarters for what a person is actually doing.
+pub const INBOX_SHARE: f64 = 0.25;
+
+/// Narrows the inbox to [`INBOX_SHARE`] of its split.
+///
+/// `pane.resize` rather than `layout.set_split_ratio`, which needs a boolean
+/// path from the root of the layout tree and would resize the root split
+/// rather than ours in any workspace that already had one. Resize takes the
+/// pane and nothing else.
+///
+/// The direction is the one that was measured rather than the one that reads
+/// right: on a pane opened to the right, `left` moves the boundary left and
+/// makes it *wider*. Asking for `right` is what shrinks it.
+pub fn narrow(id: &str, pane_id: &str) -> String {
+    request(
+        id,
+        "pane.resize",
+        json!({
+            "pane_id": pane_id,
+            "direction": "right",
+            "amount": INBOX_SHARE,
+        }),
+    )
+}
+
 /// Asks Herdr whether one pane is still there.
 pub fn pane(id: &str, pane_id: &str) -> String {
     request(id, "pane.get", json!({ "pane_id": pane_id }))

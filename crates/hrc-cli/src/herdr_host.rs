@@ -126,6 +126,19 @@ impl Host {
         host::opened_pane(&line, &id).map_err(Unreachable::Host)
     }
 
+    /// Narrows a pane to a quarter of its split.
+    ///
+    /// A failure is the pane staying the size Herdr chose, which is usable.
+    /// Reporting it rather than raising keeps a startup hook from failing
+    /// over a layout preference.
+    pub fn narrow(&mut self, pane_id: &str) -> Result<(), Unreachable> {
+        let id = self.identifier();
+        let line = self.exchange(&id, host::narrow(&id, pane_id))?;
+        host::result(&line, &id)
+            .map(|_| ())
+            .map_err(Unreachable::Host)
+    }
+
     /// Whether a pane Herdr once gave us is still open.
     ///
     /// A missing pane answers with an error rather than a negative, so the

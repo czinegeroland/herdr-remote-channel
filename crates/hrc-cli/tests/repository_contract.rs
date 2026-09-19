@@ -585,3 +585,44 @@ fn extending_the_end_to_end_suite_is_a_written_rule_and_runs_on_every_change() {
         "a path filter would skip the suite for the changes it most needs to see"
     );
 }
+
+#[test]
+fn the_interface_is_checked_against_a_running_herdr_not_only_a_buffer() {
+    // Three interface defects shipped that a person saw in seconds and no
+    // test could: a pane nothing opened, a title that ran past its border,
+    // and a status line that wrapped and pushed the list up. None of them are
+    // about what the program drew — they are about what the host did with it,
+    // which a ratatui buffer cannot see. This holds the check that can.
+    let harness = repository_file("scripts/e2e/ui-frame.py");
+    assert!(
+        harness.contains("plugin.pane.open") && harness.contains("pane.read"),
+        "the UI harness must open a real pane and read it back"
+    );
+    assert!(
+        harness.contains("TIOCSWINSZ"),
+        "the UI harness must set the terminal size it draws into"
+    );
+
+    let conversation = repository_file("scripts/e2e/conversation.sh");
+    assert!(
+        conversation.contains("ui-frame.py"),
+        "the end-to-end conversation must read the drawn interface"
+    );
+
+    let prd = repository_file("docs/PRD.md");
+    assert!(
+        prd.contains("ui-frame.py"),
+        "the working agreement must name the interface check"
+    );
+}
+
+/// One file from the repository root, as text.
+fn repository_file(path: &str) -> String {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("the workspace root is two levels above this crate");
+
+    std::fs::read_to_string(root.join(path))
+        .unwrap_or_else(|error| panic!("{path} should be readable: {error}"))
+}

@@ -82,7 +82,16 @@ pub enum InboxOutcome {
 }
 
 /// The default status line, repeated after a transient message clears.
-const KEYS: &str = "Enter: review   R: refresh   p/u/a: filter   q: close   ?: keys";
+/// What the footer says by default.
+///
+/// Short on purpose. The full list is sixty-three characters, which wrapped
+/// onto a second line in any pane narrower than a half-window and pushed the
+/// list up; a side view that costs two rows to say what the keys are has
+/// spent them badly. `?` swaps in the rest.
+const KEYS: &str = "Enter review \u{b7} p/u/a filter \u{b7} ? keys";
+
+/// The full list, once someone asks for it.
+const KEYS_FULL: &str = "Enter: review  R: refresh  p: pending  u: unread  a: all  q: close";
 
 /// Shown between asking for a reload and the reload finishing.
 const REFRESHING: &str = "Refreshing...";
@@ -117,6 +126,16 @@ pub fn age(arrival_at: &str, now: &str) -> String {
         60..=3599 => format!("{}m", seconds / 60),
         3600..=86_399 => format!("{}h", seconds / 3600),
         _ => format!("{}d", seconds / 86_400),
+    }
+}
+
+/// A duration short enough to sit on a border.
+fn elapsed(seconds: u64) -> String {
+    match seconds {
+        0..=59 => format!("{seconds}s ago"),
+        60..=3599 => format!("{}m ago", seconds / 60),
+        3600..=86_399 => format!("{}h ago", seconds / 3600),
+        _ => format!("{}d ago", seconds / 86_400),
     }
 }
 
@@ -166,6 +185,8 @@ pub struct InboxApp {
     stale: bool,
     /// Set by the refresh key and cleared by the runner that performs it.
     refresh_requested: bool,
+    /// How the channel itself is doing, when the caller knows.
+    health: Option<hrc_herdr::Sidebar>,
 }
 
 impl InboxApp {
@@ -179,6 +200,7 @@ impl InboxApp {
             channel_local_name: channel_local_name.into(),
             stale: false,
             refresh_requested: false,
+            health: None,
         };
         app.settle_selection(None);
         app
@@ -310,7 +332,12 @@ impl InboxApp {
                 None
             }
             KeyCode::Char('?') => {
-                self.status = KEYS.to_owned();
+                // A toggle, so the same key puts the list away again.
+                self.status = if self.status == KEYS_FULL {
+                    KEYS.to_owned()
+                } else {
+                    KEYS_FULL.to_owned()
+                };
                 None
             }
             KeyCode::Enter => match self.selected_message_id() {
@@ -324,6 +351,51 @@ impl InboxApp {
             },
             _ => None,
         }
+    }
+
+    /// Records how the channel is doing, for the line on the bottom border.
+    pub fn set_health(&mut self, health: hrc_herdr::Sidebar) {
+        self.health = Some(health);
+    }
+
+    /// The channel's state, in one line.
+    ///
+    /// This is the PRD section 23.1 indicator. It was computed by
+    /// `hrc herdr event` and handed to a host surface that does not exist —
+    /// Herdr's manifest declares no sidebar — so it went nowhere for as long
+    /// as it has existed. The split is the surface it was describing all
+    /// along: a long-lived side view of one channel (decision DEC-096).
+    ///
+    /// A halted channel takes the whole line. Section 26 makes a tamper halt
+    /// sticky and visible, and a count of unread notes is not what a person
+    /// needs to read first when synchronization stopped because the history
+    /// was rewritten.
+    pub fn health_line(&self) -> String {
+        if self.stale {
+            return "COULD NOT REFRESH".to_owned();
+        }
+
+        let Some(health) = &self.health else {
+            return String::new();
+        };
+
+        if health.halted > 0 {
+            return "HALTED: published history was rewritten".to_owned();
+        }
+
+        let mut parts = Vec::with_capacity(3);
+        if self.pending() > 0 {
+            parts.push(format!("{} waiting on you", self.pending()));
+        }
+        if health.unread > 0 {
+            parts.push(format!("{} unread", health.unread));
+        }
+        parts.push(match health.synced_seconds_ago {
+            Some(seconds) => format!("synced {}", elapsed(seconds)),
+            None => "never synced".to_owned(),
+        });
+
+        parts.join(" \u{b7} ")
     }
 
     /// Whether a key press asked for a reload that has not happened yet.

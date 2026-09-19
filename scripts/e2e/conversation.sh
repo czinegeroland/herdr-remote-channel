@@ -216,6 +216,57 @@ if printf '%s' "$pane" | grep -q "$note"; then
 fi
 ok "the pane row targets $pane_id and is $pane_state"
 
+step "the interface a person sees is what Herdr actually drew"
+# The only check in this repository that reads the rendered interface the way
+# a person does: a real Herdr, a real pane, and the cells that reached the
+# screen. Every other test draws into a ratatui buffer and asserts on that,
+# which cannot see a frame broken by a long title, a pane that exited on
+# startup, or a status line that wrapped and pushed the list up. All three
+# shipped, and a screenshot from a user found two of them.
+if command -v herdr >/dev/null 2>&1; then
+    frame="$(python3 "$here/ui-frame.py" --columns 120 --rows 18 \
+        --session "hrc-e2e-$$" --hrc-home "$bob" 2>/dev/null)" || frame=""
+
+    if [ -z "$frame" ]; then
+        die "Herdr drew nothing for the inbox pane"
+    fi
+
+    printf '%s\n' "$frame" | sed 's/^/    /'
+
+    # The frame is intact: a top border, a bottom border, and no row that ran
+    # past either of them.
+    printf '%s' "$frame" | grep -q '┌' || die "no top border in the frame"
+    printf '%s' "$frame" | grep -q '└' || die "no bottom border in the frame"
+
+    # The channel is named by something a person recognizes rather than by the
+    # locator, which since DEC-081 is a full git URL.
+    if printf '%s' "$frame" | grep -q 'https://'; then
+        die "the pane drew a git URL where a channel name belongs"
+    fi
+
+    # The row is there, naming the verified sender -- alice, who sent it --
+    # and the body is not. Only the first characters: there is no local alias
+    # store yet, so the sender column holds a principal, and the pane
+    # truncates it to the column it has.
+    printf '%s' "$frame" | grep -q "$(printf '%s' "$alice_principal" | cut -c1-8)" \
+        || die "the sender does not appear in the drawn frame"
+
+    # The kind and the age are what make a row scannable, and the health line
+    # is the section 23.1 indicator on the only surface that can show it.
+    printf '%s' "$frame" | grep -q 'note' || die "the message kind is missing"
+    printf '%s' "$frame" | grep -q 'waiting on you' \
+        || die "the channel health line is missing from the frame"
+    if printf '%s' "$frame" | grep -qF "$note"; then
+        die "the drawn frame disclosed a body nobody approved"
+    fi
+
+    # The footer says what the keys do, on one line.
+    printf '%s' "$frame" | grep -q 'Enter review' || die "no key hint in the frame"
+    ok "Herdr drew a frame with the row and without the body"
+else
+    ok "skipped: no Herdr on this machine to draw into"
+fi
+
 step "a note is not announced, and a question is announced once"
 # Section 23.3 lists what notifies. A note is not on that list: it is not
 # urgent, and interrupting someone over one is the behaviour that makes people

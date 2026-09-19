@@ -1199,6 +1199,10 @@ impl InboxScreen {
                 self.now = now;
                 self.announce(&rows);
                 self.app.refresh(rows);
+                // The section 23.1 indicator, on the surface it describes.
+                if let Ok(health) = crate::commands::herdr_sidebar_for(&self.database) {
+                    self.app.set_health(health);
+                }
             }
             // A failed read must not look like an empty inbox. The rows
             // already on screen stay, and the status line says why they may
@@ -1345,6 +1349,12 @@ fn inbox_rows(
     channel_local_name: &str,
 ) -> Result<(Vec<hrc_herdr::InboxRow>, String)> {
     let now = database.utc_now()?;
+
+    // Shortened once, here, so the pane title, every row and every
+    // notification agree on what this channel is called. A notification is
+    // capped at eighty characters by the host, and a locator spent most of
+    // them (decision DEC-095).
+    let channel_local_name = &hrc_herdr::channel_display_name(channel_local_name);
 
     let rows = database
         .plugin_inbox(channel_id)?

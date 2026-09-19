@@ -295,9 +295,10 @@ fn a_failed_refresh_keeps_the_last_rows_and_says_so() {
     assert_eq!(app.visible().len(), 2);
     assert!(app.status().contains("database is locked"));
 
+    // The frame says the rows may be out of date, and the footer says why.
     let rendered = screen(&app, 46, 10);
-    assert!(rendered.contains("STALE"));
-    assert!(rendered.contains("database is locked"));
+    assert!(rendered.contains("COULD NOT REFRESH"), "{rendered}");
+    assert!(rendered.contains("database is locked"), "{rendered}");
 
     app.refresh(rows());
     assert!(!app.stale());
@@ -327,17 +328,23 @@ fn one_row_and_many_rows_both_render() {
         )],
     );
     let rendered = screen(&one, 46, 10);
-    assert!(rendered.contains("alice"));
-    assert!(rendered.contains("PENDING"));
-    assert!(rendered.contains("1 pending"));
+    assert!(rendered.contains("alice"), "{rendered}");
+    assert!(rendered.contains("task"), "{rendered}");
+    // Not `PENDING` on every row: in the pending filter that is a column
+    // repeating what the title already says.
+    assert!(!rendered.contains("PENDING"), "{rendered}");
 
     let mut many = app();
     many.on_key(key(KeyCode::Char('a')));
     let rendered = screen(&many, 46, 10);
     for sender in ["alice", "bob", "carol"] {
-        assert!(rendered.contains(sender), "{sender} is missing");
+        assert!(
+            rendered.contains(sender),
+            "{sender} is missing from {rendered}"
+        );
     }
-    assert!(rendered.contains("DELIVERED"));
+    // A decided row still says so, because that is what changed about it.
+    assert!(rendered.contains("DELIVERED"), "{rendered}");
 }
 
 #[test]
@@ -348,13 +355,19 @@ fn an_empty_filter_says_which_emptiness_it_is() {
         row.decisions = Vec::new();
     }
 
+    // Each emptiness says which one it is, so a person who filtered to
+    // pending and sees nothing knows whether that means nothing arrived or
+    // nothing is waiting on them.
     let app = InboxApp::new("project", decided);
-    assert!(screen(&app, 46, 10).contains("No messages match this filter"));
+    assert!(screen(&app, 46, 10).contains("Nothing is waiting on you"));
 
-    let empty = InboxApp::new("project", Vec::new());
-    let mut empty = empty;
+    let mut empty = InboxApp::new("project", Vec::new());
     empty.on_key(key(KeyCode::Char('a')));
     assert!(screen(&empty, 46, 10).contains("Nothing has arrived yet"));
+
+    let mut unread = InboxApp::new("project", Vec::new());
+    unread.on_key(key(KeyCode::Char('u')));
+    assert!(screen(&unread, 46, 10).contains("Nothing unread"));
 }
 
 #[test]
@@ -456,7 +469,7 @@ fn a_long_channel_name_cannot_break_the_pane_border() {
 
     // And the frame is intact: the top row is the border, one title aside,
     // and no line is longer than the pane.
-    for line in rendered_lines(&rendered, 46) {
+    for line in rendered_rows(&rendered, 46) {
         assert_eq!(line.chars().count(), 46, "a row outran the pane: {line:?}");
     }
 }
@@ -469,7 +482,7 @@ fn a_title_gives_up_the_name_before_the_filter() {
 
     for width in [40, 24, 16, 12, 8, 4, 2, 1] {
         let rendered = screen(&app, width, 6);
-        for line in rendered_lines(&rendered, width) {
+        for line in rendered_rows(&rendered, width) {
             assert_eq!(
                 line.chars().count(),
                 width as usize,
@@ -483,8 +496,133 @@ fn a_title_gives_up_the_name_before_the_filter() {
     assert!(screen(&app, 16, 6).contains("pending"));
 }
 
+#[test]
+fn a_prompt_request_is_marked_because_it_blocks_a_person() {
+    // Every other kind waits for someone. A prompt request is the one that
+    // stops an agent until a person decides, so it is the one row that has to
+    // be findable at a glance — marked in text, not colour (PRD section 27).
+    let mut rows = rows();
+    rows[1].prompt_request = true;
+
+    let mut app = InboxApp::new("project", rows);
+    app.on_key(key(KeyCode::Char('a')));
+
+    let rendered = screen(&app, 46, 10);
+    let marked: Vec<String> = rendered_rows(&rendered, 46)
+        .into_iter()
+        .filter(|line| line.contains('!'))
+        .collect();
+
+    assert_eq!(marked.len(), 1, "exactly one row is urgent: {rendered}");
+    assert!(marked[0].contains("bob"), "{:?}", marked[0]);
+}
+
+#[test]
+fn a_decided_prompt_request_is_no_longer_urgent() {
+    // The mark means "this is waiting on you". Once it has been decided it is
+    // not, however it arrived.
+    let mut rows = rows();
+    rows[2].prompt_request = true;
+    assert_eq!(rows[2].disposition, InboxDisposition::Delivered);
+
+    let mut app = InboxApp::new("project", rows);
+    app.on_key(key(KeyCode::Char('a')));
+
+    let rendered = screen(&app, 46, 10);
+    for line in rendered_rows(&rendered, 46) {
+        if line.contains("carol") {
+            assert!(!line.contains('!'), "{line:?}");
+        }
+    }
+}
+
+#[test]
+fn the_state_column_shows_what_changes_the_decision() {
+    // Not the disposition on every line. What earns the rightmost column is
+    // whatever a person would act on differently: that it can no longer be
+    // acted on, that it carries files, or that it is already dealt with.
+    let mut carrying = rows();
+    carrying[0].attachment_count = 3;
+    carrying[1].verification = Verification::Expired;
+
+    let mut app = InboxApp::new("project", carrying);
+    app.on_key(key(KeyCode::Char('a')));
+
+    let rendered = screen(&app, 60, 10);
+    for line in rendered_rows(&rendered, 60) {
+        if line.contains("alice") {
+            assert!(line.contains("3 files"), "{line:?}");
+        }
+        if line.contains("bob") {
+            assert!(line.contains("EXPIRED"), "{line:?}");
+        }
+    }
+
+    // One attachment is not "1 files".
+    let mut single = rows();
+    single[0].attachment_count = 1;
+    let app = InboxApp::new("project", single);
+    assert!(screen(&app, 60, 10).contains("1 file "));
+}
+
+#[test]
+fn the_channel_health_line_rides_on_the_frame() {
+    // The section 23.1 indicator, which was computed and handed to a host
+    // surface that does not exist. The split is the surface it described.
+    let mut app = InboxApp::new("project", rows());
+    app.set_health(hrc_herdr::Sidebar {
+        unread: 2,
+        approvals: 2,
+        synced_seconds_ago: Some(12),
+        halted: 0,
+    });
+
+    let rendered = screen(&app, 60, 10);
+    assert!(rendered.contains("2 waiting on you"), "{rendered}");
+    assert!(rendered.contains("2 unread"), "{rendered}");
+    assert!(rendered.contains("synced 12s ago"), "{rendered}");
+}
+
+#[test]
+fn a_halted_channel_takes_the_whole_health_line() {
+    // Section 26 makes a tamper halt sticky and visible. A count of unread
+    // notes is not what someone needs to read first when synchronization
+    // stopped because the history was rewritten.
+    let mut app = InboxApp::new("project", rows());
+    app.set_health(hrc_herdr::Sidebar {
+        unread: 9,
+        approvals: 9,
+        synced_seconds_ago: Some(4),
+        halted: 1,
+    });
+
+    let rendered = screen(&app, 60, 10);
+    assert!(rendered.contains("HALTED"), "{rendered}");
+    assert!(!rendered.contains("9 unread"), "{rendered}");
+}
+
+#[test]
+fn the_footer_never_takes_a_second_line() {
+    // The full key list is sixty-three characters. At any pane narrower than
+    // a half window it wrapped and pushed the list up, spending a row of a
+    // side view to say what the keys are.
+    let mut app = InboxApp::new("project", rows());
+
+    for width in [80, 60, 46, 32, 24, 16] {
+        let rows_drawn = rendered_rows(&screen(&app, width, 8), width);
+        let footer = rows_drawn.last().expect("a footer row").clone();
+        assert_eq!(footer.chars().count(), width as usize, "{footer:?}");
+    }
+
+    // `?` swaps in the full list, and swaps it back out again.
+    app.on_key(key(KeyCode::Char('?')));
+    assert!(app.status().contains("R: refresh"), "{}", app.status());
+    app.on_key(key(KeyCode::Char('?')));
+    assert!(!app.status().contains("R: refresh"), "{}", app.status());
+}
+
 /// The rendered buffer split back into rows.
-fn rendered_lines(rendered: &str, width: u16) -> Vec<String> {
+fn rendered_rows(rendered: &str, width: u16) -> Vec<String> {
     rendered
         .chars()
         .collect::<Vec<char>>()

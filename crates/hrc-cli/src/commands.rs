@@ -4301,7 +4301,17 @@ fn place_inbox(context: &Context) -> Value {
     match host.open_inbox() {
         Ok(pane_id) => {
             remember_inbox_pane(&pane_id);
-            json!({ "opened": true, "pane": pane_id })
+
+            // Herdr splits evenly, which is too much window for a list of
+            // names and ages. Reported rather than raised: a pane that stayed
+            // the size the host chose is still a working pane.
+            let narrowed = host.narrow(&pane_id);
+
+            json!({
+                "opened": true,
+                "pane": pane_id,
+                "narrowed": narrowed.is_ok(),
+            })
         }
         Err(error) => json!({ "opened": false, "reason": error.to_string() }),
     }
@@ -4442,8 +4452,15 @@ pub fn herdr_pane(context: &Context, pane: &str) -> Result<Value> {
 
 /// The sidebar line for every configured channel (PRD section 23.1).
 fn herdr_sidebar(context: &Context) -> Result<hrc_herdr::Sidebar> {
-    let database = Database::open(context.paths.database())?;
+    herdr_sidebar_for(&Database::open(context.paths.database())?)
+}
 
+/// The same, over a database the caller already has open.
+///
+/// The inbox side view reloads once a second and holds its own handle;
+/// opening a second one per tick to read a counter would be a file open per
+/// second for the life of the pane.
+pub(crate) fn herdr_sidebar_for(database: &Database) -> Result<hrc_herdr::Sidebar> {
     let mut statuses = Vec::new();
     let mut unread = 0usize;
 
