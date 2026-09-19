@@ -301,6 +301,66 @@ pub fn agent_view(
     }
 }
 
+/// A channel name short enough to sit in a pane title.
+///
+/// `hrc create` records the locator as the channel's local name when the user
+/// did not choose one, and since decision DEC-081 expanded `owner/name` into
+/// `https://github.com/owner/name.git`, that name is a URL. Drawn in a split
+/// title it overflowed the frame and broke the border — found the first time
+/// a person opened the pane on their own channel, which no test had, because
+/// every fixture named its channel something short.
+///
+/// Shortened here rather than at creation so an existing channel is fixed
+/// too: the stored name is what it is, and this is about what may be drawn.
+/// A locator this does not recognize is returned unchanged and clamped by the
+/// renderer, because inventing a name for an unfamiliar shape would be worse
+/// than a long one.
+pub fn channel_display_name(local_name: &str) -> String {
+    let trimmed = local_name.trim_end_matches('/');
+
+    // A git URL, in any of the forms a remote is written in.
+    for prefix in ["https://", "http://", "ssh://", "git://"] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return owner_and_name(rest.split_once('/').map_or(rest, |(_, path)| path));
+        }
+    }
+
+    // `git@github.com:owner/name.git`
+    if let Some((_, path)) = trimmed.split_once(':')
+        && trimmed.contains('@')
+    {
+        return owner_and_name(path);
+    }
+
+    // A filesystem path: the directory it lives in is what a person named.
+    if trimmed.contains(['/', '\\'])
+        && (trimmed.starts_with('/')
+            || trimmed.starts_with('.')
+            || trimmed.as_bytes().get(1).is_some_and(|byte| *byte == b':'))
+    {
+        let leaf = trimmed
+            .rsplit(['/', '\\'])
+            .find(|segment| !segment.is_empty())
+            .unwrap_or(trimmed);
+        return leaf.strip_suffix(".git").unwrap_or(leaf).to_owned();
+    }
+
+    trimmed.to_owned()
+}
+
+/// The last two path segments, without a `.git` suffix.
+fn owner_and_name(path: &str) -> String {
+    let segments: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+
+    let tail = match segments.len() {
+        0 => return path.to_owned(),
+        1 => segments[0].to_owned(),
+        length => format!("{}/{}", segments[length - 2], segments[length - 1]),
+    };
+
+    tail.strip_suffix(".git").unwrap_or(&tail).to_owned()
+}
+
 /// The whole inbox, as the plugin renders it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct InboxView {

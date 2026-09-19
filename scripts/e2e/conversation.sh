@@ -216,6 +216,67 @@ if printf '%s' "$pane" | grep -q "$note"; then
 fi
 ok "the pane row targets $pane_id and is $pane_state"
 
+step "the interface a person sees is what Herdr actually drew"
+# The only check in this repository that reads the rendered interface the way
+# a person does: a real Herdr, a real pane, and the cells that reached the
+# screen. Every other test draws into a ratatui buffer and asserts on that,
+# which cannot see a frame broken by a long title, a pane that exited on
+# startup, or a status line that wrapped and pushed the list up. All three
+# shipped, and a screenshot from a user found two of them.
+if command -v herdr >/dev/null 2>&1; then
+    # Wide enough that the quarter-width split lands in the widest row tier,
+    # where every column is on show. Herdr keeps about twenty-six columns for
+    # its own sidebar before the workspace is divided, so the terminal has to
+    # be generous for the pane to be ordinary. The narrow tiers are covered
+    # where they can be driven exactly: the buffer tests, at every width from
+    # eighty down to one.
+    frame="$(python3 "$here/ui-frame.py" --columns 200 --rows 20 \
+        --session "hrc-e2e-$$" --hrc-home "$bob" 2>/dev/null)" || frame=""
+
+    if [ -z "$frame" ]; then
+        die "Herdr drew nothing for the inbox pane"
+    fi
+
+    printf '%s\n' "$frame" | sed 's/^/    /'
+
+    # The frame is intact: a top border, a bottom border, and no row that ran
+    # past either of them.
+    printf '%s' "$frame" | grep -q '┌' || die "no top border in the frame"
+    printf '%s' "$frame" | grep -q '└' || die "no bottom border in the frame"
+
+    # The channel is named by something a person recognizes rather than by the
+    # locator, which since DEC-081 is a full git URL.
+    if printf '%s' "$frame" | grep -q 'https://'; then
+        die "the pane drew a git URL where a channel name belongs"
+    fi
+
+    # The row is there, naming the verified sender -- alice, who sent it --
+    # and the body is not. Only the first characters: there is no local alias
+    # store yet, so the sender column holds a principal, and the pane
+    # truncates it to the column it has.
+    printf '%s' "$frame" | grep -q "$(printf '%s' "$alice_principal" | cut -c1-8)" \
+        || die "the sender does not appear in the drawn frame"
+
+    # The kind is what makes a row scannable, and the health line is the
+    # section 23.1 indicator on the only surface that can show it. The kind
+    # only appears in the wider tiers, which is why the terminal above is
+    # sized for one -- a narrower pane dropping this column is the design
+    # working, not a regression.
+    printf '%s' "$frame" | grep -q 'note' \
+        || die "the message kind is missing; is the pane in a narrow tier?"
+    printf '%s' "$frame" | grep -q 'waiting on you' \
+        || die "the channel health line is missing from the frame"
+    if printf '%s' "$frame" | grep -qF "$note"; then
+        die "the drawn frame disclosed a body nobody approved"
+    fi
+
+    # The footer says what the keys do, on one line.
+    printf '%s' "$frame" | grep -q 'Enter review' || die "no key hint in the frame"
+    ok "Herdr drew a frame with the row and without the body"
+else
+    ok "skipped: no Herdr on this machine to draw into"
+fi
+
 step "a note is not announced, and a question is announced once"
 # Section 23.3 lists what notifies. A note is not on that list: it is not
 # urgent, and interrupting someone over one is the behaviour that makes people
@@ -243,6 +304,22 @@ again="$(as "$bob" herdr pane inbox --json | json '["notifications"]')"
 [ "$again" = "[]" ] \
     || die "reading the pane a second time announced the same message again: $again"
 ok "announced once: $announced"
+
+step "the startup hook places the inbox rather than printing at it"
+# The defect a user found on the first real install: the hook computed a
+# sidebar line, returned JSON and exited, so opening Herdr placed nothing.
+# There is no Herdr server here, so what this can assert is the half that
+# does not need one -- that the hook reports what it did with the pane rather
+# than staying silent about it, and that it declines rather than erroring
+# when it cannot reach a host.
+startup="$(as "$bob" herdr startup --json)"
+printf '%s' "$startup" | json '["inbox"]' >/dev/null \
+    || die "the startup hook says nothing about the inbox: $startup"
+[ "$(printf '%s' "$startup" | json '["inbox"]["opened"]')" = "False" ] \
+    || die "there is no Herdr here; the hook must not claim it opened a pane"
+printf '%s' "$startup" | json '["inbox"]["reason"]' >/dev/null \
+    || die "a hook that did not place the pane must say why: $startup"
+ok "startup reported the inbox: $(printf '%s' "$startup" | json '["inbox"]["reason"]')"
 
 step "an agent cannot read the body before a human releases it"
 start_daemon "$bob"

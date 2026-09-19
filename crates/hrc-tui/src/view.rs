@@ -708,75 +708,200 @@ pub fn render_members(frame: &mut Frame<'_>, app: &crate::members::MembersApp) {
 pub fn render_inbox(frame: &mut Frame<'_>, app: &crate::inbox::InboxApp, now: &str) {
     let areas = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(2),
-        ])
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
         .split(frame.area());
 
+    let width = areas[0].width;
     let visible = app.visible();
 
-    frame.render_widget(
-        Paragraph::new(Line::from(format!(
-            "{} pending - {} shown{}",
-            app.pending(),
-            visible.len(),
-            if app.stale() { " - STALE" } else { "" },
-        ))),
-        areas[0],
-    );
-
-    // A split can be one column wide. Every row is built to the width the
-    // pane actually has rather than to a fixed layout, so a narrow pane loses
-    // the columns on the right instead of wrapping each message across three
-    // lines and making the list unreadable.
-    let width = areas[1].width.saturating_sub(2) as usize;
+    // A split can be a fifth of a window. Every row is built to the width the
+    // pane actually has rather than to a fixed layout, so a narrow pane drops
+    // whole columns in a chosen order instead of truncating every field at
+    // once or wrapping each message across three lines.
+    let inner = width.saturating_sub(2) as usize;
 
     let items: Vec<ListItem<'_>> = if visible.is_empty() {
-        vec![ListItem::new(Line::from(match app.filter() {
-            crate::inbox::InboxFilter::All => "Nothing has arrived yet.",
-            _ => "No messages match this filter.",
-        }))]
+        vec![ListItem::new(Line::from(clamp(
+            match app.filter() {
+                crate::inbox::InboxFilter::All => "Nothing has arrived yet.",
+                crate::inbox::InboxFilter::Unread => "Nothing unread.",
+                crate::inbox::InboxFilter::Pending => "Nothing is waiting on you.",
+            },
+            inner,
+        )))]
     } else {
         visible
             .iter()
             .map(|row| {
                 let selected = app.selected_message_id() == Some(row.message_id.as_str());
-                let marker = if selected { "> " } else { "  " };
+                let line = row_line(row, selected, now, inner);
 
-                let line = format!(
-                    "{marker}{} {} {} {}",
-                    clamp(&row.sender_local_name, 10),
-                    clamp(&row.kind, 8),
-                    clamp(&crate::inbox::age(&row.arrival_at, now), 4),
-                    row.disposition.as_str(),
-                );
-
+                // The marker carries the selection for a reader who cannot
+                // see the emphasis; the emphasis is an addition to it, never
+                // a replacement (PRD section 27).
                 let style = if selected {
                     Style::default().add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
 
-                ListItem::new(Line::from(Span::styled(clamp(&line, width), style)))
+                ListItem::new(Line::from(Span::styled(line, style)))
             })
             .collect()
     };
 
-    frame.render_widget(
-        List::new(items).block(Block::default().borders(Borders::ALL).title(format!(
-            "{} ({})",
-            app.channel_local_name(),
-            app.filter().as_str()
-        ))),
-        areas[1],
+    // Shortened, then clamped. A channel's local name is whatever
+    // `hrc create` recorded, which for a channel made from `owner/name` is
+    // the expanded git URL — long enough to run past the border and break
+    // the frame. Shortening makes it readable; clamping makes it safe
+    // whatever it is, because the next unreadable name will be one nobody
+    // predicted (decision DEC-095).
+    let title = clamp_title(
+        &hrc_herdr::channel_display_name(app.channel_local_name()),
+        app.filter().as_str(),
+        width,
     );
 
+    // The channel's health rides on the bottom border rather than floating
+    // above the frame. It is the section 23.1 indicator, which until now was
+    // computed and returned to a host surface that does not exist; the split
+    // is the surface it was always describing (decision DEC-096).
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .title_bottom(padded(&app.health_line(), width.saturating_sub(4) as usize));
+
+    frame.render_widget(List::new(items).block(block), areas[0]);
+
     frame.render_widget(
-        Paragraph::new(app.status().to_owned()).wrap(Wrap { trim: false }),
-        areas[2],
+        Paragraph::new(clamp(app.status(), areas[1].width as usize)),
+        areas[1],
     );
+}
+
+/// One row, built to the width the pane actually has.
+///
+/// The columns are dropped whole, right to left, rather than every field
+/// being squeezed: a person scanning this wants to find one row, and a column
+/// of three-letter stubs is harder to scan than one column fewer. What never
+/// goes is who it is from and whether it needs them — the two facts the pane
+/// exists to carry.
+fn row_line(row: &hrc_herdr::InboxRow, selected: bool, now: &str, width: usize) -> String {
+    // Two marks, both spelled rather than coloured. `>` is where the keyboard
+    // is; `!` is a message whose sender asked for the prompt capability, which
+    // is the one kind that blocks on a person rather than waiting for them.
+    let here = if selected { ">" } else { " " };
+    let urgent = if row.prompt_request && row.awaiting_decision() {
+        "!"
+    } else {
+        " "
+    };
+
+    let age = crate::inbox::age(&row.arrival_at, now);
+    let state = row_state(row);
+
+    // Widest first: everything. Then the state, then the kind, then the age,
+    // leaving the sender to take whatever is left.
+    let line = if width >= 34 {
+        format!(
+            "{here}{urgent} {} {} {:>4} {}",
+            clamp(&row.sender_local_name, 10),
+            clamp(&row.kind, 8),
+            age,
+            state
+        )
+    } else if width >= 26 {
+        format!(
+            "{here}{urgent} {} {} {:>4}",
+            clamp(&row.sender_local_name, 10),
+            clamp(&row.kind, 8),
+            age
+        )
+    } else if width >= 18 {
+        format!(
+            "{here}{urgent} {} {:>4}",
+            clamp(&row.sender_local_name, 9),
+            age
+        )
+    } else {
+        format!("{here}{urgent} {}", row.sender_local_name)
+    };
+
+    clamp(&line, width)
+}
+
+/// The one fact about a row worth the rightmost column.
+///
+/// Not the disposition on every line: in the pending filter every row would
+/// read `PENDING`, which is a column that says what the title already says.
+/// What earns the space is whatever changes the decision — that it can no
+/// longer be acted on, that it carries files, or that it has already been
+/// dealt with.
+fn row_state(row: &hrc_herdr::InboxRow) -> String {
+    use hrc_herdr::InboxDisposition;
+    use hrc_herdr::inbox::Verification;
+
+    if row.verification == Verification::Expired {
+        return "EXPIRED".to_owned();
+    }
+
+    match row.disposition {
+        InboxDisposition::Pending => match row.attachment_count {
+            0 => String::new(),
+            1 => "1 file".to_owned(),
+            count => format!("{count} files"),
+        },
+        decided => decided.as_str().to_owned(),
+    }
+}
+
+/// A block title that cannot outrun the border it sits in.
+///
+/// Two cells of the width are the corners and two more keep the title clear
+/// of them. The filter is never dropped: which rows are on show is the part
+/// a person needs when the list looks emptier than they expected, so the
+/// name gives way first and disappears entirely before the filter does.
+fn clamp_title(name: &str, filter: &str, width: u16) -> String {
+    // Two cells for the corners, two to keep clear of them, and two more for
+    // the spaces this puts either side of the text.
+    let available = (width as usize).saturating_sub(6);
+    let suffix = format!(" ({filter})");
+
+    if available <= suffix.chars().count() {
+        return format!(" {} ", suffix.trim());
+    }
+
+    let room = available - suffix.chars().count();
+    let shown: String = if name.chars().count() <= room {
+        name.to_owned()
+    } else if room <= 1 {
+        String::new()
+    } else {
+        name.chars().take(room - 1).collect::<String>() + "…"
+    };
+
+    format!(" {shown}{suffix} ")
+}
+
+/// A border title with a space either side of it, or nothing at all.
+///
+/// An empty string must stay empty: a lone pair of spaces on a border reads
+/// as a gap in the frame rather than as a label with nothing in it.
+fn padded(value: &str, width: usize) -> String {
+    if value.is_empty() {
+        return String::new();
+    }
+
+    let room = width.saturating_sub(2);
+    let shown: String = if value.chars().count() <= room {
+        value.to_owned()
+    } else if room <= 1 {
+        return String::new();
+    } else {
+        value.chars().take(room - 1).collect::<String>() + "…"
+    };
+
+    format!(" {shown} ")
 }
 
 /// Pads or truncates to an exact display width.

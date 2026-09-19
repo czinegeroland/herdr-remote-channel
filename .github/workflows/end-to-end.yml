@@ -179,6 +179,25 @@ jobs:
           # branch while the install assertions above kept their subject.
           echo "$PWD/target/debug" >> "$GITHUB_PATH"
 
+          # A Herdr pane does not run what is on `PATH`. The manifest points
+          # every entry point at `node node_modules/.../bin.js`, which execs
+          # the platform package's executable -- the published one. Without
+          # this the frame the UI check reads would be the last release's
+          # interface rather than this branch's, which is the difference
+          # between testing a change and testing a tag.
+          #
+          # The install assertions above have already run against the
+          # published artifact, so what they verified is untouched.
+          root="$(herdr plugin config-dir herdr-remote-channel 2>/dev/null || true)"
+          installed="$(find "$HOME" -path '*herdr-remote-channel-linux-x64/hrc' \
+            -type f 2>/dev/null | head -1)"
+          if [ -n "$installed" ]; then
+            cp target/debug/hrc "$installed"
+            echo "the plugin pane now runs this branch: $installed"
+          else
+            echo "::warning::no installed plugin executable found; the UI check will read the published interface"
+          fi
+
       - name: A whole conversation, two installations, one repository
         run: |
           set -euo pipefail
