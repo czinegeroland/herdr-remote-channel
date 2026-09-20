@@ -198,6 +198,10 @@ Herdr gives every plugin a configuration directory and names it in
   },
   "notifications": {
     "enabled": true
+  },
+  "indicator": {
+    "pane_token": true,
+    "window_title": false
   }
 }
 ```
@@ -207,6 +211,8 @@ Herdr gives every plugin a configuration directory and names it in
 | `inbox.open_at_startup` | `true` | Whether the startup hook places the inbox split. Turn it off to open the inbox yourself from the `Remote channel inbox` action |
 | `inbox.share` | `0.25` | The share of its split the inbox takes, between `0.1` and `0.9` |
 | `notifications.enabled` | `true` | Whether notifications are raised. The ledger is written either way, so turning them back on does not replay what arrived while they were off |
+| `indicator.pane_token` | `true` | Whether a count is reported beside the inbox pane in Herdr's own sidebar |
+| `indicator.window_title` | `false` | Whether a count is written to the terminal window title. Off by default: the title belongs to the client, and anything else that sets it will be overwritten |
 
 Every setting is optional and a missing file is the ordinary case. A file
 that cannot be parsed, a value outside its range, and a key this build does

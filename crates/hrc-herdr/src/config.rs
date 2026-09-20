@@ -56,6 +56,10 @@ pub struct Config {
     pub inbox_share: f64,
     /// Whether notifications are raised at all.
     pub notifications: bool,
+    /// Whether a count is reported beside the inbox pane in Herdr's sidebar.
+    pub pane_token: bool,
+    /// Whether a count is written to the terminal window title.
+    pub window_title: bool,
 }
 
 impl Default for Config {
@@ -64,6 +68,12 @@ impl Default for Config {
             open_inbox_at_startup: true,
             inbox_share: crate::host::INBOX_SHARE,
             notifications: true,
+            pane_token: true,
+            // Off unless somebody asks for it. The window title belongs to
+            // the client, not to this plugin: anything else that sets it
+            // will be overwritten, and a plugin that quietly took over a
+            // surface it does not own would deserve to be uninstalled.
+            window_title: false,
         }
     }
 }
@@ -126,6 +136,8 @@ struct Document {
     inbox: Option<InboxSection>,
     #[serde(default)]
     notifications: Option<NotificationSection>,
+    #[serde(default)]
+    indicator: Option<IndicatorSection>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -142,6 +154,14 @@ struct NotificationSection {
     enabled: Option<bool>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct IndicatorSection {
+    #[serde(default)]
+    pane_token: Option<bool>,
+    #[serde(default)]
+    window_title: Option<bool>,
+}
+
 /// Every key this build understands, as a path.
 const KNOWN: &[&str] = &[
     "inbox",
@@ -149,6 +169,9 @@ const KNOWN: &[&str] = &[
     "inbox.share",
     "notifications",
     "notifications.enabled",
+    "indicator",
+    "indicator.pane_token",
+    "indicator.window_title",
 ];
 
 /// Reads a configuration document and reports what could not be used.
@@ -193,6 +216,15 @@ pub fn parse(text: &str) -> (Config, Vec<ConfigProblem>) {
         && let Some(enabled) = notifications.enabled
     {
         config.notifications = enabled;
+    }
+
+    if let Some(indicator) = document.indicator {
+        if let Some(pane_token) = indicator.pane_token {
+            config.pane_token = pane_token;
+        }
+        if let Some(window_title) = indicator.window_title {
+            config.window_title = window_title;
+        }
     }
 
     (config, problems)

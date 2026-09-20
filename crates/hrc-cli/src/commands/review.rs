@@ -1226,6 +1226,17 @@ struct InboxScreen {
     /// Each message the popup was opened for, in order, so the command can
     /// report what a person actually looked at.
     reviewed: Vec<String>,
+    /// What this installation was configured to do.
+    config: hrc_herdr::Config,
+    /// The last ambient indicator this pane sent, so an unchanged one is
+    /// not resent.
+    ///
+    /// The pane reloads once a second and the count changes rarely, so
+    /// sending on every tick would be a socket connection per second to say
+    /// the same thing. `None` is "nothing has been sent yet", which differs
+    /// from a sent empty indicator: the first tick of a quiet channel still
+    /// has to clear whatever a previous pane left behind.
+    indicated: Option<hrc_herdr::Indicator>,
 }
 
 impl InboxScreen {
@@ -1238,6 +1249,7 @@ impl InboxScreen {
                 self.app.refresh(rows);
                 // The section 23.1 indicator, on the surface it describes.
                 if let Ok(health) = crate::commands::herdr_sidebar_for(&self.database) {
+                    self.indicate(&health);
                     self.app.set_health(health);
                 }
             }
@@ -1246,6 +1258,46 @@ impl InboxScreen {
             // be out of date.
             Err(error) => self.app.refresh_failed(error.to_string()),
         }
+    }
+
+    /// Puts the count on the surfaces that are visible from elsewhere.
+    ///
+    /// Only when it changed. The pane reloads once a second and the number
+    /// of decisions waiting changes rarely, so an unconditional send would
+    /// open a socket every second to repeat itself.
+    ///
+    /// Failures are swallowed for the reason `announce` gives: the pane in
+    /// front of the person already shows this, and failing a refresh because
+    /// a sidebar token did not land would replace a missing count with a
+    /// missing inbox.
+    fn indicate(&mut self, health: &hrc_herdr::Sidebar) {
+        if !self.config.pane_token && !self.config.window_title {
+            return;
+        }
+
+        let indicator = hrc_herdr::Indicator::from_sidebar(health);
+        if self.indicated.as_ref() == Some(&indicator) {
+            return;
+        }
+
+        let Ok(mut host) = crate::herdr_host::Host::connect() else {
+            return;
+        };
+
+        if self.config.pane_token
+            && let Ok(pane_id) = std::env::var(hrc_herdr::host::PANE_ENV)
+        {
+            let _ = host.report_token(&pane_id, indicator.token.as_deref());
+        }
+
+        if self.config.window_title {
+            let _ = host.set_window_title(indicator.title.as_deref());
+        }
+
+        // Recorded only after the attempt, so a host that was unreachable
+        // for one tick is tried again on the next rather than remembered as
+        // done.
+        self.indicated = Some(indicator);
     }
 
     /// Raises a Herdr notification for anything newly actionable.
@@ -1522,6 +1574,8 @@ pub fn inbox(context: &Context) -> Result<Value> {
         channel_local_name: channel.local_name.clone(),
         now,
         reviewed: Vec::new(),
+        config: crate::commands::plugin_config().0,
+        indicated: None,
     };
 
     hrc_tui::run_ticking(&mut screen, INBOX_REFRESH).map_err(|source| CliError::Io {
