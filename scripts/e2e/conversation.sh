@@ -421,4 +421,14 @@ for refused in review approve rollover; do
 done
 ok "review, approve and rollover all refuse"
 
+# Naming a member publishes nothing, which is exactly why it looks harmless.
+# It is the one field the approval screen asks a human to recognize, so an
+# agent that could write one could relabel a stranger as a colleague and the
+# gate would hold the door open for them (decision DEC-100).
+step "naming a member is a human's call"
+if as "$alice" member name "$bob_principal" "Bob" --json >/dev/null 2>&1; then
+    die "\`hrc member name\` did not refuse a non-interactive caller"
+fi
+ok "an agent cannot decide what this installation calls someone"
+
 printf '\n\033[32mEnd to end: the whole conversation completed.\033[0m\n'
