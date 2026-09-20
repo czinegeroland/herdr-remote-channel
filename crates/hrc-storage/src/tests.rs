@@ -444,6 +444,7 @@ fn concurrent_atomic_composes_form_one_recipient_chain() {
                                     "payload",
                                     "thread",
                                     "note",
+                                    None,
                                     std::slice::from_ref(&recipient),
                                     NOW,
                                     |_| {
@@ -565,6 +566,7 @@ fn failed_atomic_compose_rolls_back_the_sequence_and_outbox() {
         "payload",
         "thread-1",
         "note",
+        None,
         &recipients,
         NOW,
         |_| {
@@ -585,6 +587,7 @@ fn failed_atomic_compose_rolls_back_the_sequence_and_outbox() {
             "payload",
             "thread-1",
             "note",
+            None,
             &recipients,
             NOW,
             |_| {
@@ -619,6 +622,7 @@ fn recipient_predecessors_skip_messages_for_other_devices() {
             "payload-a-1",
             "thread-a",
             "note",
+            None,
             std::slice::from_ref(&alice),
             NOW,
             |_| {
@@ -638,6 +642,7 @@ fn recipient_predecessors_skip_messages_for_other_devices() {
             "payload-b",
             "thread-b",
             "receipt",
+            None,
             std::slice::from_ref(&bob),
             NOW,
             |_| {
@@ -657,6 +662,7 @@ fn recipient_predecessors_skip_messages_for_other_devices() {
             "payload-a-2",
             "thread-a",
             "note",
+            None,
             std::slice::from_ref(&alice),
             NOW,
             |_| {
@@ -699,6 +705,7 @@ fn a_burned_legacy_reservation_is_not_a_new_message_predecessor() {
             "payload",
             "thread",
             "note",
+            None,
             std::slice::from_ref(&recipient),
             NOW,
             |_| {
@@ -731,6 +738,7 @@ fn reseal_replaces_recipients_and_recomputes_their_predecessors() {
             "payload-b",
             "thread-b",
             "note",
+            None,
             std::slice::from_ref(&bob),
             NOW,
             |_| {
@@ -750,6 +758,7 @@ fn reseal_replaces_recipients_and_recomputes_their_predecessors() {
             "payload-stale",
             "thread-stale",
             "note",
+            None,
             std::slice::from_ref(&alice),
             NOW,
             |_| {
@@ -769,6 +778,7 @@ fn reseal_replaces_recipients_and_recomputes_their_predecessors() {
             "payload-later",
             "thread-later",
             "note",
+            None,
             std::slice::from_ref(&bob),
             NOW,
             |_| {
@@ -836,6 +846,7 @@ fn a_fresh_pending_read_observes_staleness_created_by_an_earlier_reseal() {
                 "payload",
                 "thread",
                 "note",
+                None,
                 std::slice::from_ref(&bob),
                 NOW,
                 |_| {
@@ -884,6 +895,7 @@ fn failed_reseal_preserves_ciphertext_epoch_and_recipient_facts() {
             "payload",
             "thread",
             "note",
+            None,
             std::slice::from_ref(&alice),
             NOW,
             |_| {
@@ -931,6 +943,7 @@ fn recipient_predecessors_survive_reopening() {
                 "payload-1",
                 "thread",
                 "note",
+                None,
                 std::slice::from_ref(&alice),
                 NOW,
                 |_| {
@@ -953,6 +966,7 @@ fn recipient_predecessors_survive_reopening() {
             "payload-2",
             "thread",
             "note",
+            None,
             std::slice::from_ref(&alice),
             NOW,
             |_| {
@@ -1239,6 +1253,8 @@ struct Arrival {
     digest: String,
     thread_id: Option<String>,
     in_reply_to: Option<String>,
+    /// Defaults to a note; the unanswered-question tests set it.
+    kind: String,
 }
 
 fn arrival(sequence: u64) -> Arrival {
@@ -1262,6 +1278,7 @@ fn arrival(sequence: u64) -> Arrival {
         device_sequence: sequence,
         thread_id: Some("thread-1".into()),
         in_reply_to: None,
+        kind: "note".into(),
     }
 }
 
@@ -1277,7 +1294,7 @@ impl Arrival {
             previous_chain_id: self.previous_chain_id.as_deref(),
             recipient_device: None,
             recipient_previous_chain_id: None,
-            kind: "note",
+            kind: &self.kind,
             thread_id: self.thread_id.as_deref(),
             in_reply_to: self.in_reply_to.as_deref(),
             roster_epoch: 1,
@@ -2731,5 +2748,176 @@ fn clearing_an_alias_leaves_nothing_behind() {
             .clear_principal_alias(CHANNEL, "principal-1")
             .unwrap(),
         0
+    );
+}
+
+/// Queues one published outgoing message with a chosen kind and target.
+fn sent(
+    database: &mut Database,
+    message_id: &str,
+    kind: &str,
+    in_reply_to: Option<&str>,
+    now: &str,
+) {
+    database
+        .compose_outgoing::<StorageError, _>(
+            CHANNEL,
+            DEVICE,
+            message_id,
+            1,
+            &format!("payload-{message_id}"),
+            "thread-1",
+            kind,
+            in_reply_to,
+            std::slice::from_ref(&recipient("bob")),
+            now,
+            |_| {
+                Ok(OutgoingBuild {
+                    ciphertext: b"ciphertext".to_vec(),
+                    reseal_material: b"protected".to_vec(),
+                })
+            },
+        )
+        .unwrap();
+    database.mark_published(message_id, now).unwrap();
+}
+
+#[test]
+fn a_question_nobody_answered_is_outstanding_in_both_directions() {
+    let mut database = database();
+
+    // They asked us.
+    let mut asked = arrival(1);
+    asked.kind = "question".into();
+    database.record_inbound(&asked.message(), NOW).unwrap();
+
+    // We asked them.
+    sent(&mut database, "ours-1", "question", None, NOW);
+
+    assert_eq!(
+        database.unanswered(CHANNEL).unwrap(),
+        Unanswered {
+            owed: 1,
+            awaiting: 1
+        }
+    );
+}
+
+#[test]
+fn answering_clears_only_the_direction_it_answers() {
+    let mut database = database();
+
+    let mut asked = arrival(1);
+    asked.kind = "question".into();
+    database.record_inbound(&asked.message(), NOW).unwrap();
+    sent(&mut database, "ours-1", "question", None, NOW);
+
+    // Answering theirs leaves ours outstanding.
+    sent(&mut database, "ours-2", "answer", Some("msg-1"), NOW);
+
+    assert_eq!(
+        database.unanswered(CHANNEL).unwrap(),
+        Unanswered {
+            owed: 0,
+            awaiting: 1
+        }
+    );
+}
+
+#[test]
+fn a_later_message_in_the_thread_is_not_an_answer() {
+    let mut database = database();
+
+    let mut asked = arrival(1);
+    asked.kind = "question".into();
+    database.record_inbound(&asked.message(), NOW).unwrap();
+
+    // Same thread, names nothing. A thread accumulates notes, and treating
+    // any of them as an answer would quietly close a question nobody
+    // addressed -- which is the failure this count exists to surface.
+    sent(&mut database, "ours-1", "note", None, NOW);
+
+    assert_eq!(database.unanswered(CHANNEL).unwrap().owed, 1);
+}
+
+#[test]
+fn a_question_that_can_no_longer_be_acted_on_is_not_outstanding() {
+    for disposition in ["declined", "expired"] {
+        let mut database = database();
+
+        let mut asked = arrival(1);
+        asked.kind = "question".into();
+        database.record_inbound(&asked.message(), NOW).unwrap();
+        database
+            .connection
+            .execute(
+                "UPDATE inbox SET disposition = ?1 WHERE message_id = 'msg-1'",
+                params![disposition],
+            )
+            .unwrap();
+
+        assert_eq!(
+            database.unanswered(CHANNEL).unwrap().owed,
+            0,
+            "a {disposition} question is finished, not outstanding"
+        );
+    }
+}
+
+#[test]
+fn a_question_still_queued_is_not_outstanding_on_anybody() {
+    let mut database = database();
+
+    // Queued but never published: nobody has seen it, so nobody has had the
+    // chance to answer, and counting it would tell a person somebody is
+    // sitting on a question they never received.
+    database
+        .compose_outgoing::<StorageError, _>(
+            CHANNEL,
+            DEVICE,
+            "ours-1",
+            1,
+            "payload",
+            "thread-1",
+            "question",
+            None,
+            std::slice::from_ref(&recipient("bob")),
+            NOW,
+            |_| {
+                Ok(OutgoingBuild {
+                    ciphertext: b"ciphertext".to_vec(),
+                    reseal_material: b"protected".to_vec(),
+                })
+            },
+        )
+        .unwrap();
+
+    assert_eq!(database.unanswered(CHANNEL).unwrap().awaiting, 0);
+}
+
+#[test]
+fn notes_are_never_counted_as_questions() {
+    let mut database = database();
+
+    database.record_inbound(&arrival(1).message(), NOW).unwrap();
+    sent(&mut database, "ours-1", "note", None, NOW);
+
+    assert_eq!(database.unanswered(CHANNEL).unwrap(), Unanswered::default());
+}
+
+#[test]
+fn unanswered_questions_are_scoped_to_one_channel() {
+    let mut database = database();
+    database
+        .insert_channel("channel-2", "git", "owner/other", "Other", NOW)
+        .unwrap();
+
+    let mut asked = arrival(1);
+    asked.kind = "question".into();
+    database.record_inbound(&asked.message(), NOW).unwrap();
+
+    assert_eq!(
+        database.unanswered("channel-2").unwrap(),
+        Unanswered::default()
     );
 }

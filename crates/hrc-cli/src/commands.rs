@@ -1617,6 +1617,7 @@ fn compose_body(
         &payload_hash,
         &thread_id,
         kind.as_str(),
+        envelope.in_reply_to.as_deref(),
         &addressed,
         &now,
         |reservation| {
@@ -4560,10 +4561,16 @@ fn herdr_sidebar(context: &Context) -> Result<hrc_herdr::Sidebar> {
 pub(crate) fn herdr_sidebar_for(database: &Database) -> Result<hrc_herdr::Sidebar> {
     let mut statuses = Vec::new();
     let mut unread = 0usize;
+    let mut unanswered = 0usize;
+    let mut awaiting_answer = 0usize;
 
     for channel in database.channels()? {
         let counts = database.channel_counts(&channel.channel_id)?;
         unread = unread.saturating_add(counts.unread as usize);
+
+        let outstanding = database.unanswered(&channel.channel_id)?;
+        unanswered = unanswered.saturating_add(outstanding.owed);
+        awaiting_answer = awaiting_answer.saturating_add(outstanding.awaiting);
 
         statuses.push(ChannelStatus {
             local_name: channel.local_name,
@@ -4577,7 +4584,13 @@ pub(crate) fn herdr_sidebar_for(database: &Database) -> Result<hrc_herdr::Sideba
     // transport revision, so the sidebar reports what it actually knows
     // rather than inventing a duration. Wiring a real age is the work
     // `HRC-SYNC-003` evidence will have to cite when it lands.
-    Ok(hrc_herdr::Sidebar::from_status(&statuses, unread, None))
+    Ok(hrc_herdr::Sidebar::from_status(
+        &statuses,
+        unread,
+        None,
+        unanswered,
+        awaiting_answer,
+    ))
 }
 
 /// Makes the channel's repository publicly readable (PRD requirement

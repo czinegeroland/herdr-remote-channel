@@ -321,6 +321,19 @@ pub struct InboxEntry {
     pub disposition: String,
 }
 
+/// Questions with no answer, counted in both directions.
+///
+/// Two numbers rather than one, because they ask different things of a
+/// person. One is work they owe somebody else; the other is work somebody
+/// else owes them, and only the first is theirs to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Unanswered {
+    /// Questions asked of this installation that it has not answered.
+    pub owed: usize,
+    /// Questions this installation asked that nobody has answered.
+    pub awaiting: usize,
+}
+
 /// One inbox row as the Herdr plugin renders it (PRD section 23.2).
 ///
 /// Every field is either locally observed or a validated identifier. There
@@ -699,6 +712,7 @@ impl Database {
         payload_hash: &str,
         thread_id: &str,
         kind: &str,
+        in_reply_to: Option<&str>,
         recipient_device_ids: &[String],
         now: &str,
         build: F,
@@ -751,10 +765,11 @@ impl Database {
                 "INSERT INTO outbox (
                      message_id, channel_id, device_id, device_sequence, chain_id,
                      previous_chain_id, roster_epoch, payload_hash, ciphertext,
-                     reseal_material, thread_id, kind, state, created_at, updated_at
+                     reseal_material, thread_id, kind, in_reply_to, state,
+                     created_at, updated_at
                  ) VALUES (
-                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                     'queued', ?13, ?13
+                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                     'queued', ?14, ?14
                  )",
                 params![
                     &reservation.message_id,
@@ -769,6 +784,7 @@ impl Database {
                     &built.reseal_material,
                     thread_id,
                     kind,
+                    in_reply_to,
                     now,
                 ],
             )
@@ -1476,6 +1492,60 @@ impl Database {
             statement.query_map(params![channel_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    /// Questions nobody has answered, in both directions.
+    ///
+    /// The largest measured failure mode for coding agents working together
+    /// is a question that goes unanswered, which breaks the decision loop it
+    /// was asked inside. Threads and receipts already existed here; what did
+    /// not was any way to see that a question had fallen on the floor.
+    ///
+    /// "Answered" means a message that names the question as what it
+    /// answers. A later message in the same thread is deliberately not
+    /// enough: a thread accumulates notes, and treating any of them as an
+    /// answer would quietly close a question nobody addressed.
+    ///
+    /// Both halves exclude what can no longer be acted on. An expired or
+    /// declined question is not outstanding -- it is finished, and listing
+    /// it would make the count something people learn to ignore.
+    pub fn unanswered(&self, channel_id: &str) -> Result<Unanswered> {
+        // Asked of this installation: a question that arrived, still stands,
+        // and that nothing this installation sent names as its target.
+        let mut theirs = self.connection.prepare(
+            "SELECT COUNT(*) FROM inbox
+             WHERE channel_id = ?1
+               AND kind = 'question'
+               AND disposition NOT IN ('declined', 'expired')
+               AND NOT EXISTS (
+                   SELECT 1 FROM outbox
+                   WHERE outbox.channel_id = inbox.channel_id
+                     AND outbox.in_reply_to = inbox.message_id
+               )",
+        )?;
+        let owed: i64 = theirs.query_row(params![channel_id], |row| row.get(0))?;
+
+        // Asked by this installation: a question that was published and that
+        // nothing which arrived names as its target. A message still queued
+        // has not reached anyone, so nobody has had the chance to answer it
+        // and it is not outstanding on them.
+        let mut ours = self.connection.prepare(
+            "SELECT COUNT(*) FROM outbox
+             WHERE channel_id = ?1
+               AND kind = 'question'
+               AND state = 'published'
+               AND NOT EXISTS (
+                   SELECT 1 FROM inbox
+                   WHERE inbox.channel_id = outbox.channel_id
+                     AND inbox.in_reply_to = outbox.message_id
+               )",
+        )?;
+        let awaiting: i64 = ours.query_row(params![channel_id], |row| row.get(0))?;
+
+        Ok(Unanswered {
+            owed: owed as usize,
+            awaiting: awaiting as usize,
+        })
     }
 
     /// Records the local human's chosen display name for a principal.

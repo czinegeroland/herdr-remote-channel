@@ -383,12 +383,17 @@ impl InboxApp {
             return "HALTED: published history was rewritten".to_owned();
         }
 
-        let mut parts = Vec::with_capacity(3);
+        let mut parts = Vec::with_capacity(4);
         if self.pending() > 0 {
             parts.push(format!("{} waiting on you", self.pending()));
         }
         if health.unread > 0 {
             parts.push(format!("{} unread", health.unread));
+        }
+        // A question already delivered and never answered leaves nothing in
+        // a pending list, so this is the only place it appears at all.
+        if health.unanswered > 0 {
+            parts.push(format!("{} unanswered", health.unanswered));
         }
         parts.push(match health.synced_seconds_ago {
             Some(seconds) => format!("synced {}", elapsed(seconds)),

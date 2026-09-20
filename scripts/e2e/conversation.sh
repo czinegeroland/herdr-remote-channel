@@ -445,6 +445,37 @@ if as "$bob" inbox --json | grep -q "after the revocation"; then
 fi
 ok "the revoked device gained nothing"
 
+# Decision DEC-103. Alice asked Bob a question earlier and he has never
+# answered it -- he replied to the *note*, which is a different message. A
+# delivered question leaves nothing in a pending list, so this count is the
+# only trace of it anywhere.
+step "a question nobody answered is counted"
+sidebar() { as "$1" herdr startup --json | json '["sidebar"]'; }
+
+printf '%s' "$(sidebar "$bob")" | grep -q '1 unanswered' \
+    || die "bob was asked a question and nothing counted it: $(sidebar "$bob")"
+
+# Bob has already replied to the note by now. A reply to something else in
+# the channel is not an answer to the question, which is the whole point of
+# naming what a message answers rather than reading a thread.
+if printf '%s' "$(sidebar "$alice")" | grep -q 'unanswered'; then
+    die "alice asked the question; she does not owe the answer"
+fi
+
+question_id="$(as "$bob" inbox --json | python3 -c '
+import json, sys
+entries = json.load(sys.stdin)["entries"]
+print(next(e["messageId"] for e in entries if e["kind"] == "question"))
+')"
+[ -n "$question_id" ] || die "bob has no question in his inbox"
+
+as "$bob" reply "$question_id" "yes, exactly once" --json >/dev/null \
+    || die "reply to the question failed"
+if printf '%s' "$(sidebar "$bob")" | grep -q 'unanswered'; then
+    die "answering the question left it counted: $(sidebar "$bob")"
+fi
+ok "counted while open, unmoved by a reply to something else, cleared by an answer"
+
 step "the boundary holds for an agent"
 for refused in review approve rollover; do
     if as "$alice" "$refused" --json >/dev/null 2>&1; then

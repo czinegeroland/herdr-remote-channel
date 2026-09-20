@@ -6,6 +6,8 @@ fn sidebar(unread: usize, approvals: usize, halted: usize) -> Sidebar {
         approvals,
         synced_seconds_ago: Some(12),
         halted,
+        unanswered: 0,
+        awaiting_answer: 0,
     }
 }
 
