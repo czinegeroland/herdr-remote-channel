@@ -38,6 +38,12 @@ pub struct Member {
     /// Supplied rather than guessed, and the reason the screen can refuse to
     /// let someone remove themselves.
     pub is_local: bool,
+    /// What this installation currently calls them, if anything.
+    ///
+    /// `None` is not the same as an empty name: it means nobody has written
+    /// one down, which is the state this screen exists to let a person fix
+    /// while they are looking at the principal ID and the devices behind it.
+    pub display_name: Option<String>,
 }
 
 /// What the human decided.
@@ -52,6 +58,17 @@ pub enum MemberOutcome {
     Revoke {
         /// Which device.
         device_id: String,
+    },
+    /// Record, or forget, what this installation calls a member.
+    ///
+    /// Unlike the other two this publishes nothing and advances no epoch. It
+    /// belongs on this screen anyway, because this is where a human is
+    /// already looking at a principal and deciding what they think of it.
+    Name {
+        /// Which principal.
+        principal_id: String,
+        /// The name to store, or `None` to forget the one on record.
+        display_name: Option<String>,
     },
     /// Leave without changing anything.
     Quit,
@@ -74,10 +91,15 @@ pub struct MembersApp {
     selected_device: usize,
     focus: MemberFocus,
     proposed: Option<(MemberOutcome, String)>,
+    editing: Option<String>,
     status: String,
 }
 
 impl MembersApp {
+    /// The key hints this screen returns to when nothing is in progress.
+    const KEYS: &'static str =
+        "Tab: devices   n: name   r: remove member   v: revoke device   q: leave";
+
     /// Builds the screen over the published roster.
     pub fn new(members: Vec<Member>) -> Self {
         Self {
@@ -86,7 +108,9 @@ impl MembersApp {
             selected_device: 0,
             focus: MemberFocus::Member,
             proposed: None,
-            status: "Tab: devices   r: remove member   v: revoke device   q: leave".into(),
+            editing: None,
+            status: "Tab: devices   n: name   r: remove member   v: revoke device   q: leave"
+                .into(),
         }
     }
 
@@ -125,6 +149,14 @@ impl MembersApp {
         self.proposed.as_ref().map(|(_, prompt)| prompt.as_str())
     }
 
+    /// The name being typed, if the screen is collecting one.
+    ///
+    /// `Some("")` is a real state and differs from `None`: the field is open
+    /// and empty, which is how a person clears a name they no longer want.
+    pub fn editing(&self) -> Option<&str> {
+        self.editing.as_deref()
+    }
+
     /// The line telling the human what to do next.
     pub fn status(&self) -> &str {
         &self.status
@@ -144,6 +176,10 @@ impl MembersApp {
             return self.confirm(key);
         }
 
+        if self.editing.is_some() {
+            return self.type_name(key);
+        }
+
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => Some(MemberOutcome::Quit),
             KeyCode::Tab => {
@@ -161,6 +197,10 @@ impl MembersApp {
                 self.move_selection(-1);
                 None
             }
+            KeyCode::Char('n') => {
+                self.begin_naming();
+                None
+            }
             KeyCode::Char('r') => {
                 self.propose_removal();
                 None
@@ -168,6 +208,64 @@ impl MembersApp {
             KeyCode::Char('v') => {
                 self.propose_revocation();
                 None
+            }
+            _ => None,
+        }
+    }
+
+    /// Opens the name field on the selected member.
+    ///
+    /// Pre-filled with the name on record so that correcting a typo does not
+    /// mean retyping the whole thing, and so that the field shows what is
+    /// being replaced rather than implying there was nothing there.
+    fn begin_naming(&mut self) {
+        let Some(member) = self.selected_member() else {
+            return;
+        };
+
+        self.editing = Some(member.display_name.clone().unwrap_or_default());
+        self.status = "Type a name   Enter: save   empty: clear   Esc: cancel".into();
+    }
+
+    /// Collects one key of a name.
+    ///
+    /// Only ordinary characters are taken. A control character is ignored
+    /// here rather than stored and refused later, so the field never shows a
+    /// person something the daemon is going to reject.
+    fn type_name(&mut self, key: KeyEvent) -> Option<MemberOutcome> {
+        let typed = self.editing.as_mut()?;
+
+        match key.code {
+            KeyCode::Esc => {
+                self.editing = None;
+                self.status = Self::KEYS.into();
+                None
+            }
+            KeyCode::Backspace => {
+                typed.pop();
+                None
+            }
+            KeyCode::Char(character) if !character.is_control() => {
+                if typed.chars().count() < hrc_core::alias::MAX_ALIAS {
+                    typed.push(character);
+                }
+                None
+            }
+            KeyCode::Enter => {
+                let typed = self.editing.take()?;
+                let trimmed = typed.trim();
+                let principal_id = self.selected_member()?.principal_id.clone();
+
+                self.status = Self::KEYS.into();
+
+                Some(MemberOutcome::Name {
+                    principal_id,
+                    display_name: if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_owned())
+                    },
+                })
             }
             _ => None,
         }

@@ -31,18 +31,21 @@ fn release(code: KeyCode) -> KeyEvent {
 fn app() -> ComposeApp {
     ComposeApp::new(vec![
         Recipient {
+            display_name: None,
             principal_id: "principal-alice".into(),
             active: true,
             in_reply_to: None,
             answering: None,
         },
         Recipient {
+            display_name: None,
             principal_id: "principal-bob".into(),
             active: true,
             in_reply_to: None,
             answering: None,
         },
         Recipient {
+            display_name: None,
             principal_id: "principal-gone".into(),
             active: false,
             in_reply_to: None,
@@ -196,6 +199,7 @@ fn a_reply_carries_the_thread_it_answers() {
     // is that the thread comes from local state: a sender that could choose
     // its own thread could attach a reply to any conversation.
     let mut app = ComposeApp::new(vec![Recipient {
+        display_name: None,
         principal_id: "principal-alice".into(),
         active: true,
         in_reply_to: Some("01ARYZ6S41000000000000000A".into()),

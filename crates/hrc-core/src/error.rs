@@ -194,6 +194,13 @@ pub enum CoreError {
         reason: String,
     },
 
+    /// A proposed local display name was not one this build will store.
+    #[error("refusing to store that display name: {reason}")]
+    AliasRefused {
+        /// What was wrong with it, in fixed local wording.
+        reason: String,
+    },
+
     #[error("no approved content for message {message_id}")]
     NoApprovedContent {
         /// The message asked about.

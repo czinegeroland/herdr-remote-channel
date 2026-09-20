@@ -1947,6 +1947,72 @@ fn removing_a_member_and_revoking_a_device_stay_on_the_trusted_surface() {
 }
 
 #[test]
+fn the_startup_hook_honours_this_installations_configuration() {
+    // PRD section 13.2 and decision DEC-101. The startup hook opens a pane
+    // in somebody's workspace; the point of a configuration file is that
+    // they can say no, and that saying it wrong is visible rather than
+    // silent.
+    let (home, _remote) = channel_fixture();
+    let config = tempfile::tempdir().expect("a configuration directory");
+
+    let startup = |home: &std::path::Path| -> Value {
+        let output = hrc_in(home)
+            .env("HERDR_PLUGIN_CONFIG_DIR", config.path())
+            .args(["herdr", "startup", "--json"])
+            .output()
+            .expect("command should run");
+        assert!(output.status.success(), "a startup hook must not fail");
+        serde_json::from_slice(&output.stdout).expect("stdout should be JSON")
+    };
+
+    // No file at all is the ordinary case and must behave as it always did.
+    let value = startup(home.path());
+    assert_ne!(
+        value["inbox"]["reason"].as_str().unwrap_or_default(),
+        "`inbox.open_at_startup` is off in this installation's configuration"
+    );
+
+    std::fs::write(
+        config.path().join("config.json"),
+        br#"{"inbox": {"open_at_startup": false, "shair": 0.5}, "colours": {}}"#,
+    )
+    .expect("a configuration file");
+
+    let value = startup(home.path());
+    assert_eq!(value["inbox"]["opened"], false);
+    assert_eq!(
+        value["inbox"]["reason"],
+        "`inbox.open_at_startup` is off in this installation's configuration"
+    );
+
+    // A key nobody recognizes is reported beside the settings that did
+    // apply, rather than discarding them or failing the hook.
+    let ignored = value["inbox"]["ignored"]
+        .as_array()
+        .expect("ignored settings are listed")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(ignored.contains("inbox.shair"), "got {ignored}");
+    assert!(ignored.contains("colours"), "got {ignored}");
+
+    // A file that is not JSON at all still leaves a working hook.
+    std::fs::write(config.path().join("config.json"), b"{not json").expect("a configuration file");
+
+    let value = startup(home.path());
+    assert!(
+        value["inbox"]["ignored"]
+            .as_array()
+            .expect("ignored settings are listed")
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|problem| problem.contains("valid JSON")),
+        "a malformed file must be reported rather than ignored"
+    );
+}
+
+#[test]
 fn herdr_entry_points_are_dispatched_by_the_same_binary() {
     // PRD requirement HRC-TECH-002: one executable serves the CLI, the
     // daemon, and every Herdr entry point. Each mode below is reached

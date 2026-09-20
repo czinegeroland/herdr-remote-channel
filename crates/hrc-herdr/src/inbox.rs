@@ -301,6 +301,37 @@ pub fn agent_view(
     }
 }
 
+/// How much of a principal ID stands in for a name when none was assigned.
+const PRINCIPAL_STEM: usize = 8;
+
+/// What the sender column shows for a verified principal.
+///
+/// A locally assigned alias when the human who verified this person wrote
+/// one down, and otherwise a shortened principal ID. Both are locally
+/// resolved, which is what section 19.1 requires; neither is text the sender
+/// chose, which is what it forbids.
+///
+/// The fallback is truncated with a trailing `~` rather than an ellipsis
+/// character so that it cannot be mistaken for part of the identifier and so
+/// that it occupies one column in every terminal. It is deliberately ugly:
+/// an unnamed principal *should* read as unfinished business, because
+/// somebody verified this person and did not write down who they were.
+pub fn principal_display_name(principal: &str, alias: Option<&str>) -> String {
+    if let Some(alias) = alias {
+        let alias = alias.trim();
+        if !alias.is_empty() {
+            return alias.to_owned();
+        }
+    }
+
+    let stem: String = principal.chars().take(PRINCIPAL_STEM).collect();
+    if stem.chars().count() < principal.chars().count() {
+        format!("{stem}~")
+    } else {
+        stem
+    }
+}
+
 /// A channel name short enough to sit in a pane title.
 ///
 /// `hrc create` records the locator as the channel's local name when the user

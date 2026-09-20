@@ -29,6 +29,7 @@
 #![warn(missing_docs)]
 
 pub mod agent;
+pub mod config;
 pub mod event;
 pub mod host;
 pub mod inbox;
@@ -38,9 +39,12 @@ pub mod pane;
 pub mod sidebar;
 
 pub use agent::{LocalAgent, Selection};
+pub use config::{Config, ConfigProblem};
 pub use event::{HostEvent, Reaction, reaction_to};
 pub use host::HostError;
-pub use inbox::{InboxDisposition, InboxRow, InboxView, agent_view, channel_display_name};
+pub use inbox::{
+    InboxDisposition, InboxRow, InboxView, agent_view, channel_display_name, principal_display_name,
+};
 pub use manifest::{
     Manifest, PLUGIN_ID, REVIEW_TARGET_ENV, manifest, open_review, open_review_list,
 };

@@ -602,6 +602,10 @@ fn answerable(context: &Context) -> Result<Vec<Recipient>> {
 
     let mut targets = Vec::new();
     for channel in database.channels()? {
+        // Per channel, because an alias is recorded per channel: the same
+        // key verified in two places may have been named in only one.
+        let aliases = database.principal_aliases(&channel.channel_id)?;
+
         for entry in database.inbox_entries(&channel.channel_id)? {
             if entry.sender_principal == local_principal {
                 continue;
@@ -615,6 +619,7 @@ fn answerable(context: &Context) -> Result<Vec<Recipient>> {
             }
 
             targets.push(Recipient {
+                display_name: aliases.get(&entry.sender_principal).cloned(),
                 principal_id: entry.sender_principal,
                 active: true,
                 answering: Some(entry.kind),
@@ -636,6 +641,14 @@ fn addressable(context: &Context) -> Result<Vec<Recipient>> {
     let local = crate::commands::whoami(context)?;
     let local_principal = local["signingKey"].as_str().unwrap_or_default();
 
+    // Read once, before the screen opens, so every row shows the name that
+    // was on record when the person started looking at the roster.
+    let aliases = {
+        let database = Database::open(context.paths.database())?;
+        let channel = crate::commands::only_channel(&database)?;
+        database.principal_aliases(&channel.channel_id)?
+    };
+
     Ok(listed["members"]
         .as_array()
         .map(|members| {
@@ -648,6 +661,7 @@ fn addressable(context: &Context) -> Result<Vec<Recipient>> {
                     }
 
                     Some(Recipient {
+                        display_name: aliases.get(principal_id).cloned(),
                         principal_id: principal_id.to_owned(),
                         active: member["active"].as_bool().unwrap_or(false),
                         in_reply_to: None,
@@ -1083,6 +1097,14 @@ pub fn members(context: &Context) -> Result<Value> {
     let local = crate::commands::whoami(context)?;
     let local_principal = local["signingKey"].as_str().unwrap_or_default();
 
+    // Read once, before the screen opens, so every row shows the name that
+    // was on record when the person started looking at the roster.
+    let aliases = {
+        let database = Database::open(context.paths.database())?;
+        let channel = crate::commands::only_channel(&database)?;
+        database.principal_aliases(&channel.channel_id)?
+    };
+
     let roster: Vec<hrc_tui::Member> = listed["members"]
         .as_array()
         .map(|members| {
@@ -1109,6 +1131,7 @@ pub fn members(context: &Context) -> Result<Value> {
                         // Told rather than guessed: it is what lets the screen
                         // refuse to remove this installation.
                         is_local: principal_id == local_principal,
+                        display_name: aliases.get(&principal_id).cloned(),
                         principal_id,
                         administrator: member["administrator"].as_bool().unwrap_or(false),
                         active: member["active"].as_bool().unwrap_or(false),
@@ -1145,6 +1168,20 @@ pub fn members(context: &Context) -> Result<Value> {
                 device_id: device_id.clone(),
             },
             json!({ "revoked": device_id }),
+        ),
+        MemberOutcome::Name {
+            principal_id,
+            display_name,
+        } => (
+            TrustedRequest::SetAlias {
+                principal_id: principal_id.clone(),
+                display_name: display_name.clone(),
+            },
+            // The principal is named, not the name: this answer is written
+            // to a log and to an agent-readable surface, and the point of
+            // the alias is that it stays on the screen a human is looking
+            // at.
+            json!({ "named": principal_id, "cleared": display_name.is_none() }),
         ),
         MemberOutcome::Quit => {
             return Ok(json!({
@@ -1356,20 +1393,25 @@ fn inbox_rows(
     // them (decision DEC-095).
     let channel_local_name = &hrc_herdr::channel_display_name(channel_local_name);
 
+    // Read once for the whole render, so every row on screen resolves its
+    // sender against the same snapshot. A name that changed halfway down a
+    // list would be the surface disagreeing with itself.
+    let aliases = database.principal_aliases(channel_id)?;
+
     let rows = database
         .plugin_inbox(channel_id)?
         .iter()
         .map(|entry| {
-            // No local alias store exists yet, so the verified principal ID
-            // stands in for the display name. It is locally resolved either
-            // way, which is what section 19.1 requires; what it must never
-            // become is a name the sender chose.
-            hrc_herdr::InboxRow::from_entry(
-                entry,
+            // The name the local human assigned when they verified this
+            // person, falling back to a shortened principal ID. Both are
+            // locally resolved, which is what section 19.1 requires; neither
+            // is a name the sender chose, which is what it forbids.
+            let sender = hrc_herdr::principal_display_name(
                 &entry.sender_principal,
-                channel_local_name,
-                &now,
-            )
+                aliases.get(&entry.sender_principal).map(String::as_str),
+            );
+
+            hrc_herdr::InboxRow::from_entry(entry, &sender, channel_local_name, &now)
         })
         .collect();
 
@@ -1419,6 +1461,7 @@ fn raise_notifications(
 ) -> Result<Vec<Value>> {
     let now = database.utc_now()?;
     let mut fresh = Vec::new();
+    let announcing = crate::commands::plugin_config().0.notifications;
 
     for row in rows {
         let Some(notification) = hrc_herdr::Notification::for_message(row) else {
@@ -1430,7 +1473,15 @@ fn raise_notifications(
             continue;
         }
 
-        if database.record_notification(channel_id, &row.message_id, notification.kind(), &now)? {
+        // The ledger is written either way. Turning notifications off
+        // silences the announcement, not the record of what this
+        // installation would have announced -- so turning them back on does
+        // not replay everything that arrived while they were off, which is
+        // the behaviour that makes a person turn them off permanently.
+        let first =
+            database.record_notification(channel_id, &row.message_id, notification.kind(), &now)?;
+
+        if first && announcing {
             fresh.push(notification);
         }
     }

@@ -24,6 +24,8 @@ struct TestBroker {
     drafts: Vec<String>,
     decisions: Vec<crate::gate::DecisionRecord>,
     applied: Vec<&'static str>,
+    /// Aliases the dispatcher handed down, in the form storage would see.
+    named: Vec<(String, Option<String>)>,
     published_publicly: Option<String>,
 }
 
@@ -36,6 +38,7 @@ impl TestBroker {
             drafts: Vec::new(),
             decisions: Vec::new(),
             applied: Vec::new(),
+            named: Vec::new(),
             published_publicly: None,
         }
     }
@@ -164,6 +167,16 @@ impl Broker for TestBroker {
 
     fn apply_trusted(&mut self, request: &TrustedRequest) -> Result<()> {
         self.applied.push(request.method());
+
+        if let TrustedRequest::SetAlias {
+            principal_id,
+            display_name,
+        } = request
+        {
+            self.named
+                .push((principal_id.clone(), display_name.clone()));
+        }
+
         Ok(())
     }
 }
@@ -234,6 +247,10 @@ fn every_trusted_request() -> Vec<TrustedRequest> {
         },
         TrustedRequest::RemoveMember {
             principal_id: "alice".into(),
+        },
+        TrustedRequest::SetAlias {
+            principal_id: "alice".into(),
+            display_name: Some("Alice".into()),
         },
         TrustedRequest::RevokeDevice {
             device_id: "device-2".into(),
@@ -459,6 +476,7 @@ fn the_section_22_7_list_is_exactly_the_trusted_request_set() {
             "revoke_device",
             "rollover",
             "send_context",
+            "set_alias",
         ]
     );
 
@@ -1023,4 +1041,63 @@ fn the_agent_safe_surface_cannot_publish_a_repository_at_all() {
         "{error:?}"
     );
     assert_eq!(broker.published_publicly, None);
+}
+
+#[test]
+fn a_display_name_the_build_will_not_store_is_refused_at_the_daemon() {
+    // The interface that collected it already refuses these, but section
+    // 16.4 makes the same argument about the publication phrase: a check
+    // that lives only in an interface is one the next interface can ship a
+    // weaker version of.
+    let mut broker = TestBroker::new();
+    let mut ledger = AuthorizationLedger::default();
+    let mut context_ledger = ContextAuthorizationLedger::default();
+
+    for proposed in [
+        "   ",
+        "Al\u{1b}[31mice",
+        &"a".repeat(crate::alias::MAX_ALIAS + 1),
+    ] {
+        let refused = dispatch_trusted(
+            &mut broker,
+            &mut ledger,
+            &mut context_ledger,
+            TrustedRequest::SetAlias {
+                principal_id: "alice".into(),
+                display_name: Some(proposed.to_owned()),
+            },
+            NOW,
+        );
+
+        assert!(
+            matches!(refused, Err(CoreError::AliasRefused { .. })),
+            "`{proposed}` was not refused"
+        );
+    }
+}
+
+#[test]
+fn a_display_name_is_trimmed_before_it_reaches_storage() {
+    let mut broker = TestBroker::new();
+    let mut ledger = AuthorizationLedger::default();
+    let mut context_ledger = ContextAuthorizationLedger::default();
+
+    dispatch_trusted(
+        &mut broker,
+        &mut ledger,
+        &mut context_ledger,
+        TrustedRequest::SetAlias {
+            principal_id: "alice".into(),
+            display_name: Some("  Alice  ".into()),
+        },
+        NOW,
+    )
+    .unwrap();
+
+    // The broker is handed the stored form, not the typed one, so no
+    // implementation of it has to remember to trim.
+    assert_eq!(
+        broker.named.last(),
+        Some(&("alice".to_owned(), Some("Alice".to_owned())))
+    );
 }

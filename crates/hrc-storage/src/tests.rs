@@ -2666,3 +2666,70 @@ fn notifications_are_outstanding_per_channel() {
         1
     );
 }
+
+#[test]
+fn an_alias_replaces_rather_than_accumulates() {
+    let database = database();
+
+    database
+        .set_principal_alias(CHANNEL, "principal-1", "Alice", NOW)
+        .unwrap();
+    database
+        .set_principal_alias(
+            CHANNEL,
+            "principal-1",
+            "Alice Smith",
+            "2026-09-14T00:00:00Z",
+        )
+        .unwrap();
+
+    let aliases = database.principal_aliases(CHANNEL).unwrap();
+    assert_eq!(aliases.len(), 1);
+    assert_eq!(aliases["principal-1"], "Alice Smith");
+}
+
+#[test]
+fn an_alias_is_scoped_to_one_channel() {
+    let database = database();
+    database
+        .insert_channel("channel-2", "git", "owner/other", "Other", NOW)
+        .unwrap();
+
+    database
+        .set_principal_alias(CHANNEL, "principal-1", "Alice", NOW)
+        .unwrap();
+
+    // The same key verified in another channel was never named there, and a
+    // name assigned here is not evidence about who they are over there.
+    assert!(
+        !database
+            .principal_aliases("channel-2")
+            .unwrap()
+            .contains_key("principal-1")
+    );
+}
+
+#[test]
+fn clearing_an_alias_leaves_nothing_behind() {
+    let database = database();
+    database
+        .set_principal_alias(CHANNEL, "principal-1", "Alice", NOW)
+        .unwrap();
+
+    assert_eq!(
+        database
+            .clear_principal_alias(CHANNEL, "principal-1")
+            .unwrap(),
+        1
+    );
+    assert!(database.principal_aliases(CHANNEL).unwrap().is_empty());
+
+    // Clearing what is not there is not an error: the caller asked for the
+    // name to be gone, and it is.
+    assert_eq!(
+        database
+            .clear_principal_alias(CHANNEL, "principal-1")
+            .unwrap(),
+        0
+    );
+}

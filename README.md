@@ -185,6 +185,40 @@ Nothing the plugin can be asked to do approves, delivers, or reveals remote
 content. Approval is a human act on the trusted screen (PRD section 19.2),
 and the reaction type has no variant that could perform one.
 
+## Configuring it
+
+Herdr gives every plugin a configuration directory and names it in
+`HERDR_PLUGIN_CONFIG_DIR`. Write `config.json` there:
+
+```json
+{
+  "inbox": {
+    "open_at_startup": true,
+    "share": 0.25
+  },
+  "notifications": {
+    "enabled": true
+  }
+}
+```
+
+| Setting | Default | What it does |
+|---|---|---|
+| `inbox.open_at_startup` | `true` | Whether the startup hook places the inbox split. Turn it off to open the inbox yourself from the `Remote channel inbox` action |
+| `inbox.share` | `0.25` | The share of its split the inbox takes, between `0.1` and `0.9` |
+| `notifications.enabled` | `true` | Whether notifications are raised. The ledger is written either way, so turning them back on does not replay what arrived while they were off |
+
+Every setting is optional and a missing file is the ordinary case. A file
+that cannot be parsed, a value outside its range, and a key this build does
+not recognize all leave the defaults in place and are **reported** in the
+startup hook's answer, which is what `herdr plugin log list` shows — a
+setting that silently does nothing is the thing that wastes an afternoon.
+
+Nothing here is security-relevant and nothing here may become so. The file is
+ordinary user-editable text with no signature: it configures placement and
+volume, never whether a gate applies, who may decide, or what a surface may
+show.
+
 ## Repository layout
 
 ```text

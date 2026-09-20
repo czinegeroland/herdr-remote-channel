@@ -131,9 +131,9 @@ impl Host {
     /// A failure is the pane staying the size Herdr chose, which is usable.
     /// Reporting it rather than raising keeps a startup hook from failing
     /// over a layout preference.
-    pub fn narrow(&mut self, pane_id: &str) -> Result<(), Unreachable> {
+    pub fn narrow(&mut self, pane_id: &str, share: f64) -> Result<(), Unreachable> {
         let id = self.identifier();
-        let line = self.exchange(&id, host::narrow(&id, pane_id))?;
+        let line = self.exchange(&id, host::narrow(&id, pane_id, share))?;
         host::result(&line, &id)
             .map(|_| ())
             .map_err(Unreachable::Host)

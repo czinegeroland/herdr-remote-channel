@@ -153,7 +153,11 @@ pub fn open_inbox(id: &str) -> String {
 /// tier, and leaves three quarters for what a person is actually doing.
 pub const INBOX_SHARE: f64 = 0.25;
 
-/// Narrows the inbox to [`INBOX_SHARE`] of its split.
+/// Narrows the inbox to `share` of its split.
+///
+/// The share is a parameter rather than the constant because a person may
+/// set one (`inbox.share`), and [`INBOX_SHARE`] is what they get when they
+/// have not.
 ///
 /// `pane.resize` rather than `layout.set_split_ratio`, which needs a boolean
 /// path from the root of the layout tree and would resize the root split
@@ -163,14 +167,14 @@ pub const INBOX_SHARE: f64 = 0.25;
 /// The direction is the one that was measured rather than the one that reads
 /// right: on a pane opened to the right, `left` moves the boundary left and
 /// makes it *wider*. Asking for `right` is what shrinks it.
-pub fn narrow(id: &str, pane_id: &str) -> String {
+pub fn narrow(id: &str, pane_id: &str, share: f64) -> String {
     request(
         id,
         "pane.resize",
         json!({
             "pane_id": pane_id,
             "direction": "right",
-            "amount": INBOX_SHARE,
+            "amount": share,
         }),
     )
 }

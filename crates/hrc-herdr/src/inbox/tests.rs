@@ -192,3 +192,44 @@ fn a_name_a_person_chose_is_left_alone() {
         assert_eq!(channel_display_name(name), name);
     }
 }
+
+#[test]
+fn an_assigned_name_stands_in_for_the_principal() {
+    assert_eq!(
+        principal_display_name("PpWNIUyibQ3l8xK2", Some("Alice")),
+        "Alice"
+    );
+}
+
+#[test]
+fn an_unnamed_principal_is_shortened_and_marked() {
+    // The trailing marker is deliberate: it has to be visible that this is
+    // not the whole identifier, and it must not look like part of one.
+    assert_eq!(
+        principal_display_name("PpWNIUyibQ3l8xK2", None),
+        "PpWNIUyi~"
+    );
+}
+
+#[test]
+fn a_short_principal_is_not_marked_as_truncated() {
+    assert_eq!(principal_display_name("abc", None), "abc");
+    assert_eq!(principal_display_name("abcdefgh", None), "abcdefgh");
+}
+
+#[test]
+fn a_blank_alias_falls_back_rather_than_rendering_nothing() {
+    // Storage refuses to write one, but a row with no label at all cannot be
+    // selected, so the renderer does not depend on that refusal.
+    assert_eq!(
+        principal_display_name("PpWNIUyibQ3l8xK2", Some("   ")),
+        "PpWNIUyi~"
+    );
+}
+
+#[test]
+fn shortening_a_principal_respects_character_boundaries() {
+    // A principal is base64 in practice, but the renderer must not be the
+    // thing that panics if one ever is not.
+    assert_eq!(principal_display_name("ééééééééééé", None), "éééééééé~");
+}

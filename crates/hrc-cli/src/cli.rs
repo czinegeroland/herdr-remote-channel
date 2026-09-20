@@ -187,6 +187,22 @@ pub enum MemberAction {
         #[arg(allow_hyphen_values = true)]
         id: String,
     },
+    /// Record what this installation calls a member.
+    ///
+    /// Local only: nothing is published and the member is never told. The
+    /// name appears in the inbox, in notifications, and on the approval
+    /// screen, in place of the principal ID.
+    Name {
+        /// Principal ID of the member.
+        #[arg(allow_hyphen_values = true)]
+        id: String,
+        /// The name to show. Omit with `--clear` to forget the one on record.
+        #[arg(required_unless_present = "clear")]
+        display_name: Option<String>,
+        /// Forget the name on record and go back to the principal ID.
+        #[arg(long, conflicts_with = "display_name")]
+        clear: bool,
+    },
 }
 
 /// `hrc device ...`
