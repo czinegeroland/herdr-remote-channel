@@ -575,6 +575,8 @@ fn the_channel_health_line_rides_on_the_frame() {
         approvals: 2,
         synced_seconds_ago: Some(12),
         halted: 0,
+        unanswered: 0,
+        awaiting_answer: 0,
     });
 
     let rendered = screen(&app, 60, 10);
@@ -594,6 +596,8 @@ fn a_halted_channel_takes_the_whole_health_line() {
         approvals: 9,
         synced_seconds_ago: Some(4),
         halted: 1,
+        unanswered: 0,
+        awaiting_answer: 0,
     });
 
     let rendered = screen(&app, 60, 10);
@@ -629,4 +633,40 @@ fn rendered_rows(rendered: &str, width: u16) -> Vec<String> {
         .chunks(width as usize)
         .map(|chunk| chunk.iter().collect())
         .collect()
+}
+
+#[test]
+fn the_health_line_names_questions_nobody_answered() {
+    let mut app = InboxApp::new("owner/channel".to_owned(), Vec::new());
+    app.set_health(hrc_herdr::Sidebar {
+        unread: 0,
+        approvals: 0,
+        synced_seconds_ago: Some(3),
+        halted: 0,
+        unanswered: 2,
+        awaiting_answer: 1,
+    });
+
+    // A question already delivered and never answered leaves nothing in a
+    // pending list, so this line is the only place it appears at all.
+    assert!(
+        app.health_line().contains("2 unanswered"),
+        "{}",
+        app.health_line()
+    );
+}
+
+#[test]
+fn a_halted_channel_still_takes_the_whole_health_line() {
+    let mut app = InboxApp::new("owner/channel".to_owned(), Vec::new());
+    app.set_health(hrc_herdr::Sidebar {
+        unread: 5,
+        approvals: 2,
+        synced_seconds_ago: Some(3),
+        halted: 1,
+        unanswered: 9,
+        awaiting_answer: 0,
+    });
+
+    assert_eq!(app.health_line(), "HALTED: published history was rewritten");
 }

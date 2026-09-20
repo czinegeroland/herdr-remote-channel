@@ -24,6 +24,20 @@ pub struct Sidebar {
     pub synced_seconds_ago: Option<u64>,
     /// Channels whose synchronization has halted.
     pub halted: usize,
+    /// Questions asked of this installation that it has not answered.
+    ///
+    /// Distinct from `approvals`: an approval is a message waiting for a
+    /// decision, and this is a decided or even delivered question that was
+    /// never replied to. The second is the one that disappears quietly,
+    /// because nothing is left in a pending list to remind anybody of it.
+    pub unanswered: usize,
+    /// Questions this installation asked that nobody has answered.
+    ///
+    /// Carried but not rendered on the one-line indicator. It is real and
+    /// worth showing where there is room, but the line has to stay short
+    /// and what a person can act on is what they owe, not what they are
+    /// owed.
+    pub awaiting_answer: usize,
 }
 
 impl Sidebar {
@@ -35,12 +49,16 @@ impl Sidebar {
         channels: &[ChannelStatus],
         unread: usize,
         synced_seconds_ago: Option<u64>,
+        unanswered: usize,
+        awaiting_answer: usize,
     ) -> Self {
         Self {
             unread,
             approvals: channels.iter().map(|channel| channel.pending).sum(),
             synced_seconds_ago,
             halted: channels.iter().filter(|channel| channel.halted).count(),
+            unanswered,
+            awaiting_answer,
         }
     }
 
@@ -54,6 +72,9 @@ impl Sidebar {
 
         parts.push(format!("{} unread", self.unread));
         parts.push(plural(self.approvals, "approval"));
+        if self.unanswered > 0 {
+            parts.push(format!("{} unanswered", self.unanswered));
+        }
         parts.push(match self.synced_seconds_ago {
             Some(seconds) => format!("synced {} ago", elapsed(seconds)),
             None => "never synced".to_owned(),

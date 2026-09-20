@@ -1665,6 +1665,24 @@ fn a_question_and_its_reply_share_one_thread() {
         .assert()
         .success();
 
+    // Decision DEC-103: the question is outstanding until something names
+    // it. The thread alone cannot say this, because a thread accumulates
+    // notes and any of them would look like an answer.
+    let sidebar = |home: &std::path::Path| -> String {
+        let output = hrc_in(home)
+            .args(["herdr", "startup", "--json"])
+            .output()
+            .expect("command should run");
+        let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+        value["sidebar"].as_str().unwrap_or_default().to_owned()
+    };
+
+    assert!(
+        sidebar(home.path()).contains("1 unanswered"),
+        "a question with no answer should be counted: {}",
+        sidebar(home.path())
+    );
+
     let replied = hrc_in(home.path())
         .args(["reply", &question_id, "yes, and a cap", "--json"])
         .output()
@@ -1679,6 +1697,14 @@ fn a_question_and_its_reply_share_one_thread() {
     // The reply continues the question's thread rather than starting one.
     assert_eq!(replied["threadId"], asked["threadId"]);
     assert_eq!(replied["kind"], "answer");
+
+    // Naming the question is what closes it, and `reply` is the command
+    // that records the name.
+    assert!(
+        !sidebar(home.path()).contains("unanswered"),
+        "answering the question should clear the count: {}",
+        sidebar(home.path())
+    );
 
     hrc_in(home.path())
         .args(["sync", "--once", "--json"])
