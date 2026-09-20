@@ -105,16 +105,51 @@ Three consequences:
    models "blocked" — as a prompt request needing a human. We are one step from
    "tell my teammate my agent is stuck," which none of them do.
 
-### 3.1 We are not in the marketplace at all
+### 3.1 We are not in the marketplace at all, and our card would be blank
 
 `GET /repos/czinegeroland/herdr-remote-channel/topics` returns `{"names": []}`.
 
-The marketplace index picks up public repositories carrying the GitHub topic
-**`herdr-plugin`** whose default branch contains a parseable
-`herdr-plugin.toml`. We have the manifest. We do not have the topic. **We are
-invisible in a 1,218-plugin marketplace**, and the fix is one API call.
+Fly.io's `superfly/herdr-sprites-plugin` ships a `docs/marketplace.md` release
+checklist which spells out exactly what the index needs and, more usefully,
+**where a plugin card's text comes from**:
 
-This is the highest value-to-effort item in this entire document.
+| Card element | Source |
+|---|---|
+| title / owner | repository owner and name |
+| **description** | **the GitHub repository description field** |
+| stars, language, last-push time | repository metadata |
+| eligibility | public, non-fork, non-archived, `herdr-plugin.toml` at the root |
+| required topic | `herdr-plugin` |
+| suggested topics | `herdr`, `coding-agents`, and related terms |
+
+Our repository metadata, fetched today:
+
+```
+description: None
+homepage:    None
+topics:      []
+stars:       0
+```
+
+This corrects something I got wrong in an earlier pass. I said the fix was the
+**manifest** `description`. It is not — the manifest description is what
+`herdr plugin list` shows *after* installation. The card in the marketplace
+reads the **GitHub repository description**, and ours is empty. Adding the
+topic without setting a description would list us as a title with no sentence
+under it, next to a Fly.io plugin with a polished one.
+
+Both should be set, and they are different jobs: the repo description sells to
+a stranger scrolling 1,218 cards; the manifest description reminds an installed
+user what this is. A repository description worth having says the two things
+nobody else in §3 can say:
+
+> Send encrypted notes, questions, and delegation requests between two
+> different people's Herdr machines. End-to-end encrypted over Git; every
+> inbound message waits behind a human approval gate. Not remote control.
+
+The checklist also notes the index refreshes periodically and picks up
+listings after default-branch updates — so last-push time is card data, and a
+quiet repository looks dead on the shelf.
 
 ---
 
@@ -165,6 +200,53 @@ work.
 | `layout.export` / `session.snapshot` | a context package could carry *the shape of the workspace*, not just files |
 | `worktree.create` | accept a delegation *into an isolated worktree* — the standard fix for concurrent agents, per the 2026 multi-agent literature |
 | `pane.output_matched` / `pane.wait_for_output` | detect an agent asking a question it cannot answer locally, and offer to ask the channel |
+
+### 4.4 What a well-built neighbour does that we do not
+
+`superfly/herdr-sprites-plugin` runs a coding agent inside a persistent Fly.io
+remote environment, driven from a local Herdr pane. It is the most
+professionally built Herdr plugin I found, and it is worth reading as
+engineering rather than as competition — it is still one person reaching
+machines *they own*, so §3 stands.
+
+Four things it does that are directly applicable:
+
+**Non-destructive patch application.** Its `pull` "applies changes via binary
+Git patch without modifying the local index," with conflict detection. This is
+the missing end state for a delegation `result` (§5.3). Our §5 non-goal is
+"automatic merging or application of remote changes" — *automatic* is the
+operative word. A human-approved patch that applies without touching the index
+and reports conflicts rather than resolving them violates nothing, and turns a
+`result` from prose into something a person can act on in one keystroke.
+Combined with §5.3's verifiable reference, a result becomes: *here is a patch,
+it declares base `3f2a91c`, that commit exists in your checkout, and it applies
+cleanly.* That is a complete, safe delegation loop.
+
+**A better-specified context boundary.** It enumerates with `git ls-files`
+across staged, unstaged and untracked files, excludes `.git`, credentials and
+ignored paths, and caps the transfer at 64 MiB by default. §20 has exclusions
+and limits; the `git ls-files` enumeration and the explicit "untracked but not
+ignored" case are sharper than what we specify, and the named default ceiling
+is a good habit.
+
+**Credentials over stdin, never argv.** Independent convergence on §23.4's
+rule that approved content reaches a session over the socket rather than as a
+command-line argument. Worth noting as external corroboration of a decision
+that currently rests on our own reasoning.
+
+**Explicit failure with no silent recovery.** Setup failures are reported and
+the user must intentionally destroy and restart; nothing is silently
+recreated. Same instinct as our refuse-rather-than-guess handling of a
+vanished destination.
+
+And one gap it exposes by contrast: it ships a user `config.json` in the
+plugin config directory. **`HERDR_PLUGIN_CONFIG_DIR` appears nowhere in our
+source.** There is no user-editable configuration at all — not for the polling
+interval, not for which notification kinds are raised, not for whether the
+inbox places itself at startup. The startup hook opening a pane unasked is
+exactly the behaviour a config file exists to make optional.
+
+---
 
 ---
 
@@ -387,8 +469,9 @@ marketplace cluster nobody else can show.
 
 | # | Item | Effort | Why first |
 |---|---|---|---|
-| 1 | Add the `herdr-plugin` GitHub topic (+ `herdr`, `agents`, `e2e-encryption`) | minutes | invisible in a 1,218-plugin marketplace |
-| 2 | Rewrite the manifest `description` to say *two people*, *end-to-end encrypted*, *not remote control* | minutes | we are being read as a phone dashboard |
+| 1 | Set the **GitHub repository description** and homepage (§3.1) | minutes | the marketplace card reads this field and ours is empty |
+| 2 | Add topics `herdr-plugin`, `herdr`, `coding-agents` | minutes | invisible in a 1,218-plugin marketplace without the first one |
+| 2b | Rewrite the **manifest** `description` too — different job, different reader (§3.1) | minutes | what an installed user sees |
 | 3 | Local alias store, captured at the safety-phrase ceremony (§6.2) | small | the worst thing in the UI |
 | 4 | `client.window_title.set` ambient indicator (§6.3) | small | the indicator §23.1 wanted |
 | 5 | Unanswered-question state and filter (§5.5) | small | addresses a measured 26% failure mode |
@@ -396,7 +479,9 @@ marketplace cluster nobody else can show.
 | 7 | Verifiable result references (§5.3) | medium | the differentiator; a measured 32% failure mode |
 | 8 | `pane.agent_status_changed` → blocked-agent broadcast (§5.1) | medium | the most-wanted thing in the ecosystem |
 | 9 | Close DEC-091 using `server.agent_manifests` + `agent.start` (§4.3) | medium | no longer blocked on a missing capability |
-| 10 | State the A2A relationship in §21/M5 (§5.6) | writing | before someone asks |
+| 10 | Non-destructive patch application for delegation results (§4.4) | medium | completes the delegation loop without breaking a non-goal |
+| 11 | A user `config.json` in `HERDR_PLUGIN_CONFIG_DIR` (§4.4) | small | zero user configuration exists today |
+| 12 | State the A2A relationship in §21/M5 (§5.6) | writing | before someone asks |
 
 Items 1 and 2 are not engineering. They are the reason nobody has found this
 product.
@@ -430,6 +515,7 @@ product.
 - herdr-remote — https://github.com/dcolinmorgan/herdr-remote · herdr-push — https://github.com/dcolinmorgan/herdr-push
 - herdr-mobile-relay — https://github.com/0cv/herdr-mobile-relay · herdr-web — https://github.com/barnuri/herdr-web
 - herdr-ntfysh — https://github.com/cobanov/herdr-ntfysh · cmux-herdr — https://github.com/tomoya55/cmux-herdr
+- herdr-sprites-plugin (Fly.io) — [marketplace checklist](https://github.com/superfly/herdr-sprites-plugin/blob/main/docs/marketplace.md) · [README](https://github.com/superfly/herdr-sprites-plugin)
 - herdr-agentflow dashboard spec — https://github.com/ogglord/herdr-agentflow/issues/15
 - A2A protocol — https://a2a-protocol.org/latest/ · https://en.wikipedia.org/wiki/Agent2Agent
 - LangChain Agent Inbox — https://github.com/langchain-ai/agent-inbox · [interrupt](https://www.langchain.com/blog/making-it-easier-to-build-human-in-the-loop-agents-with-interrupt)
