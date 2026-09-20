@@ -37,7 +37,10 @@ pub fn requires_trusted_human(command: &Command) -> bool {
             join.action,
             Some(JoinAction::Approve { .. } | JoinAction::Reject { .. })
         ),
-        Command::Member(member) => matches!(member.action, MemberAction::Remove { .. }),
+        // Naming a member is local and publishes nothing, but it is still a
+        // human's call: the name it writes is the one the approval screen
+        // asks a person to recognize before a body is released.
+        Command::Member(_) => true,
         Command::Device(device) => matches!(device.action, DeviceAction::Revoke { .. }),
         _ => false,
     }
@@ -134,6 +137,7 @@ pub fn command_path(command: &Command) -> String {
         Command::Members => "members".into(),
         Command::Member(member) => match member.action {
             MemberAction::Remove { .. } => "member remove".into(),
+            MemberAction::Name { .. } => "member name".into(),
         },
         Command::Device(device) => match device.action {
             DeviceAction::List => "device list".into(),
@@ -330,6 +334,7 @@ mod boundary_tests {
             ("approve_join", &["hrc", "join", "approve", "join-1"]),
             ("reject_join", &["hrc", "join", "reject", "join-1"]),
             ("remove_member", &["hrc", "member", "remove", "alice"]),
+            ("set_alias", &["hrc", "member", "name", "alice", "Alice"]),
             ("revoke_device", &["hrc", "device", "revoke", "device-1"]),
             (
                 "make_repository_public",
@@ -381,6 +386,10 @@ mod boundary_tests {
             },
             TrustedRequest::RemoveMember {
                 principal_id: String::new(),
+            },
+            TrustedRequest::SetAlias {
+                principal_id: String::new(),
+                display_name: None,
             },
             TrustedRequest::RevokeDevice {
                 device_id: String::new(),

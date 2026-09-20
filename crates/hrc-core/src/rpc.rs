@@ -144,6 +144,20 @@ pub enum TrustedRequest {
         /// Which principal.
         principal_id: String,
     },
+    /// Record, or forget, the local display name for a member.
+    ///
+    /// Local only: it publishes nothing, advances no epoch, and is never
+    /// visible to the person it names. It is trusted all the same, because
+    /// the alias is the text the approval screen asks a human to recognize
+    /// before releasing a body. A caller that could write one could relabel
+    /// a stranger as a colleague, which defeats the gate through its own
+    /// interface rather than around it.
+    SetAlias {
+        /// Which principal.
+        principal_id: String,
+        /// The name to show, or `None` to forget the one on record.
+        display_name: Option<String>,
+    },
     /// Revoke one device.
     RevokeDevice {
         /// Which device.
@@ -281,6 +295,7 @@ impl TrustedRequest {
             TrustedRequest::ApproveJoin { .. } => "approve_join",
             TrustedRequest::RejectJoin { .. } => "reject_join",
             TrustedRequest::RemoveMember { .. } => "remove_member",
+            TrustedRequest::SetAlias { .. } => "set_alias",
             TrustedRequest::RevokeDevice { .. } => "revoke_device",
             TrustedRequest::GrantCapability { .. } => "grant_capability",
             TrustedRequest::MakeRepositoryPublic { .. } => "make_repository_public",
@@ -805,6 +820,33 @@ pub fn dispatch_trusted(
                 agent,
                 framed: delivered.framed,
             }
+        }
+
+        // Checked here, not in the interface that collected it, for the
+        // same reason the publication phrase is: an alias is what the gate's
+        // own screen asks a human to recognize, and a second interface must
+        // not be able to ship a laxer idea of what may be written into that
+        // field.
+        TrustedRequest::SetAlias {
+            principal_id,
+            display_name,
+        } => {
+            let display_name = match display_name {
+                Some(proposed) => {
+                    Some(crate::alias::check_alias(&proposed).map_err(|refusal| {
+                        CoreError::AliasRefused {
+                            reason: refusal.as_str().to_owned(),
+                        }
+                    })?)
+                }
+                None => None,
+            };
+
+            broker.apply_trusted(&TrustedRequest::SetAlias {
+                principal_id,
+                display_name,
+            })?;
+            TrustedResponse::Done
         }
 
         other => {

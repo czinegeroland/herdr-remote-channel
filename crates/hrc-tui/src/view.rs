@@ -261,7 +261,10 @@ pub fn render_compose(frame: &mut Frame<'_>, app: &crate::compose::ComposeApp) {
 
             ListItem::new(Line::from(vec![
                 Span::raw(marker),
-                Span::raw(recipient.principal_id.clone()),
+                Span::raw(hrc_herdr::principal_display_name(
+                    &recipient.principal_id,
+                    recipient.display_name.as_deref(),
+                )),
                 Span::raw(answering),
                 Span::raw(state),
             ]))
@@ -631,8 +634,17 @@ pub fn render_members(frame: &mut Frame<'_>, app: &crate::members::MembersApp) {
                 format!("  [{}]", labels.join(", "))
             };
 
+            // The principal stays on the line beside the name. This is the
+            // screen where a person decides what to call someone, so it is
+            // the one screen that must show both: a name is only worth
+            // anything if you can see which key it was attached to.
+            let named = match &member.display_name {
+                Some(display_name) => format!("{display_name}  "),
+                None => String::new(),
+            };
+
             ListItem::new(Line::from(format!(
-                "{marker}{}{suffix}",
+                "{marker}{named}{}{suffix}",
                 member.principal_id
             )))
         })

@@ -3779,6 +3779,38 @@ impl Broker for DaemonBroker {
             // which is the administrator's business and not the channel's.
             TrustedRequest::RejectJoin { .. } => return Ok(()),
 
+            // Local only. An alias is what *this* installation calls
+            // someone; publishing it would tell the channel what its members
+            // think of each other, and would let a name one person chose
+            // reach a screen belonging to someone who did not choose it.
+            TrustedRequest::SetAlias {
+                principal_id,
+                display_name,
+            } => {
+                let database = Database::open(self.context.paths.database())
+                    .map_err(|error| hrc_core::CoreError::Transport(error.to_string()))?;
+                let channel = only_channel(&database)
+                    .map_err(|error| hrc_core::CoreError::Transport(error.to_string()))?;
+                let now = database
+                    .utc_now()
+                    .map_err(|error| hrc_core::CoreError::Transport(error.to_string()))?;
+
+                match display_name {
+                    Some(display_name) => database.set_principal_alias(
+                        &channel.channel_id,
+                        principal_id,
+                        display_name,
+                        &now,
+                    ),
+                    None => database
+                        .clear_principal_alias(&channel.channel_id, principal_id)
+                        .map(|_| ()),
+                }
+                .map_err(|error| hrc_core::CoreError::Transport(error.to_string()))?;
+
+                return Ok(());
+            }
+
             // The rest are not membership changes and have no control entry.
             _ => return Ok(()),
         };

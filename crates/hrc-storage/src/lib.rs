@@ -1478,6 +1478,67 @@ impl Database {
             .map_err(Into::into)
     }
 
+    /// Records the local human's chosen display name for a principal.
+    ///
+    /// Replaces any previous name rather than accumulating them: this is
+    /// what the local person calls someone *now*, not a history of what they
+    /// have called them. The audit log is where the sequence of decisions
+    /// belongs, and a name is not a decision about a message.
+    ///
+    /// Reaching this method is a trusted operation. An alias is the text a
+    /// human reads when deciding whether to trust a message, so an agent
+    /// that could write one could relabel a stranger as a colleague --
+    /// which would defeat the gate by way of the only field the gate's own
+    /// screen asks the human to recognize.
+    pub fn set_principal_alias(
+        &self,
+        channel_id: &str,
+        principal: &str,
+        display_name: &str,
+        now: &str,
+    ) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO principal_alias (channel_id, principal, display_name, assigned_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (channel_id, principal)
+             DO UPDATE SET display_name = excluded.display_name,
+                           assigned_at = excluded.assigned_at",
+            params![channel_id, principal, display_name, now],
+        )?;
+
+        Ok(())
+    }
+
+    /// Forgets the local display name for a principal.
+    ///
+    /// Deleting rather than blanking, because an empty name and no name are
+    /// the same thing to every surface that reads this table, and one of the
+    /// two would be a value the render code has to remember to reject.
+    pub fn clear_principal_alias(&self, channel_id: &str, principal: &str) -> Result<usize> {
+        Ok(self.connection.execute(
+            "DELETE FROM principal_alias WHERE channel_id = ?1 AND principal = ?2",
+            params![channel_id, principal],
+        )?)
+    }
+
+    /// Every locally assigned display name in a channel, by principal.
+    ///
+    /// Returned whole rather than looked up per row: the inbox resolves one
+    /// name per line and a channel has a handful of members, so one query
+    /// beats one query per message, and every row in a single render is then
+    /// resolved against the same snapshot.
+    pub fn principal_aliases(&self, channel_id: &str) -> Result<BTreeMap<String, String>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT principal, display_name FROM principal_alias WHERE channel_id = ?1")?;
+        let rows = statement.query_map(params![channel_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        rows.collect::<std::result::Result<BTreeMap<_, _>, _>>()
+            .map_err(Into::into)
+    }
+
     /// Returns every body still owned by the trusted prompt gate.
     pub fn pending_inbound(&self) -> Result<Vec<PendingInbound>> {
         let mut statement = self.connection.prepare(

@@ -48,6 +48,14 @@ impl ComposeKind {
 pub struct Recipient {
     /// The verified principal.
     pub principal_id: String,
+    /// What this installation calls them, if anything.
+    ///
+    /// Addressing someone by a base64 principal is the same problem the
+    /// inbox had: the one field a person needs to read is the one they
+    /// cannot. `None` falls back to a shortened principal rather than to
+    /// nothing, because a recipient with no label at all could not be
+    /// chosen.
+    pub display_name: Option<String>,
     /// Whether the roster still lists them as active.
     pub active: bool,
     /// The message this would answer, when the target is a reply.

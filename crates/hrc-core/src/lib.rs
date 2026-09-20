@@ -8,6 +8,7 @@
 //!
 //! See PRD sections 13.1 and 19.
 
+pub mod alias;
 pub mod context;
 pub mod delegation;
 pub mod enrollment;
