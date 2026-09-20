@@ -1461,6 +1461,7 @@ fn raise_notifications(
 ) -> Result<Vec<Value>> {
     let now = database.utc_now()?;
     let mut fresh = Vec::new();
+    let announcing = crate::commands::plugin_config().0.notifications;
 
     for row in rows {
         let Some(notification) = hrc_herdr::Notification::for_message(row) else {
@@ -1472,7 +1473,15 @@ fn raise_notifications(
             continue;
         }
 
-        if database.record_notification(channel_id, &row.message_id, notification.kind(), &now)? {
+        // The ledger is written either way. Turning notifications off
+        // silences the announcement, not the record of what this
+        // installation would have announced -- so turning them back on does
+        // not replay everything that arrived while they were off, which is
+        // the behaviour that makes a person turn them off permanently.
+        let first =
+            database.record_notification(channel_id, &row.message_id, notification.kind(), &now)?;
+
+        if first && announcing {
             fresh.push(notification);
         }
     }

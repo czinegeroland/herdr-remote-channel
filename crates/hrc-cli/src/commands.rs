@@ -4303,9 +4303,44 @@ pub fn herdr_startup(context: &Context) -> Result<Value> {
 /// Every failure is reported rather than raised. A failed startup hook shows
 /// a person a broken plugin, and not placing a pane is not a broken plugin.
 fn place_inbox(context: &Context) -> Value {
+    let (config, problems) = plugin_config();
+    let mut answer = placement(context, &config);
+
+    // Attached to whatever the placement decided rather than repeated on
+    // each of its six exits, because a setting that was ignored has to be
+    // reported on every one of them and the exit that forgot would be the
+    // one somebody hit. The hook's answer is what Herdr's plugin log
+    // records, which is where a person looks when a setting seems not to
+    // work.
+    if let Some(object) = answer.as_object_mut() {
+        object.insert(
+            "ignored".into(),
+            Value::from(
+                problems
+                    .iter()
+                    .map(hrc_herdr::ConfigProblem::as_str)
+                    .collect::<Vec<_>>(),
+            ),
+        );
+    }
+
+    answer
+}
+
+/// Where the inbox goes, given what this installation was configured to do.
+fn placement(context: &Context, config: &hrc_herdr::Config) -> Value {
+    if !config.open_inbox_at_startup {
+        return json!({
+            "opened": false,
+            "reason": "`inbox.open_at_startup` is off in this installation's configuration",
+        });
+    }
+
     let database = match Database::open(context.paths.database()) {
         Ok(database) => database,
-        Err(error) => return json!({ "opened": false, "reason": error.to_string() }),
+        Err(error) => {
+            return json!({ "opened": false, "reason": error.to_string() });
+        }
     };
 
     match database.channels() {
@@ -4337,15 +4372,45 @@ fn place_inbox(context: &Context) -> Value {
             // Herdr splits evenly, which is too much window for a list of
             // names and ages. Reported rather than raised: a pane that stayed
             // the size the host chose is still a working pane.
-            let narrowed = host.narrow(&pane_id);
+            let narrowed = host.narrow(&pane_id, config.inbox_share);
 
             json!({
                 "opened": true,
                 "pane": pane_id,
                 "narrowed": narrowed.is_ok(),
+                "share": config.inbox_share,
             })
         }
-        Err(error) => json!({ "opened": false, "reason": error.to_string() }),
+        Err(error) => json!({ "opened": false, "reason": error.to_string()  }),
+    }
+}
+
+/// Reads this installation's plugin configuration.
+///
+/// Herdr names the directory; a missing variable means the plugin is not
+/// running under Herdr at all, which is the ordinary case for a test and for
+/// someone driving `hrc` directly, and the defaults are correct there.
+///
+/// A file that cannot be read is reported rather than raised. Configuration
+/// governs placement and volume, never a gate, so nothing here is worth
+/// failing a startup hook over — and a hook that failed would show a person
+/// a broken plugin for a stray character in a file they wrote.
+pub(crate) fn plugin_config() -> (hrc_herdr::Config, Vec<hrc_herdr::ConfigProblem>) {
+    let Some(directory) = std::env::var_os(hrc_herdr::config::CONFIG_ENV) else {
+        return (hrc_herdr::Config::default(), Vec::new());
+    };
+
+    let path = std::path::PathBuf::from(directory).join(hrc_herdr::config::CONFIG_FILE);
+
+    match std::fs::read_to_string(&path) {
+        Ok(text) => hrc_herdr::config::parse(&text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            (hrc_herdr::Config::default(), Vec::new())
+        }
+        Err(_) => (
+            hrc_herdr::Config::default(),
+            vec![hrc_herdr::ConfigProblem::Unreadable],
+        ),
     }
 }
 

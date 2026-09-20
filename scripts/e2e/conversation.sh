@@ -321,6 +321,38 @@ printf '%s' "$startup" | json '["inbox"]["reason"]' >/dev/null \
     || die "a hook that did not place the pane must say why: $startup"
 ok "startup reported the inbox: $(printf '%s' "$startup" | json '["inbox"]["reason"]')"
 
+# Decision DEC-101. The hook opens a pane in somebody's workspace, so a
+# person has to be able to say no -- and saying it wrong has to be visible
+# rather than silent, which is the half that is easy to ship broken.
+step "the startup hook honours this installation's configuration"
+config="$bob/plugin-config"
+mkdir -p "$config"
+printf '{"inbox": {"open_at_startup": false, "shair": 0.5}, "colours": {}}' \
+    > "$config/config.json"
+
+configured="$(HERDR_PLUGIN_CONFIG_DIR="$config" as "$bob" herdr startup --json)"
+printf '%s' "$configured" | json '["inbox"]["reason"]' \
+    | grep -q 'open_at_startup' \
+    || die "configuration did not reach the hook: $configured"
+
+ignored="$(printf '%s' "$configured" | json '["inbox"]["ignored"]')"
+printf '%s' "$ignored" | grep -q 'inbox.shair' \
+    || die "a misspelled setting was ignored silently: $ignored"
+printf '%s' "$ignored" | grep -q 'colours' \
+    || die "an unknown section was ignored silently: $ignored"
+
+# A file nobody can parse must still leave a working hook: configuration
+# governs placement, and a startup hook that failed over a stray character
+# would show a person a broken plugin.
+printf '{not json' > "$config/config.json"
+broken="$(HERDR_PLUGIN_CONFIG_DIR="$config" as "$bob" herdr startup --json)" \
+    || die "a malformed configuration file failed the startup hook"
+printf '%s' "$broken" | json '["inbox"]["ignored"]' | grep -q 'valid JSON' \
+    || die "a malformed file was not reported: $broken"
+
+rm -rf "$config"
+ok "a setting applies, a typo is named, and a broken file is survivable"
+
 step "an agent cannot read the body before a human releases it"
 start_daemon "$bob"
 if python3 "$here/trusted-call.py" "$bob/run/hrc-agent.sock" show_approved \
