@@ -179,6 +179,69 @@ pub fn narrow(id: &str, pane_id: &str, share: f64) -> String {
     )
 }
 
+/// How long Herdr keeps a metadata token this plugin reported.
+///
+/// The pane that reports a token refreshes once a second, so a token that
+/// outlived its pane by more than a few seconds would be a count nobody is
+/// maintaining -- Herdr's own sidebar showing "2 waiting" beside a pane that
+/// closed. Five seconds is long enough to survive a slow tick and short
+/// enough that a dead pane's claim disappears on its own, without this
+/// plugin having to clear it from a process that is no longer running.
+pub const TOKEN_TTL_MS: u64 = 5_000;
+
+/// Herdr caps a metadata time to live at twenty-four hours. Held at compile
+/// time rather than in a test, because a constant that broke the host's
+/// contract should not build at all.
+const _: () = assert!(TOKEN_TTL_MS <= 86_400_000);
+
+/// The token key this plugin reports under.
+///
+/// One key, matching Herdr's `^[A-Za-z0-9_-]{1,32}$`. A token per count
+/// would put three of our words in a sidebar that belongs to the host and
+/// has other plugins in it.
+pub const TOKEN: &str = "hrc";
+
+/// Reports a count beside the inbox pane in Herdr's own sidebar.
+///
+/// `pane.report_metadata` rather than a surface of our own: decision DEC-096
+/// found that a plugin has no sidebar it may write to, and this is the one
+/// place the host will carry a plugin's number. It cannot carry a halt
+/// *reason*, which is why DEC-096 stands and the bottom border keeps the
+/// sentence; a count is all this is for.
+///
+/// `None` clears the token, which is how a channel that no longer needs
+/// anyone stops claiming a line in someone's sidebar.
+pub fn pane_token(id: &str, pane_id: &str, value: Option<&str>) -> String {
+    request(
+        id,
+        "pane.report_metadata",
+        json!({
+            "pane_id": pane_id,
+            "source": crate::PLUGIN_ID,
+            "tokens": { TOKEN: value },
+            "ttl_ms": TOKEN_TTL_MS,
+        }),
+    )
+}
+
+/// Sets the terminal window title.
+///
+/// The one surface that is visible when Herdr is not the focused window,
+/// which is exactly when a message waiting on someone matters and exactly
+/// when every other indicator this plugin has is off screen.
+///
+/// It is also a surface this plugin does not own: it belongs to the client,
+/// and anything else that sets it will be overwritten. That is why it is off
+/// unless a person turns it on (section 23.5).
+pub fn window_title(id: &str, title: &str) -> String {
+    request(id, "client.window_title.set", json!({ "title": title }))
+}
+
+/// Puts the terminal window title back.
+pub fn clear_window_title(id: &str) -> String {
+    request(id, "client.window_title.clear", json!({}))
+}
+
 /// Asks Herdr whether one pane is still there.
 pub fn pane(id: &str, pane_id: &str) -> String {
     request(id, "pane.get", json!({ "pane_id": pane_id }))

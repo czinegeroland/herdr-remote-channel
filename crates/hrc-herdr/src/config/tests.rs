@@ -101,3 +101,26 @@ fn every_problem_has_wording_naming_what_was_ignored() {
         .contains("colours")
     );
 }
+
+#[test]
+fn the_window_title_is_off_until_somebody_asks_for_it() {
+    // It belongs to the client, not to this plugin. A default that took over
+    // a surface we do not own would be the kind of behaviour that gets a
+    // plugin uninstalled.
+    assert!(!Config::default().window_title);
+    assert!(Config::default().pane_token);
+
+    let (config, problems) = parse(r#"{"indicator": {"window_title": true}}"#);
+    assert!(config.window_title);
+    assert!(config.pane_token, "the other surface is unaffected");
+    assert!(problems.is_empty());
+}
+
+#[test]
+fn the_pane_token_can_be_turned_off_on_its_own() {
+    let (config, problems) = parse(r#"{"indicator": {"pane_token": false}}"#);
+
+    assert!(!config.pane_token);
+    assert!(!config.window_title);
+    assert!(problems.is_empty());
+}

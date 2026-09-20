@@ -33,6 +33,7 @@ pub mod config;
 pub mod event;
 pub mod host;
 pub mod inbox;
+pub mod indicator;
 pub mod manifest;
 pub mod notify;
 pub mod pane;
@@ -45,6 +46,7 @@ pub use host::HostError;
 pub use inbox::{
     InboxDisposition, InboxRow, InboxView, agent_view, channel_display_name, principal_display_name,
 };
+pub use indicator::Indicator;
 pub use manifest::{
     Manifest, PLUGIN_ID, REVIEW_TARGET_ENV, manifest, open_review, open_review_list,
 };

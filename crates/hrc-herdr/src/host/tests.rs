@@ -272,3 +272,50 @@ fn an_open_that_did_not_say_which_pane_is_not_guessed_at() {
         );
     }
 }
+
+#[test]
+fn a_pane_token_matches_the_shape_the_host_documents() {
+    // Read out of `herdr api schema --json` on Herdr 0.9.1:
+    // `PaneReportMetadataParams` requires `pane_id`, `source` and `tokens`,
+    // caps `tokens` at sixteen keys matching `^[A-Za-z0-9_-]{1,32}$`, and
+    // caps `ttl_ms` at 86_400_000. This test is what notices if that drifts.
+    let request: Value =
+        serde_json::from_str(&pane_token("1", "wG:p2", Some("2 waiting"))).unwrap();
+
+    assert_eq!(request["method"], "pane.report_metadata");
+    let params = &request["params"];
+    assert_eq!(params["pane_id"], "wG:p2");
+    assert_eq!(params["source"], crate::PLUGIN_ID);
+    assert_eq!(params["tokens"][TOKEN], "2 waiting");
+    assert_eq!(params["ttl_ms"], TOKEN_TTL_MS);
+
+    let tokens = params["tokens"].as_object().unwrap();
+    assert!(tokens.len() <= 16);
+}
+
+#[test]
+fn clearing_a_pane_token_sends_null_rather_than_an_empty_string() {
+    // The host's schema types a token value as string-or-null, and null is
+    // what removes it. An empty string would leave an empty token sitting in
+    // somebody's sidebar.
+    let request: Value = serde_json::from_str(&pane_token("1", "wG:p2", None)).unwrap();
+
+    assert!(request["params"]["tokens"][TOKEN].is_null());
+}
+
+#[test]
+fn the_window_title_carries_only_the_title() {
+    let request: Value = serde_json::from_str(&window_title("1", "hrc: 2 waiting")).unwrap();
+
+    assert_eq!(request["method"], "client.window_title.set");
+    assert_eq!(request["params"]["title"], "hrc: 2 waiting");
+    assert_eq!(
+        request["params"].as_object().unwrap().len(),
+        1,
+        "the host takes one field; sending more is how a request starts \
+         carrying something it should not"
+    );
+
+    let cleared: Value = serde_json::from_str(&clear_window_title("1")).unwrap();
+    assert_eq!(cleared["method"], "client.window_title.clear");
+}

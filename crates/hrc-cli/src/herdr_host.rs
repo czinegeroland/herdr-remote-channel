@@ -139,6 +139,34 @@ impl Host {
             .map_err(Unreachable::Host)
     }
 
+    /// Reports, or clears, the count beside a pane in Herdr's sidebar.
+    ///
+    /// `None` clears it. The token carries a short time to live, so a pane
+    /// that stops reporting -- because its process died rather than because
+    /// the count reached zero -- loses its claim on the host's sidebar
+    /// without anything having to notice and clean up after it.
+    pub fn report_token(&mut self, pane_id: &str, value: Option<&str>) -> Result<(), Unreachable> {
+        let id = self.identifier();
+        let line = self.exchange(&id, host::pane_token(&id, pane_id, value))?;
+        host::result(&line, &id)
+            .map(|_| ())
+            .map_err(Unreachable::Host)
+    }
+
+    /// Sets, or restores, the terminal window title.
+    pub fn set_window_title(&mut self, title: Option<&str>) -> Result<(), Unreachable> {
+        let id = self.identifier();
+        let request = match title {
+            Some(title) => host::window_title(&id, title),
+            None => host::clear_window_title(&id),
+        };
+
+        let line = self.exchange(&id, request)?;
+        host::result(&line, &id)
+            .map(|_| ())
+            .map_err(Unreachable::Host)
+    }
+
     /// Whether a pane Herdr once gave us is still open.
     ///
     /// A missing pane answers with an error rather than a negative, so the
