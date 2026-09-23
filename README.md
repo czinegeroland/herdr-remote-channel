@@ -114,14 +114,22 @@ closed metadata set either way.
 git clone https://github.com/czinegeroland/herdr-remote-channel
 cd herdr-remote-channel
 cargo install --path crates/hrc-cli --root . --locked --force
+mkdir -p node_modules && ln -sfn ../npm/hrc node_modules/herdr-remote-channel
 herdr plugin link "$PWD"
 ```
+
+On Windows, make the link with
+`mklink /J node_modules\herdr-remote-channel npm\hrc` instead of `ln`.
 
 This is where a source build belongs, and it is the one flow that needs a
 Rust toolchain. `herdr plugin link` does not run build commands, which is why
 the install is invoked by hand first; re-run it after any change to the Rust
-sources. Note that `plugin link` expects the executable at `bin/hrc`, which
-is what `--root .` writes.
+sources. Every action in the manifest starts
+`node node_modules/herdr-remote-channel/bin.js`, which in an installed plugin
+is the published npm package. The link points that path at the shim's source
+instead, and the shim, seeing that it is running from `npm/hrc` in a
+checkout, runs the `bin/hrc` that `--root .` wrote rather than looking for a
+published binary.
 
 ### The CLI on its own, with no toolchain
 

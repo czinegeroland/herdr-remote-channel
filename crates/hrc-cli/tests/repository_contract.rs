@@ -626,3 +626,31 @@ fn repository_file(path: &str) -> String {
     std::fs::read_to_string(root.join(path))
         .unwrap_or_else(|error| panic!("{path} should be readable: {error}"))
 }
+
+#[test]
+fn a_linked_source_checkout_runs_its_own_build() {
+    // `herdr plugin link` runs no build step, and every manifest action goes
+    // through `node_modules/herdr-remote-channel/bin.js`. The README links
+    // that path to `npm/hrc`, and the shim recognizes running from there. If
+    // either half drifts, a linked checkout fails every action -- which is
+    // what the README's old instructions did.
+    let shim = code_only(&read("npm/hrc/bin.js"));
+    assert!(
+        shim.contains("`${sep}npm${sep}hrc`"),
+        "the shim should recognize running from its source location"
+    );
+    assert!(
+        shim.contains("'bin', binary"),
+        "a source checkout should run the executable `cargo install --root .` writes"
+    );
+
+    let readme = read("README.md");
+    assert!(
+        readme.contains("ln -sfn ../npm/hrc node_modules/herdr-remote-channel"),
+        "the README should link the shim's source where the manifest looks"
+    );
+    assert!(
+        readme.contains("cargo install --path crates/hrc-cli --root . --locked --force"),
+        "the README should build to the `bin/` the shim runs"
+    );
+}

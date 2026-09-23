@@ -6,9 +6,13 @@
 # cargo-dist output
 /dist/
 
-# The plugin's own copy of the binary. `herdr/build.sh` writes it at
-# `herdr plugin install` time; it is a build artifact, not source.
+# The development build of the binary. `cargo install --root .` writes it;
+# the README's local development flow runs it through the npm shim.
 /bin/
+
+# What the plugin's build step installs, and the development link that
+# stands in for it in a source checkout.
+/node_modules/
 
 # Coverage and profiling
 *.profraw
