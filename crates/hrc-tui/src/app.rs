@@ -196,9 +196,18 @@ impl App {
     /// two workspaces can carry the same name and the confirmation has to
     /// name the exact one.
     pub fn destination_label(agent: &LocalAgent) -> String {
-        match agent.local_workspace_id() {
+        let named = match agent.local_workspace_id() {
             Some(workspace) => format!("{} in workspace {workspace}", agent.label()),
             None => agent.label().to_owned(),
+        };
+
+        // Said before the decision rather than discovered after it: a
+        // person approving into a busy agent should know it will not land
+        // straight away (docs/RESEARCH.md 5.4).
+        if agent.is_working() {
+            format!("{named} (working; waits until it is idle)")
+        } else {
+            named
         }
     }
 

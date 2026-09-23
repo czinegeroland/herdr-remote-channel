@@ -184,6 +184,38 @@ fn a_blocked_or_unready_agent_is_listed_but_not_ready() {
 }
 
 #[test]
+fn a_working_agent_is_ready_but_known_to_be_mid_turn() {
+    // docs/RESEARCH.md 5.4. Working is not blocked: the agent can take input,
+    // and the review waits for it to finish rather than refusing it.
+    let line = listing(vec![
+        info(Some("busy"), "w1:p4", true, "working"),
+        info(Some("free"), "w1:p6", true, "idle"),
+        info(Some("stuck"), "w1:p7", true, "blocked"),
+    ]);
+
+    let destinations = agents(&line, "req-1", None).expect("a listing parses");
+
+    assert!(destinations[0].is_ready() && destinations[0].is_working());
+    assert!(destinations[1].is_ready() && !destinations[1].is_working());
+    assert!(!destinations[2].is_working(), "blocked is not working");
+}
+
+#[test]
+fn waiting_for_an_agent_ends_when_it_settles_and_is_bounded() {
+    let line = agent_wait("req-3", "reviewer", 600_000);
+
+    let parsed: Value = serde_json::from_str(line.trim_end()).expect("a request is JSON");
+    assert_eq!(parsed["method"], "agent.wait");
+    assert_eq!(parsed["params"]["target"], "reviewer");
+    assert_eq!(parsed["params"]["timeout_ms"], 600_000);
+    assert_eq!(
+        parsed["params"]["until"],
+        json!(["idle", "done", "blocked"]),
+        "blocked ends the wait: a blocked agent refuses the prompt anyway"
+    );
+}
+
+#[test]
 fn an_entry_with_no_pane_is_dropped() {
     // A destination that cannot be addressed is not a destination, and
     // listing one would let a person confirm a delivery with nowhere to go.

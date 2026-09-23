@@ -60,6 +60,9 @@ pub struct Config {
     pub pane_token: bool,
     /// Whether a count is written to the terminal window title.
     pub window_title: bool,
+    /// Whether an approved delivery to a working agent waits until it is
+    /// idle rather than landing mid-turn.
+    pub wait_for_idle: bool,
 }
 
 impl Default for Config {
@@ -74,6 +77,7 @@ impl Default for Config {
             // will be overwritten, and a plugin that quietly took over a
             // surface it does not own would deserve to be uninstalled.
             window_title: false,
+            wait_for_idle: true,
         }
     }
 }
@@ -138,6 +142,14 @@ struct Document {
     notifications: Option<NotificationSection>,
     #[serde(default)]
     indicator: Option<IndicatorSection>,
+    #[serde(default)]
+    delivery: Option<DeliverySection>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DeliverySection {
+    #[serde(default)]
+    wait_for_idle: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -172,6 +184,8 @@ const KNOWN: &[&str] = &[
     "indicator",
     "indicator.pane_token",
     "indicator.window_title",
+    "delivery",
+    "delivery.wait_for_idle",
 ];
 
 /// Reads a configuration document and reports what could not be used.
@@ -225,6 +239,12 @@ pub fn parse(text: &str) -> (Config, Vec<ConfigProblem>) {
         if let Some(window_title) = indicator.window_title {
             config.window_title = window_title;
         }
+    }
+
+    if let Some(delivery) = document.delivery
+        && let Some(wait) = delivery.wait_for_idle
+    {
+        config.wait_for_idle = wait;
     }
 
     (config, problems)
