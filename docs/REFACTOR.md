@@ -160,7 +160,8 @@ moves.
 | R5 | S4: move the daemon and its broker to `commands/serve.rs` and add one conversion helper. S7 deferred, see section 3.6 | Structural | None | Merged in #91 |
 | R6 | S1: split the rest of `commands.rs` into `commands/{identity,channel,enrol,membership,sync,send,context,read,diagnostics,herdr}.rs`, re-exported so no caller changes | Structural | None | Merged in #92 |
 | R7 | S6: split `commands/review.rs` into one module per screen under `commands/review/` | Structural | None | Merged in #93 |
-| R8 | S5: split `hrc-storage/src/lib.rs` into modules by table area, keeping one `impl Database` spread across them | Structural | None | In review |
+| R8 | S5: split `hrc-storage/src/lib.rs` into modules by table area, keeping one `impl Database` spread across them | Structural | None | Merged in #94 |
+| R9 | S2, the rest: typed `doctor` checks, join requests and raised notifications; the daemon, the join screen and the side view stop parsing JSON. See section 3.7 | Structural | None | In review |
 
 ### 3.1 R1 — the channel on the provenance banner
 
@@ -225,11 +226,32 @@ refactor that promises to change nothing.
 The module is `serve.rs` rather than the planned `daemon.rs`, because
 `commands::daemon` is already the name of the function that runs it.
 
+### 3.7 R9 — what R4 left behind
+
+R4 typed the two results the review found being read back. Checking
+acceptance criterion 4 after R8 found three more:
+
+- The daemon's health summary parsed `hrc doctor`'s printed report for
+  `checks[].check` and `checks[].ok`.
+- The join-review screen parsed `hrc join pending`'s `pending[]` entries,
+  dropping any entry whose keys did not match.
+- The inbox side view parsed the notices `raise_notifications` had just
+  serialized, skipping any without `text` and `urgent`.
+
+None of these is wrong today, and all three would have failed silently on a
+renamed key. R9 applies R4's shape to them: `diagnose` returns typed
+`Check`s and renders the report from them, `pending_join_requests` returns
+typed `JoinRequest`s that `join_pending` serializes, and
+`raise_notifications` returns `hrc_herdr::Coalesced`, which serializes to
+the same three keys. Printed output is unchanged. Reading a daemon's
+response or a message envelope stays as it is, because those are wire
+formats rather than another command's output.
+
 ## 4. Acceptance
 
 The refactor is done when:
 
-1. R1 through R8 are merged, each green on the full CI.
+1. R1 through R9 are merged, each green on the full CI.
 2. The provenance banner names the real channel, proven by a test that
    crosses the broker seam.
 3. `hrc doctor` exits non-zero on a failed check.

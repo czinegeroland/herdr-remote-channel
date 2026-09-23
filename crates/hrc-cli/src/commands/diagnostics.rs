@@ -42,11 +42,9 @@ pub fn status(context: &Context) -> Result<Value> {
 pub fn diagnose(context: &Context) -> Result<Diagnosis> {
     let paths = &context.paths;
     let mut checks = Vec::new();
-    let mut healthy = true;
 
-    let mut record = |name: &str, ok: bool, detail: String| {
-        healthy &= ok;
-        checks.push(json!({ "check": name, "ok": ok, "detail": detail }));
+    let mut record = |name: &'static str, ok: bool, detail: String| {
+        checks.push(Check { name, ok, detail });
     };
 
     record(
@@ -93,31 +91,53 @@ pub fn diagnose(context: &Context) -> Result<Diagnosis> {
         Err(error) => record("device_keys", false, error.to_string()),
     }
 
-    Ok(Diagnosis {
-        report: json!({
-            "status": if healthy { "ok" } else { "unhealthy" },
-            "healthy": healthy,
-            "checks": checks,
-        }),
-        healthy,
-    })
+    Ok(Diagnosis { checks })
+}
+
+/// One thing `hrc doctor` verified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Check {
+    /// What was checked, as the report names it.
+    pub name: &'static str,
+    /// Whether it passed.
+    pub ok: bool,
+    /// What was found.
+    pub detail: String,
 }
 
 /// What `hrc doctor` found.
 ///
-/// `healthy` is carried beside the report rather than read back out of it,
-/// so the exit code cannot drift from the checks because a JSON key was
-/// renamed (`docs/REFACTOR.md` S2).
+/// Typed, so that the exit code and the daemon's health summary are computed
+/// from the checks themselves rather than read back out of the printed
+/// report, where a renamed JSON key would silently change them
+/// (`docs/REFACTOR.md` S2 and R9).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnosis {
-    /// The report `hrc doctor` prints.
-    pub report: Value,
-    /// Whether every check passed.
-    pub healthy: bool,
+    /// Every check, in the order it ran.
+    pub checks: Vec<Check>,
 }
 
-/// `hrc doctor`'s report, for callers that only want what it says.
-pub fn doctor(context: &Context) -> Result<Value> {
-    diagnose(context).map(|diagnosis| diagnosis.report)
+impl Diagnosis {
+    /// Whether every check passed.
+    pub fn healthy(&self) -> bool {
+        self.checks.iter().all(|check| check.ok)
+    }
+
+    /// The report `hrc doctor` prints.
+    pub fn report(&self) -> Value {
+        let healthy = self.healthy();
+        let checks: Vec<Value> = self
+            .checks
+            .iter()
+            .map(|check| json!({ "check": check.name, "ok": check.ok, "detail": check.detail }))
+            .collect();
+
+        json!({
+            "status": if healthy { "ok" } else { "unhealthy" },
+            "healthy": healthy,
+            "checks": checks,
+        })
+    }
 }
 
 /// `hrc audit`: show the local audit log.

@@ -697,7 +697,7 @@ fn doctor_reports_every_check_rather_than_stopping_at_the_first() {
     let (_directory, context) = home();
     init(&context).unwrap();
 
-    let value = doctor(&context).unwrap();
+    let value = diagnose(&context).unwrap().report();
     let checks = value["checks"].as_array().unwrap();
 
     let names: Vec<&str> = checks
@@ -721,7 +721,7 @@ fn doctor_is_unhealthy_before_init_but_still_reports_everything() {
     let (_directory, context) = home();
     context.paths.ensure().unwrap();
 
-    let value = doctor(&context).unwrap();
+    let value = diagnose(&context).unwrap().report();
 
     assert_eq!(value["healthy"], false);
     assert_eq!(value["status"], "unhealthy");
@@ -741,11 +741,44 @@ fn doctor_is_unhealthy_before_init_but_still_reports_everything() {
 }
 
 #[test]
+fn the_daemon_and_the_exit_code_read_the_same_checks_the_report_prints() {
+    // docs/REFACTOR.md R9: the daemon used to parse `hrc doctor`'s printed
+    // JSON for its health summary. Both now read the typed checks, and the
+    // report is rendered from them, so the three cannot disagree.
+    let (_directory, context) = home();
+    context.paths.ensure().unwrap();
+
+    let diagnosis = diagnose(&context).unwrap();
+    let report = diagnosis.report();
+
+    assert!(!diagnosis.healthy(), "no device keys yet");
+    assert_eq!(report["healthy"], diagnosis.healthy());
+
+    let printed: Vec<(String, bool)> = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|check| {
+            (
+                check["check"].as_str().unwrap().to_owned(),
+                check["ok"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    let typed: Vec<(String, bool)> = diagnosis
+        .checks
+        .iter()
+        .map(|check| (check.name.to_owned(), check.ok))
+        .collect();
+    assert_eq!(printed, typed);
+}
+
+#[test]
 fn doctor_finds_the_git_executable() {
     let (_directory, context) = home();
     init(&context).unwrap();
 
-    let value = doctor(&context).unwrap();
+    let value = diagnose(&context).unwrap().report();
     let git = value["checks"]
         .as_array()
         .unwrap()

@@ -125,14 +125,7 @@ impl InboxScreen {
         };
 
         for notice in notices {
-            let (Some(text), Some(urgent)) = (
-                notice.get("text").and_then(Value::as_str),
-                notice.get("urgent").and_then(Value::as_bool),
-            ) else {
-                continue;
-            };
-
-            let _ = host.notify(text, urgent);
+            let _ = host.notify(&notice.text, notice.urgent);
         }
     }
 
@@ -310,7 +303,7 @@ pub(super) fn raise_notifications(
     database: &Database,
     channel_id: &str,
     rows: &[hrc_herdr::InboxRow],
-) -> Result<Vec<Value>> {
+) -> Result<Vec<hrc_herdr::Coalesced>> {
     let now = database.utc_now()?;
     let mut fresh = Vec::new();
     let announcing = crate::commands::plugin_config().0.notifications;
@@ -338,16 +331,7 @@ pub(super) fn raise_notifications(
         }
     }
 
-    Ok(hrc_herdr::coalesce(fresh)
-        .into_iter()
-        .map(|notice| {
-            json!({
-                "text": notice.text,
-                "urgent": notice.urgent,
-                "covers": notice.covers,
-            })
-        })
-        .collect())
+    Ok(hrc_herdr::coalesce(fresh))
 }
 
 /// Opens the inbox side view (PRD section 23.2).

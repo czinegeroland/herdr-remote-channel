@@ -15,8 +15,8 @@ pub fn review_joins(context: &Context) -> Result<Value> {
     }
 
     let context = &unlocked(context, "review join requests")?;
-    let listed = crate::commands::join_pending(context)?;
-    let requests = pending_joins(&listed);
+    let (_, listed) = crate::commands::pending_join_requests(context)?;
+    let requests = pending_joins(listed);
 
     if requests.is_empty() {
         return Ok(json!({
@@ -71,23 +71,16 @@ pub fn review_joins(context: &Context) -> Result<Value> {
     }))
 }
 
-/// Reads the pending join requests out of a `join pending` result.
-pub(super) fn pending_joins(listed: &Value) -> Vec<PendingJoin> {
-    listed["pending"]
-        .as_array()
-        .map(|entries| {
-            entries
-                .iter()
-                .filter_map(|entry| {
-                    Some(PendingJoin {
-                        request_id: entry["requestId"].as_str()?.to_owned(),
-                        principal_id: entry["principalId"].as_str()?.to_owned(),
-                        device_id: entry["deviceId"].as_str()?.to_owned(),
-                        created_at: entry["createdAt"].as_str().unwrap_or_default().to_owned(),
-                        safety_phrase: entry["safetyPhrase"].as_str()?.to_owned(),
-                    })
-                })
-                .collect()
+/// The join requests as the review screen shows them.
+pub(super) fn pending_joins(listed: Vec<crate::commands::JoinRequest>) -> Vec<PendingJoin> {
+    listed
+        .into_iter()
+        .map(|request| PendingJoin {
+            request_id: request.request_id,
+            principal_id: request.principal_id,
+            device_id: request.device_id,
+            created_at: request.created_at,
+            safety_phrase: request.safety_phrase,
         })
-        .unwrap_or_default()
+        .collect()
 }

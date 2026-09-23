@@ -178,10 +178,10 @@ fn run(cli: &Cli, _path: &str) -> std::result::Result<Value, Failure> {
         // on the exit code was told everything passed.
         Command::Doctor => {
             let diagnosis = commands::diagnose(&context)?;
-            if diagnosis.healthy {
-                Ok(diagnosis.report)
+            if diagnosis.healthy() {
+                Ok(diagnosis.report())
             } else {
-                Err(Failure::Unhealthy(diagnosis.report))
+                Err(Failure::Unhealthy(diagnosis.report()))
             }
         }
         Command::Audit(args) => {
