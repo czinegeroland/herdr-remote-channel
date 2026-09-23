@@ -670,3 +670,21 @@ fn a_halted_channel_still_takes_the_whole_health_line() {
 
     assert_eq!(app.health_line(), "HALTED: published history was rewritten");
 }
+
+#[test]
+fn an_empty_inbox_says_what_to_do_next_in_the_plugins_own_words() {
+    // docs/RESEARCH.md 6.6. The pointers are action titles a person finds in
+    // Herdr, so they are checked against the shipped manifest: a renamed
+    // action must not leave the empty state pointing at nothing.
+    let manifest = include_str!("../../../../herdr-plugin.toml");
+    let app = InboxApp::new("project", Vec::new());
+    let shown = screen(&app, 46, 14);
+
+    for title in ["Remote channel setup", "Remote channel compose"] {
+        assert!(shown.contains(title), "{shown}");
+        assert!(
+            manifest.contains(&format!("title = \"{title}\"")),
+            "the manifest has no action titled {title}"
+        );
+    }
+}
