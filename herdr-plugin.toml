@@ -131,3 +131,9 @@ placement = "popup"
 width = "80%"
 height = "80%"
 command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "pane", "review"]
+
+[[link_handlers]]
+id = "join"
+title = "Join this remote channel"
+pattern = '^https?://\S+#hrc-join$'
+action = "setup"

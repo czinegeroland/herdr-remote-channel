@@ -174,6 +174,11 @@ cargo run --quiet --bin hrc -- herdr manifest > herdr-plugin.toml
 | Pane `inbox` | `hrc herdr pane inbox` — the same inbox as a split pane |
 | Event `workspace.focused` | `hrc herdr event` — refreshes the sidebar |
 
+One link handler is registered: a Ctrl-click on the join link that `hrc
+invite create` prints (`<locator>#hrc-join`) opens the setup screen on the
+join step. It matches only that fragment, so ordinary repository links keep
+opening in the browser, and it never carries the invite code.
+
 The event subscription is deliberately one entry long. PRD section 13.2 puts
 frequently occurring event processing in the daemon rather than in repeatedly
 spawned hook commands, and every name added there is a process spawn at the

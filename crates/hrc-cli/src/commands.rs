@@ -482,6 +482,11 @@ pub fn invite_create(context: &Context, intended_for: &str, expires_in: &str) ->
         &now,
     )?;
 
+    let join_link = hrc_herdr::link::join_link(&channel.transport_locator);
+    let join_link = hrc_herdr::link::locator_from(&join_link)
+        .is_some()
+        .then_some(join_link);
+
     Ok(json!({
         "status": "ok",
         "inviteId": invite_id,
@@ -490,6 +495,13 @@ pub fn invite_create(context: &Context, intended_for: &str, expires_in: &str) ->
         // The one place this value appears. Hand it over through a channel
         // the user chooses; it works once and then it is spent.
         "inviteCode": invite.to_code()?,
+        // A link that opens the join step for whoever clicks it in Herdr.
+        // It carries the public locator and never the code: a URL lands in
+        // scrollback, clipboard managers and whatever it was pasted into, and
+        // a click is not the moment to decide whether a link is genuine.
+        // Only a web locator makes a clickable link, so a channel on a local
+        // path has none.
+        "joinLink": join_link,
     }))
 }
 

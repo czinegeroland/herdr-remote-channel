@@ -128,6 +128,24 @@ impl SetupApp {
         }
     }
 
+    /// Opens the screen on one step rather than at the top of the menu.
+    ///
+    /// Used when a person arrived by clicking an invitation link: they have
+    /// already said what they came to do, and making them find it in a menu
+    /// is the part of enrolment that needed fixing.
+    ///
+    /// Selection only. The step is still theirs to leave, nothing is typed
+    /// for them, and a step this installation is not offering is ignored
+    /// rather than added — the caller decides what makes sense here, and a
+    /// link must not be able to widen that list.
+    pub fn opening_on(mut self, step: SetupStep) -> Self {
+        if let Some(index) = self.steps.iter().position(|offered| *offered == step) {
+            self.selected = index;
+        }
+
+        self
+    }
+
     /// The steps on offer.
     pub fn steps(&self) -> &[SetupStep] {
         &self.steps
