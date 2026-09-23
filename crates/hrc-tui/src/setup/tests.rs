@@ -161,3 +161,36 @@ fn only_the_offered_steps_appear() {
     assert_eq!(app.steps(), &[SetupStep::Join]);
     assert_eq!(app.selected(), Some(SetupStep::Join));
 }
+
+#[test]
+fn arriving_from_an_invitation_link_opens_on_the_join_step() {
+    let app = app().opening_on(SetupStep::Join);
+
+    assert_eq!(app.selected(), Some(SetupStep::Join));
+    // Selection only: the menu still has the keyboard, nothing is typed,
+    // and nothing is proposed. The person still chooses to go on.
+    assert_eq!(app.focus(), SetupFocus::Menu);
+    assert!(app.displayed_input().is_empty());
+}
+
+#[test]
+fn a_link_cannot_offer_a_step_this_installation_does_not() {
+    // The caller decides which steps make sense here. A link naming one
+    // that is not offered must not be able to add it.
+    let app = SetupApp::new(vec![SetupStep::Initialize]).opening_on(SetupStep::Join);
+
+    assert_eq!(app.steps(), &[SetupStep::Initialize]);
+    assert_eq!(app.selected(), Some(SetupStep::Initialize));
+}
+
+#[test]
+fn the_join_step_still_takes_the_code_by_hand() {
+    let mut app = app().opening_on(SetupStep::Join);
+
+    app.on_key(key(KeyCode::Enter));
+    assert_eq!(app.focus(), SetupFocus::Input);
+    assert!(
+        app.displayed_input().is_empty(),
+        "an invite code is a secret and never arrives by link"
+    );
+}

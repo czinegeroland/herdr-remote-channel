@@ -379,6 +379,15 @@ fn render_invite(value: &Value) {
         println!("{code}");
         println!();
         println!("Give this to them through a channel you trust. It works once.");
+
+        // Separate from the code on purpose, and said so: the link is safe to
+        // send anywhere, and the code is not.
+        if let Some(link) = value["joinLink"].as_str() {
+            println!();
+            println!("In Herdr, Ctrl-click this link to open the join step:");
+            println!("{link}");
+            println!("It names the channel and nothing secret; the code above is still needed.");
+        }
         return;
     }
 

@@ -164,6 +164,26 @@ pub struct Manifest {
     pub events: Vec<EventHook>,
     /// Panes this plugin draws.
     pub panes: Vec<PaneEntry>,
+    /// Terminal URLs whose modified click this plugin claims.
+    pub link_handlers: Vec<LinkHandler>,
+}
+
+/// A terminal URL pattern routed to one of this plugin's actions.
+///
+/// Herdr sends a modified click on a matching URL to `action` instead of to
+/// the browser, and hands it the clicked URL. The pattern is therefore a
+/// claim on a gesture that belongs to the person, not to this plugin, which
+/// is why it matches only what an invitation prints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LinkHandler {
+    /// Identifier, local to this plugin.
+    pub id: String,
+    /// What a person sees.
+    pub title: String,
+    /// The regular expression Herdr matches a clicked URL against.
+    pub pattern: String,
+    /// The action to invoke.
+    pub action: String,
 }
 
 /// The argv that installs this version's executable from npm.
@@ -373,6 +393,16 @@ pub fn manifest() -> Manifest {
                 command: invoke(&["event"]),
             })
             .collect(),
+        // One handler, matching only what `hrc invite create` prints. A
+        // pattern that matched bare repository URLs would take over
+        // modified clicks on every GitHub link in every pane, which is a
+        // gesture this plugin does not own.
+        link_handlers: vec![LinkHandler {
+            id: "join".to_owned(),
+            title: "Join this remote channel".to_owned(),
+            pattern: crate::link::JOIN_PATTERN.to_owned(),
+            action: crate::pane::Pane::Setup.as_str().to_owned(),
+        }],
         panes: crate::pane::Pane::ALL
             .into_iter()
             .map(|pane| PaneEntry {

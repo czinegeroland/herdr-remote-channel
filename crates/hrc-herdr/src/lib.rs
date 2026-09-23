@@ -34,6 +34,7 @@ pub mod event;
 pub mod host;
 pub mod inbox;
 pub mod indicator;
+pub mod link;
 pub mod manifest;
 pub mod notify;
 pub mod pane;

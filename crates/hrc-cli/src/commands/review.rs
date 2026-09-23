@@ -697,7 +697,16 @@ pub fn setup(context: &Context) -> Result<Value> {
         &owned
     };
 
-    let mut screen = SetupApp::new(steps);
+    // A person who arrived by clicking an invitation link has already said
+    // what they came to do. Nothing from the URL is displayed or typed in:
+    // a clicked URL is text somebody else sent, and this reads it only far
+    // enough to decide which step to open on.
+    let mut screen = match std::env::var(hrc_herdr::link::CLICKED_URL_ENV) {
+        Ok(clicked) if hrc_herdr::link::locator_from(&clicked).is_some() => {
+            SetupApp::new(steps).opening_on(hrc_tui::SetupStep::Join)
+        }
+        _ => SetupApp::new(steps),
+    };
     let outcome = hrc_tui::run(&mut screen).map_err(|source| CliError::Io {
         action: "run the channel setup screen",
         source,
