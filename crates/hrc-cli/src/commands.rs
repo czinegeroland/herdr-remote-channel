@@ -3378,6 +3378,14 @@ fn core_error_code(error: &hrc_core::CoreError) -> &'static str {
 struct DaemonBroker {
     channel_status: Vec<ChannelStatus>,
     channel_names: Vec<String>,
+    /// What each channel is called, by channel identifier, in the form every
+    /// other surface shows it.
+    ///
+    /// The provenance banner on an approved delivery names the channel the
+    /// body came from. It used to be the literal `local channel` on every
+    /// delivery, because nothing here could resolve a message to its channel
+    /// — the one seam no test crossed.
+    channel_display_names: HashMap<String, String>,
     principal_id: String,
     device_id: String,
     checks: Vec<(String, bool)>,
@@ -3429,6 +3437,15 @@ impl DaemonBroker {
         let channel_names = channel_records
             .iter()
             .map(|channel| channel.local_name.clone())
+            .collect();
+        let channel_display_names = channel_records
+            .iter()
+            .map(|channel| {
+                (
+                    channel.channel_id.clone(),
+                    hrc_herdr::channel_display_name(&channel.local_name),
+                )
+            })
             .collect();
 
         let store = context.key_store()?;
@@ -3517,6 +3534,7 @@ impl DaemonBroker {
         Ok(Self {
             channel_status,
             channel_names,
+            channel_display_names,
             principal_id,
             device_id,
             checks,
@@ -3719,8 +3737,19 @@ impl Broker for DaemonBroker {
         self.pending_bodies.get(message_id).cloned()
     }
 
-    fn channel_local_name(&self, _message_id: &str) -> String {
-        "local channel".into()
+    fn channel_local_name(&self, message_id: &str) -> String {
+        // Resolved from the quarantined message itself, whose channel was
+        // verified when it arrived, rather than from anything a caller
+        // supplied. A message this broker does not hold cannot be delivered
+        // at all, so the fallback is a fixed local phrase that says so rather
+        // than a guess at which channel it might have been.
+        self.pending(message_id)
+            .and_then(|message| {
+                self.channel_display_names
+                    .get(&message.envelope.channel_id)
+                    .cloned()
+            })
+            .unwrap_or_else(|| "an unknown channel".to_owned())
     }
 
     fn local_user(&self) -> String {
