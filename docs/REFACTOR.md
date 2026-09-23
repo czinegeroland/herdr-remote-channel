@@ -159,8 +159,8 @@ moves.
 | R4 | S2: typed `whoami` and `members` results; the CLI serializes them at the edge and the TUI drivers stop parsing JSON | Defect (D3) + structural | Screens and daemon read the principal, not the device key | Merged in #90 |
 | R5 | S4: move the daemon and its broker to `commands/serve.rs` and add one conversion helper. S7 deferred, see section 3.6 | Structural | None | Merged in #91 |
 | R6 | S1: split the rest of `commands.rs` into `commands/{identity,channel,enrol,membership,sync,send,context,read,diagnostics,herdr}.rs`, re-exported so no caller changes | Structural | None | Merged in #92 |
-| R7 | S6: split `commands/review.rs` into one module per screen under `commands/review/` | Structural | None | In review |
-| R8 | S5: split `hrc-storage/src/lib.rs` into modules by table area, keeping one `impl Database` spread across them | Structural | None | Planned |
+| R7 | S6: split `commands/review.rs` into one module per screen under `commands/review/` | Structural | None | Merged in #93 |
+| R8 | S5: split `hrc-storage/src/lib.rs` into modules by table area, keeping one `impl Database` spread across them | Structural | None | In review |
 
 ### 3.1 R1 — the channel on the provenance banner
 
