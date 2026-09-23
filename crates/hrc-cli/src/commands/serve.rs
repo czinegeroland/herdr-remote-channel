@@ -435,17 +435,10 @@ impl DaemonBroker {
         let principal_id = identity.principal_id;
         let device_id = identity.encryption_recipient;
 
-        let checks = doctor(context)?
-            .get("checks")
-            .and_then(Value::as_array)
+        let checks = diagnose(context)?
+            .checks
             .into_iter()
-            .flatten()
-            .filter_map(|check| {
-                Some((
-                    check.get("check")?.as_str()?.to_owned(),
-                    check.get("ok")?.as_bool()?,
-                ))
-            })
+            .map(|check| (check.name.to_owned(), check.ok))
             .collect();
 
         let audit = database

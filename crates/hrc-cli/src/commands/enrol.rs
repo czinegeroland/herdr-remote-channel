@@ -325,6 +325,54 @@ pub fn join(context: &Context, invite_code: &str) -> Result<Value> {
 /// at all. Listing it with a warning would put a decision in front of a human
 /// that the machine had already answered.
 pub fn join_pending(context: &Context) -> Result<Value> {
+    let (channel_id, requests) = pending_join_requests(context)?;
+
+    let pending: Vec<Value> = requests
+        .into_iter()
+        .map(|request| {
+            json!({
+                "requestId": request.request_id,
+                "inviteId": request.invite_id,
+                "principalId": request.principal_id,
+                "deviceId": request.device_id,
+                "createdAt": request.created_at,
+                "safetyPhrase": request.safety_phrase,
+                "wordlist": request.wordlist,
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "status": "ok",
+        "channelId": channel_id,
+        "pending": pending,
+    }))
+}
+
+/// A join request that validated, as `hrc join pending` lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinRequest {
+    /// The request's identifier, from its object name.
+    pub request_id: String,
+    /// The invite it redeems.
+    pub invite_id: String,
+    /// The principal asking to join.
+    pub principal_id: String,
+    /// The device the request introduces.
+    pub device_id: String,
+    /// When the joiner says they asked.
+    pub created_at: String,
+    /// The phrase both sides compare out of band.
+    pub safety_phrase: String,
+    /// The wordlist the phrase was drawn from.
+    pub wordlist: &'static str,
+}
+
+/// The validated join requests on the only channel, and that channel's id.
+///
+/// `join_pending` prints these and the join-review screen shows them; both
+/// read this rather than one parsing the other's JSON (`docs/REFACTOR.md` R9).
+pub fn pending_join_requests(context: &Context) -> Result<(String, Vec<JoinRequest>)> {
     let store = context.key_store()?;
     let device: DeviceSecrets = store.load::<DeviceSecrets>(DEVICE_KEY_NAME)?;
 
@@ -378,20 +426,21 @@ pub fn join_pending(context: &Context) -> Result<Value> {
                     &ciphertext,
                     &now,
                 ) {
-                    pending.push(json!({
-                        "requestId": object
+                    pending.push(JoinRequest {
+                        request_id: object
                             .name
                             .rsplit('/')
                             .next()
                             .and_then(|file| file.strip_suffix(".age"))
-                            .unwrap_or_default(),
-                        "inviteId": review.invite_id,
-                        "principalId": review.principal_id,
-                        "deviceId": review.device_id(),
-                        "createdAt": review.created_at,
-                        "safetyPhrase": review.safety_phrase.to_string(),
-                        "wordlist": review.safety_phrase.wordlist,
-                    }));
+                            .unwrap_or_default()
+                            .to_owned(),
+                        invite_id: review.invite_id.clone(),
+                        principal_id: review.principal_id.clone(),
+                        device_id: review.device_id().to_owned(),
+                        created_at: review.created_at.clone(),
+                        safety_phrase: review.safety_phrase.to_string(),
+                        wordlist: review.safety_phrase.wordlist,
+                    });
                 }
             }
         }
@@ -402,11 +451,7 @@ pub fn join_pending(context: &Context) -> Result<Value> {
         cursor = page.cursor;
     }
 
-    Ok(json!({
-        "status": "ok",
-        "channelId": channel.channel_id,
-        "pending": pending,
-    }))
+    Ok((channel.channel_id, pending))
 }
 
 /// The invite this installation issued under `invite_id`, if it still holds it.
