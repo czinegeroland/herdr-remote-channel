@@ -2733,6 +2733,41 @@ fn doctor_reports_healthy_after_init() {
 }
 
 #[test]
+fn doctor_exits_non_zero_when_a_check_fails() {
+    // docs/REFACTOR.md R2. A home that was never initialized has no key store
+    // and no database, so checks fail. This printed `unhealthy` and exited 0,
+    // which told any script or agent branching on the exit code that
+    // everything passed.
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("never-initialized");
+
+    let output = hrc_in(&home)
+        .args(["doctor", "--json"])
+        .output()
+        .expect("doctor should run");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a failed check is a failed command (section 22.8)"
+    );
+
+    // The report is still printed, and is the same report: a person needs to
+    // read which check failed, and only the exit code changed.
+    let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(value["healthy"], false);
+    assert_eq!(value["status"], "unhealthy");
+    assert!(
+        value["checks"]
+            .as_array()
+            .expect("checks are listed")
+            .iter()
+            .any(|check| check["ok"] == false),
+        "the failing check is named: {value}"
+    );
+}
+
+#[test]
 fn human_output_is_rendered_without_json_syntax() {
     // PRD section 27 keeps machine-readable output separate from human
     // formatting. A human running `hrc status` should not be shown JSON.
