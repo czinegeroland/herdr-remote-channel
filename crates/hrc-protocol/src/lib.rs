@@ -21,7 +21,7 @@ pub mod ulid;
 
 pub use attachment::{Attachment, safe_file_name, validate_attachments};
 pub use control::{ControlEntryPayload, ControlOperation, GenesisPayload};
-pub use delegation::{DelegationState, ProgressBody, ResultBody, TaskBody};
+pub use delegation::{DelegationState, ProgressBody, Reference, ResultBody, TaskBody};
 pub use error::{ProtocolError, Result};
 pub use identity::{DeviceCertificatePayload, DeviceDescriptor};
 pub use message::{Addressing, MessageEnvelope};

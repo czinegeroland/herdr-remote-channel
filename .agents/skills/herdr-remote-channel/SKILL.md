@@ -272,6 +272,22 @@ A delegation request is a *request*. HRC never executes anything on the
 other machine: the remote human decides whether to act, and their agent only
 sees it if they approve it.
 
+When you have finished a task someone delegated, report it in the task's
+thread:
+
+```bash
+hrc result <task-message-id> "<what was done>" --commit HEAD
+hrc result <task-message-id> "<why it could not be done>" --failed
+```
+
+`--commit` names a commit so the requester can check the claim: it resolves
+whatever you pass (`HEAD`, a branch, a short hash) in the current checkout
+and sends the full name, and their review says whether their checkout holds
+it. Name the commit that actually contains the work, and push it first — a
+result whose commit the requester cannot find says so on their screen. A
+result can only report that it is ready for review or that it failed;
+judging it complete is the requester's call.
+
 An endpoint such as `reviewer` is advisory. It asks the receiving human to
 consider routing the message to that kind of agent; it does not choose
 anything on their machine.

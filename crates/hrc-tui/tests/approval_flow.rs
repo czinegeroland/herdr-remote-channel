@@ -62,11 +62,13 @@ fn app() -> App {
                 message_id: "msg-1".into(),
                 view: view("Alice", "question"),
                 body: BODY.into(),
+                local_checks: Vec::new(),
             },
             PendingItem {
                 message_id: "msg-2".into(),
                 view: view("Bob", "note"),
                 body: "a second message".into(),
+                local_checks: Vec::new(),
             },
         ],
         destinations(),
@@ -348,6 +350,7 @@ fn a_wrapped_body_can_be_scrolled_to_the_end_and_reflows_after_resize() {
             message_id: "msg-long".into(),
             view: view("Alice", "question"),
             body,
+            local_checks: Vec::new(),
         }],
         destinations(),
     );
@@ -367,6 +370,35 @@ fn a_wrapped_body_can_be_scrolled_to_the_end_and_reflows_after_resize() {
     assert_eq!(app.body_scroll(), 0);
     assert!(resized.contains("START"));
     assert!(resized.contains("TAIL_MARKER"));
+}
+
+#[test]
+fn what_this_machine_checked_is_framed_apart_from_the_body_and_only_once_revealed() {
+    let mut app = App::new(
+        vec![PendingItem {
+            message_id: "msg-result".into(),
+            view: view("Alice", "result"),
+            body: "BODY_TEXT".into(),
+            local_checks: vec!["commit 3f2a91c0aaaa: CLAIMED BUT NOT FOUND".into()],
+        }],
+        destinations(),
+    );
+
+    // Hidden like the body: the check is about content nobody has chosen
+    // to read yet.
+    let hidden = screen(&app);
+    assert!(!hidden.contains("CLAIMED BUT NOT FOUND"));
+
+    app.on_key(key(KeyCode::Enter));
+    let revealed = screen(&app);
+    assert!(revealed.contains("Checked on this machine"), "{revealed}");
+    assert!(revealed.contains("CLAIMED BUT NOT FOUND"), "{revealed}");
+    assert!(revealed.contains("BODY_TEXT"), "{revealed}");
+
+    // The finding sits above the body's frame, not inside it.
+    let finding = revealed.find("CLAIMED BUT NOT FOUND").unwrap();
+    let body_title = revealed.find("Message body").unwrap();
+    assert!(finding < body_title, "{revealed}");
 }
 
 fn release(code: KeyCode) -> KeyEvent {
@@ -537,6 +569,7 @@ fn a_destination_that_cannot_take_input_is_not_proposed() {
             message_id: "msg-1".into(),
             view: view("Alice", "question"),
             body: BODY.into(),
+            local_checks: Vec::new(),
         }],
         vec![
             hrc_herdr::LocalAgent::new("w1:p1", "busy")
@@ -574,6 +607,7 @@ fn with_no_destination_at_all_delivery_refuses_and_the_message_stays_pending() {
             message_id: "msg-1".into(),
             view: view("Alice", "question"),
             body: BODY.into(),
+            local_checks: Vec::new(),
         }],
         Vec::new(),
     );
@@ -612,6 +646,7 @@ fn a_local_pane_identifier_never_reaches_the_screen() {
             message_id: "msg-1".into(),
             view: view("Alice", "question"),
             body: BODY.into(),
+            local_checks: Vec::new(),
         }],
         vec![
             hrc_herdr::LocalAgent::new("w9:p42", "reviewer")

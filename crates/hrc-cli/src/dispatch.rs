@@ -108,7 +108,7 @@ fn milestone(command: &Command) -> &'static str {
 
         Command::Review(_) | Command::Approve(_) | Command::Herdr(_) => "M3",
 
-        Command::Delegate(_) | Command::Rollover => "M4",
+        Command::Delegate(_) | Command::TaskResult(_) | Command::Rollover => "M4",
         Command::Context(_) => "M4",
     }
 }
@@ -148,6 +148,7 @@ pub fn command_path(command: &Command) -> String {
         Command::Ask(_) => "ask".into(),
         Command::Reply(_) => "reply".into(),
         Command::Delegate(_) => "delegate".into(),
+        Command::TaskResult(_) => "result".into(),
         Command::Context(context) => match context.action {
             ContextAction::Draft { .. } => "context draft".into(),
             ContextAction::Preview { .. } => "context preview".into(),
