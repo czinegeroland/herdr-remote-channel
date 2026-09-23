@@ -1572,3 +1572,15 @@ fn the_provenance_banner_names_the_channel_a_message_came_from() {
         "a message the broker does not hold is not guessed at"
     );
 }
+
+#[test]
+fn the_daemon_tells_an_agent_its_principal_rather_than_its_device_key() {
+    // docs/REFACTOR.md R4. The agent-safe `whoami` answered with the device's
+    // signing key under the principal's name.
+    let (_directory, context, _channel_id, principal) = messaging_home();
+
+    let broker = DaemonBroker::new(&context).unwrap();
+    let (principal_id, _device_id) = broker.local_identity();
+
+    assert_eq!(principal_id, principal);
+}

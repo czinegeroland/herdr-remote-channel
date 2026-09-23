@@ -597,8 +597,7 @@ pub fn compose(context: &Context) -> Result<Value> {
 /// metadata the inbox already displays.
 fn answerable(context: &Context) -> Result<Vec<Recipient>> {
     let database = Database::open(context.paths.database())?;
-    let local = crate::commands::whoami(context)?;
-    let local_principal = local["signingKey"].as_str().unwrap_or_default().to_owned();
+    let local_principal = crate::commands::local_identity(context)?.principal_id;
 
     let mut targets = Vec::new();
     for channel in database.channels()? {
@@ -637,40 +636,28 @@ fn answerable(context: &Context) -> Result<Vec<Recipient>> {
 /// in would make "send to myself" the preselected first entry on a screen
 /// where the first entry is preselected.
 fn addressable(context: &Context) -> Result<Vec<Recipient>> {
-    let listed = crate::commands::members(context)?;
-    let local = crate::commands::whoami(context)?;
-    let local_principal = local["signingKey"].as_str().unwrap_or_default();
+    let listing = crate::commands::roster_listing(context)?;
+    let local_principal = crate::commands::local_identity(context)?.principal_id;
 
     // Read once, before the screen opens, so every row shows the name that
     // was on record when the person started looking at the roster.
     let aliases = {
         let database = Database::open(context.paths.database())?;
-        let channel = crate::commands::only_channel(&database)?;
-        database.principal_aliases(&channel.channel_id)?
+        database.principal_aliases(&listing.channel_id)?
     };
 
-    Ok(listed["members"]
-        .as_array()
-        .map(|members| {
-            members
-                .iter()
-                .filter_map(|member| {
-                    let principal_id = member["principalId"].as_str()?;
-                    if principal_id == local_principal {
-                        return None;
-                    }
-
-                    Some(Recipient {
-                        display_name: aliases.get(principal_id).cloned(),
-                        principal_id: principal_id.to_owned(),
-                        active: member["active"].as_bool().unwrap_or(false),
-                        in_reply_to: None,
-                        answering: None,
-                    })
-                })
-                .collect()
+    Ok(listing
+        .members
+        .into_iter()
+        .filter(|member| member.principal_id != local_principal)
+        .map(|member| Recipient {
+            display_name: aliases.get(&member.principal_id).cloned(),
+            principal_id: member.principal_id,
+            active: member.active,
+            in_reply_to: None,
+            answering: None,
         })
-        .unwrap_or_default())
+        .collect())
 }
 
 /// Opens the channel setup screen.
@@ -1089,6 +1076,44 @@ fn invalid_trusted_response(reason: impl Into<String>) -> CliError {
     CliError::Ipc(hrc_ipc::IpcError::Malformed(reason.into()))
 }
 
+/// The roster as the membership screen draws it.
+///
+/// `is_local` is what lets that screen refuse to remove this installation.
+/// It compares roster *principals* with this installation's principal; it
+/// used to compare them with the device's signing key, so it was never true
+/// and the refusal never applied (docs/REFACTOR.md R4).
+fn member_rows(context: &Context) -> Result<Vec<hrc_tui::Member>> {
+    let listing = crate::commands::roster_listing(context)?;
+    let local_principal = crate::commands::local_identity(context)?.principal_id;
+
+    // Read once, before the screen opens, so every row shows the name that
+    // was on record when the person started looking at the roster.
+    let aliases = {
+        let database = Database::open(context.paths.database())?;
+        database.principal_aliases(&listing.channel_id)?
+    };
+
+    Ok(listing
+        .members
+        .into_iter()
+        .map(|member| hrc_tui::Member {
+            is_local: member.principal_id == local_principal,
+            display_name: aliases.get(&member.principal_id).cloned(),
+            administrator: member.administrator,
+            active: member.active,
+            devices: member
+                .devices
+                .into_iter()
+                .map(|device| hrc_tui::MemberDevice {
+                    device_id: device.device_id,
+                    active: device.active,
+                })
+                .collect(),
+            principal_id: member.principal_id,
+        })
+        .collect())
+}
+
 /// Opens the membership screen (PRD requirement HRC-CH-008).
 ///
 /// Removing a member and revoking a device are section 22.7 operations, and
@@ -1102,54 +1127,7 @@ pub fn members(context: &Context) -> Result<Value> {
 
     let context = &unlocked(context, "change who is in this channel")?;
 
-    let listed = crate::commands::members(context)?;
-    let local = crate::commands::whoami(context)?;
-    let local_principal = local["signingKey"].as_str().unwrap_or_default();
-
-    // Read once, before the screen opens, so every row shows the name that
-    // was on record when the person started looking at the roster.
-    let aliases = {
-        let database = Database::open(context.paths.database())?;
-        let channel = crate::commands::only_channel(&database)?;
-        database.principal_aliases(&channel.channel_id)?
-    };
-
-    let roster: Vec<hrc_tui::Member> = listed["members"]
-        .as_array()
-        .map(|members| {
-            members
-                .iter()
-                .filter_map(|member| {
-                    let principal_id = member["principalId"].as_str()?.to_owned();
-                    let devices = member["devices"]
-                        .as_array()
-                        .map(|devices| {
-                            devices
-                                .iter()
-                                .filter_map(|device| {
-                                    Some(hrc_tui::MemberDevice {
-                                        device_id: device["deviceId"].as_str()?.to_owned(),
-                                        active: device["active"].as_bool().unwrap_or(false),
-                                    })
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-
-                    Some(hrc_tui::Member {
-                        // Told rather than guessed: it is what lets the screen
-                        // refuse to remove this installation.
-                        is_local: principal_id == local_principal,
-                        display_name: aliases.get(&principal_id).cloned(),
-                        principal_id,
-                        administrator: member["administrator"].as_bool().unwrap_or(false),
-                        active: member["active"].as_bool().unwrap_or(false),
-                        devices,
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let roster = member_rows(context)?;
 
     if roster.is_empty() {
         return Ok(json!({
@@ -1706,6 +1684,82 @@ mod tests {
                 "correct horse battery staple".to_owned(),
             )),
         }
+    }
+
+    /// An administrator and one admitted peer sharing a real repository.
+    fn two_member_channel(root: &std::path::Path) -> (Context, String, String) {
+        let context = test_context(root);
+        let identity = super::super::init(&context).unwrap();
+
+        let remote = root.join("remote.git");
+        let status = ProcessCommand::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&remote)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        super::super::create(&context, remote.to_str().unwrap(), Some("Two members")).unwrap();
+
+        let peer = test_context(&root.join("peer"));
+        let peer_identity = super::super::init(&peer).unwrap();
+        let invite = super::super::invite_create(&context, "peer", "24h").unwrap();
+        let joined = super::super::join(&peer, invite["inviteCode"].as_str().unwrap()).unwrap();
+        super::super::admit_join(&context, joined["requestId"].as_str().unwrap()).unwrap();
+
+        (
+            context,
+            identity["principalKey"].as_str().unwrap().to_owned(),
+            peer_identity["principalKey"].as_str().unwrap().to_owned(),
+        )
+    }
+
+    #[test]
+    fn the_local_principal_is_the_principal_and_not_the_device_key() {
+        // docs/REFACTOR.md R4. `init` makes two keys and the roster lists
+        // principals. The screens read the local principal from `whoami`'s
+        // `signingKey`, which is the device's, so nothing ever matched.
+        let directory = tempfile::tempdir().unwrap();
+        let (context, principal, _peer) = two_member_channel(directory.path());
+
+        let identity = super::super::local_identity(&context).unwrap();
+        assert_eq!(identity.principal_id, principal);
+        assert_ne!(
+            identity.principal_id, identity.device_signing_key,
+            "a principal and a device are different keys"
+        );
+    }
+
+    #[test]
+    fn the_membership_screen_recognizes_this_installation() {
+        // `is_local` is what lets the screen refuse to remove this
+        // installation. It was never true, so that refusal never applied.
+        let directory = tempfile::tempdir().unwrap();
+        let (context, principal, peer) = two_member_channel(directory.path());
+
+        let rows = member_rows(&context).unwrap();
+        let local: Vec<_> = rows.iter().filter(|row| row.is_local).collect();
+
+        assert_eq!(local.len(), 1, "exactly one row is this installation");
+        assert_eq!(local[0].principal_id, principal);
+        assert!(
+            rows.iter()
+                .any(|row| row.principal_id == peer && !row.is_local)
+        );
+    }
+
+    #[test]
+    fn this_installation_is_not_offered_as_its_own_recipient() {
+        let directory = tempfile::tempdir().unwrap();
+        let (context, principal, peer) = two_member_channel(directory.path());
+
+        let recipients: Vec<String> = addressable(&context)
+            .unwrap()
+            .into_iter()
+            .map(|recipient| recipient.principal_id)
+            .collect();
+
+        assert_eq!(recipients, vec![peer]);
+        assert!(!recipients.contains(&principal));
     }
 
     #[test]
