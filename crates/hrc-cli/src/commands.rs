@@ -2722,11 +2722,11 @@ fn expiry_from(now: &str, lifetime: &str) -> Result<String> {
         value: lifetime.to_owned(),
     })?;
 
-    let start = time_from_rfc3339(now).ok_or_else(|| CliError::InvalidLifetime {
+    let start = hrc_core::time::epoch_seconds(now).ok_or_else(|| CliError::InvalidLifetime {
         value: now.to_owned(),
     })?;
 
-    Ok(rfc3339_from(start + seconds))
+    Ok(hrc_core::time::rfc3339_from(start + seconds))
 }
 
 /// Parses `30m`, `24h`, or `7d` into seconds.
@@ -2745,65 +2745,6 @@ fn parse_lifetime(value: &str) -> Option<i64> {
         "d" => Some(amount * 86_400),
         _ => None,
     }
-}
-
-/// Seconds since the Unix epoch for an RFC 3339 UTC timestamp.
-///
-/// Only the shape this project emits is accepted: `YYYY-MM-DDTHH:MM:SSZ`.
-/// Accepting more would mean accepting offsets and fractions nothing here
-/// produces, and quietly mis-parsing one of those is worse than refusing it.
-fn time_from_rfc3339(value: &str) -> Option<i64> {
-    let bytes = value.as_bytes();
-    if bytes.len() != 20 || bytes[4] != b'-' || bytes[10] != b'T' || bytes[19] != b'Z' {
-        return None;
-    }
-
-    let field = |range: std::ops::Range<usize>| value.get(range)?.parse::<i64>().ok();
-    let (year, month, day) = (field(0..4)?, field(5..7)?, field(8..10)?);
-    let (hour, minute, second) = (field(11..13)?, field(14..16)?, field(17..19)?);
-
-    Some(days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second)
-}
-
-/// Renders seconds since the Unix epoch as an RFC 3339 UTC timestamp.
-pub(crate) fn rfc3339_from(seconds: i64) -> String {
-    let days = seconds.div_euclid(86_400);
-    let remainder = seconds.rem_euclid(86_400);
-    let (year, month, day) = civil_from_days(days);
-
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        remainder / 3600,
-        (remainder % 3600) / 60,
-        remainder % 60
-    )
-}
-
-/// Days since the Unix epoch for a civil date (Howard Hinnant's algorithm).
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let year = year - i64::from(month <= 2);
-    let era = year.div_euclid(400);
-    let year_of_era = year - era * 400;
-    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-
-    era * 146_097 + day_of_era - 719_468
-}
-
-/// The inverse of [`days_from_civil`].
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    let days = days + 719_468;
-    let era = days.div_euclid(146_097);
-    let day_of_era = days - era * 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_index = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
-    let month = month_index + if month_index < 10 { 3 } else { -9 };
-
-    (year + i64::from(month <= 2), month, day)
 }
 
 /// Where an invite secret is kept in the key store.
@@ -4779,39 +4720,12 @@ mod time_tests {
     }
 
     #[test]
-    fn a_timestamp_round_trips_through_both_directions() {
-        for stamp in [
-            "1970-01-01T00:00:00Z",
-            "2000-02-29T12:34:56Z",
-            "2026-09-13T07:08:09Z",
-            "2100-03-01T00:00:00Z",
-        ] {
-            let seconds = time_from_rfc3339(stamp).expect(stamp);
-            assert_eq!(rfc3339_from(seconds), stamp);
-        }
-    }
-
-    #[test]
     fn a_lifetime_that_is_not_one_is_refused() {
         for bad in ["", "h", "0h", "-1h", "24", "24y", "twenty4h", "24 h"] {
             assert!(
                 expiry_from("2026-09-13T00:00:00Z", bad).is_err(),
                 "{bad:?} was accepted"
             );
-        }
-    }
-
-    #[test]
-    fn only_the_timestamp_shape_this_project_emits_is_parsed() {
-        // Accepting offsets and fractions nothing here produces would mean
-        // quietly mis-parsing one of them later.
-        for bad in [
-            "2026-09-13T00:00:00+02:00",
-            "2026-09-13T00:00:00.500Z",
-            "2026-09-13 00:00:00Z",
-            "2026-09-13",
-        ] {
-            assert!(time_from_rfc3339(bad).is_none(), "{bad:?} was parsed");
         }
     }
 

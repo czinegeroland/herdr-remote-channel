@@ -76,7 +76,7 @@ impl Sidebar {
             parts.push(format!("{} unanswered", self.unanswered));
         }
         parts.push(match self.synced_seconds_ago {
-            Some(seconds) => format!("synced {} ago", elapsed(seconds)),
+            Some(seconds) => format!("synced {} ago", hrc_core::time::short_duration(seconds)),
             None => "never synced".to_owned(),
         });
 
@@ -90,19 +90,6 @@ fn plural(count: usize, noun: &str) -> String {
         format!("{count} {noun}")
     } else {
         format!("{count} {noun}s")
-    }
-}
-
-/// A duration short enough to sit in a sidebar.
-///
-/// Deliberately coarse. The exact age of the last fetch is not a decision
-/// input; whether it was seconds or days ago is.
-fn elapsed(seconds: u64) -> String {
-    match seconds {
-        0..=59 => format!("{seconds}s"),
-        60..=3599 => format!("{}m", seconds / 60),
-        3600..=86_399 => format!("{}h", seconds / 3600),
-        _ => format!("{}d", seconds / 86_400),
     }
 }
 
