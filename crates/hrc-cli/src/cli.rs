@@ -64,6 +64,9 @@ pub enum Command {
     Reply(ReplyArgs),
     /// Send a structured delegation request. HRC never executes it.
     Delegate(DelegateArgs),
+    /// Report the outcome of a task someone delegated to you.
+    #[command(name = "result")]
+    TaskResult(TaskResultArgs),
     /// Build, preview, and send explicit context packages.
     Context(ContextCommand),
     /// List inbox entries.
@@ -293,6 +296,26 @@ pub struct DelegateArgs {
     /// When the requester stops waiting, for example `7d`.
     #[arg(long, value_name = "DURATION")]
     pub due: Option<String>,
+}
+
+/// Arguments of `hrc result`.
+#[derive(Debug, Args)]
+pub struct TaskResultArgs {
+    /// The task being reported on, by the message identifier it arrived as.
+    pub task_id: String,
+    /// What happened, for the person who asked.
+    pub summary: String,
+    /// Report that the task failed rather than that a result is ready.
+    #[arg(long)]
+    pub failed: bool,
+    /// A commit the result claims exists, so the requester can check it.
+    /// Repeatable. Anything `git rev-parse` resolves in the current checkout
+    /// is accepted, such as `HEAD`; the full name is what is sent.
+    #[arg(long = "commit", value_name = "REV")]
+    pub commits: Vec<String>,
+    /// A context package already shared, named by its identifier.
+    #[arg(long, value_name = "ID")]
+    pub context: Option<String>,
 }
 
 /// `hrc context ...`

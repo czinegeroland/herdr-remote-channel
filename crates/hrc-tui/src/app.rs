@@ -23,6 +23,12 @@ pub struct PendingItem {
     pub view: AgentView,
     /// The quarantined body. Displayed only after a deliberate reveal.
     pub body: String,
+    /// What this machine found when it checked the body's claims.
+    ///
+    /// Local findings, never remote content, and drawn in a frame of their
+    /// own so the two cannot be mistaken for each other. Empty for a message
+    /// that makes no checkable claim.
+    pub local_checks: Vec<String>,
 }
 
 /// Which part of the screen has the keyboard.

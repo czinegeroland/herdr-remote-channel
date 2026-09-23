@@ -241,6 +241,15 @@ fn run(cli: &Cli, _path: &str) -> std::result::Result<Value, Failure> {
             args.due.as_deref(),
         )
         .map_err(Failure::from),
+        Command::TaskResult(args) => commands::task_result(
+            &context,
+            &args.task_id,
+            &args.summary,
+            args.failed,
+            &args.commits,
+            args.context.as_deref(),
+        )
+        .map_err(Failure::from),
         Command::Wait(args) => commands::wait(
             &context,
             &args.message_id,

@@ -161,7 +161,7 @@ moves.
 | R6 | S1: split the rest of `commands.rs` into `commands/{identity,channel,enrol,membership,sync,send,context,read,diagnostics,herdr}.rs`, re-exported so no caller changes | Structural | None | Merged in #92 |
 | R7 | S6: split `commands/review.rs` into one module per screen under `commands/review/` | Structural | None | Merged in #93 |
 | R8 | S5: split `hrc-storage/src/lib.rs` into modules by table area, keeping one `impl Database` spread across them | Structural | None | Merged in #94 |
-| R9 | S2, the rest: typed `doctor` checks, join requests and raised notifications; the daemon, the join screen and the side view stop parsing JSON. See section 3.7 | Structural | None | In review |
+| R9 | S2, the rest: typed `doctor` checks, join requests and raised notifications; the daemon, the join screen and the side view stop parsing JSON. See section 3.7 | Structural | None | Merged in #95 |
 
 ### 3.1 R1 — the channel on the provenance banner
 

@@ -308,6 +308,92 @@ pub fn delegate(
     Ok(sent)
 }
 
+/// `hrc result`: report the outcome of a task someone delegated to you.
+///
+/// The result goes to whoever asked, in the task's thread, and waits for
+/// their review like any other message: `completed` is the requester's
+/// verdict, never the assignee's (section 18.4), so the most this can report
+/// is that a result is ready or that the work failed.
+///
+/// `--commit` makes part of the claim checkable. Each revision is resolved
+/// here, in the sender's own checkout, and travels as a full object name; the
+/// requester's review then says whether their checkout holds it. Nothing on
+/// either side fetches, checks out or applies anything.
+pub fn task_result(
+    context: &Context,
+    task_id: &str,
+    summary: &str,
+    failed: bool,
+    commits: &[String],
+    context_id: Option<&str>,
+) -> Result<Value> {
+    let database = Database::open(context.paths.database())?;
+    let channel = only_channel(&database)?;
+
+    let task = database
+        .inbox_entries(&channel.channel_id)?
+        .into_iter()
+        .find(|entry| entry.message_id == task_id)
+        .ok_or_else(|| CliError::NoSuchMessage {
+            message_id: task_id.to_owned(),
+        })?;
+
+    if task.kind != hrc_protocol::MessageKind::Task.as_str() {
+        return Err(CliError::NotATask {
+            message_id: task_id.to_owned(),
+            kind: task.kind,
+        });
+    }
+
+    // Resolved in the checkout the command runs in, which is the one the
+    // person reporting the result is working in.
+    let root = std::env::current_dir().map_err(|source| CliError::Io {
+        action: "find the checkout a result's commits are named in",
+        source,
+    })?;
+    let references = commits
+        .iter()
+        .map(|revision| super::references::resolve_commit(&root, revision))
+        .map(|resolved| resolved.map(hrc_protocol::Reference::commit))
+        .collect::<Result<Vec<_>>>()?;
+
+    let body = hrc_protocol::ResultBody {
+        task_id: task_id.to_owned(),
+        state: if failed {
+            hrc_protocol::DelegationState::Failed
+        } else {
+            hrc_protocol::DelegationState::ResultPendingReview
+        },
+        summary: summary.to_owned(),
+        context_id: context_id.map(str::to_owned),
+        references,
+    };
+
+    // Refused here rather than left to the receiver, as for a task.
+    body.validate()?;
+
+    let mut sent = compose_body(
+        context,
+        hrc_protocol::MessageKind::Result,
+        &task.sender_principal,
+        serde_json::to_value(&body).map_err(|_| {
+            CliError::Core(hrc_core::CoreError::MalformedMessage {
+                reason: "the result body could not be serialized".into(),
+            })
+        })?,
+        Some(task_id),
+        None,
+    )?;
+
+    sent["references"] = json!(
+        body.references
+            .iter()
+            .map(|reference| reference.id.clone())
+            .collect::<Vec<_>>()
+    );
+    Ok(sent)
+}
+
 /// Milliseconds since the Unix epoch, for a message identifier.
 ///
 /// Read from the system clock rather than derived from the RFC 3339

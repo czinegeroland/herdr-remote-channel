@@ -203,6 +203,22 @@ pub enum CliError {
         /// The safe diagnostic; never source bytes.
         reason: &'static str,
     },
+
+    /// A result was reported against a message that is not a task.
+    #[error("message {message_id} is a {kind}, not a task; only a task has a result")]
+    NotATask {
+        /// The message named.
+        message_id: String,
+        /// What it actually is.
+        kind: String,
+    },
+
+    /// A commit named in a result does not resolve in this checkout.
+    #[error("`{revision}` does not name a commit in this checkout")]
+    UnresolvedCommit {
+        /// The revision as given.
+        revision: String,
+    },
 }
 
 impl CliError {
@@ -245,6 +261,8 @@ impl CliError {
             CliError::InviteChannelMismatch { .. } => "invite_channel_mismatch",
             CliError::ContextRepositoryRequired { .. } => "context_repository_required",
             CliError::InvalidContextSource { .. } => "invalid_context_source",
+            CliError::NotATask { .. } => "not_a_task",
+            CliError::UnresolvedCommit { .. } => "unresolved_commit",
         }
     }
 
@@ -265,6 +283,8 @@ impl CliError {
             | CliError::NoSuchMessage { .. }
             | CliError::ContextRepositoryRequired { .. }
             | CliError::InvalidContextSource { .. }
+            | CliError::NotATask { .. }
+            | CliError::UnresolvedCommit { .. }
             | CliError::UnknownHerdrTarget { .. } => exit::USAGE,
             CliError::Io { .. }
             | CliError::Storage(_)

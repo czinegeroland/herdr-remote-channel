@@ -315,10 +315,16 @@ async fn collect_pending(
             continue;
         };
 
+        // A result's commit references are checked against this machine's
+        // checkout here, in the trusted process, and shown beside the body
+        // rather than inside it.
+        let local_checks = super::references::local_checks(&view.kind, body);
+
         items.push(PendingItem {
             message_id,
             view,
             body: body.to_owned(),
+            local_checks,
         });
     }
 

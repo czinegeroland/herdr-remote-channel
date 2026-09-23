@@ -104,6 +104,34 @@ fn render_body(frame: &mut Frame<'_>, app: &App, area: Rect) {
         (false, _) => title.to_owned(),
     };
 
+    // A result's references are checked against this machine's checkout,
+    // and what that found is shown above the body in its own frame. Inside
+    // the body it would read as something the sender said.
+    let area = match (app.is_revealed(), app.selected()) {
+        (true, Some(item)) if !item.local_checks.is_empty() => {
+            let height = (item.local_checks.len() as u16).saturating_add(2);
+            let [checks, rest] =
+                Layout::vertical([Constraint::Length(height), Constraint::Min(3)]).areas(area);
+
+            let lines: Vec<Line<'_>> = item
+                .local_checks
+                .iter()
+                .map(|check| Line::from(check.as_str()))
+                .collect();
+            frame.render_widget(
+                Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Checked on this machine (not part of the message)"),
+                ),
+                checks,
+            );
+
+            rest
+        }
+        _ => area,
+    };
+
     let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(area);
     let lines = wrapped_lines(&text, inner.width);

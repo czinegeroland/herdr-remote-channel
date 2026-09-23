@@ -33,8 +33,8 @@ fn help_lists_the_published_command_surface() {
 
     for command in [
         "init", "whoami", "create", "channels", "status", "doctor", "rollover", "invite", "join",
-        "members", "member", "device", "send", "ask", "reply", "delegate", "context", "inbox",
-        "show", "thread", "wait", "review", "approve", "sync", "daemon", "audit", "herdr",
+        "members", "member", "device", "send", "ask", "reply", "delegate", "result", "context",
+        "inbox", "show", "thread", "wait", "review", "approve", "sync", "daemon", "audit", "herdr",
     ] {
         assert!(
             help.contains(command),
@@ -3604,6 +3604,155 @@ fn a_delegation_needs_a_title_and_a_description() {
     ] {
         hrc_in(home.path()).args(&args).assert().failure();
     }
+}
+
+/// Sends a task to this installation's own principal and returns its id.
+fn delegated_task(home: &std::path::Path, remote: &std::path::Path) -> String {
+    let principal = principal_of(home, remote);
+    hrc_in(home)
+        .args([
+            "delegate",
+            &principal,
+            "Fix the retry backoff",
+            "--title",
+            "backoff",
+        ])
+        .assert()
+        .success();
+    hrc_in(home).args(["sync", "--once"]).assert().success();
+
+    inbox_entry_of_kind(home, "task")["messageId"]
+        .as_str()
+        .expect("a message id")
+        .to_owned()
+}
+
+fn inbox_entry_of_kind(home: &std::path::Path, kind: &str) -> Value {
+    let inbox = hrc_in(home)
+        .args(["inbox", "--json"])
+        .output()
+        .expect("command should run");
+    let inbox: Value = serde_json::from_slice(&inbox.stdout).expect("stdout should be JSON");
+
+    inbox["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .find(|entry| entry["kind"] == kind)
+        .unwrap_or_else(|| panic!("no {kind} arrived: {inbox}"))
+        .clone()
+}
+
+/// A checkout with one commit, and that commit's full name.
+fn work_checkout() -> (tempfile::TempDir, String) {
+    let work = tempfile::tempdir().expect("temporary checkout");
+    git_init(work.path());
+
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(work.path())
+            .args(["-c", "user.name=t", "-c", "user.email=t@localhost"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .expect("git should run");
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8(output.stdout)
+            .expect("UTF-8")
+            .trim()
+            .to_owned()
+    };
+    git(&["commit", "--quiet", "--allow-empty", "-m", "the fix"]);
+    let head = git(&["rev-parse", "HEAD"]);
+
+    (work, head)
+}
+
+#[test]
+fn a_result_names_its_commit_in_full_and_arrives_quarantined() {
+    // docs/RESEARCH.md 5.3. The assignee names the commit however they like;
+    // what travels is the full object name, so the requester's checkout can
+    // be asked about exactly that object. The result is a message like any
+    // other: it waits for a human, and nothing acts on it.
+    let (home, remote) = channel_fixture();
+    let task_id = delegated_task(home.path(), remote.path());
+    let (work, head) = work_checkout();
+
+    let sent = hrc_in(home.path())
+        .current_dir(work.path())
+        .args([
+            "result",
+            &task_id,
+            "The backoff is bounded now",
+            "--commit",
+            "HEAD",
+            "--json",
+        ])
+        .output()
+        .expect("command should run");
+    assert!(
+        sent.status.success(),
+        "result failed: {}{}",
+        String::from_utf8_lossy(&sent.stdout),
+        String::from_utf8_lossy(&sent.stderr)
+    );
+
+    let sent: Value = serde_json::from_slice(&sent.stdout).expect("stdout should be JSON");
+    assert_eq!(sent["kind"], "result", "{sent}");
+    assert_eq!(sent["references"], serde_json::json!([head]), "{sent}");
+
+    hrc_in(home.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+
+    let result = inbox_entry_of_kind(home.path(), "result");
+    assert_eq!(result["disposition"], "quarantined", "{result}");
+}
+
+#[test]
+fn a_result_is_refused_for_anything_but_a_task_or_an_unknown_commit() {
+    let (home, remote) = channel_fixture();
+    let task_id = delegated_task(home.path(), remote.path());
+    let (work, _) = work_checkout();
+
+    let refused = |args: &[&str], code: &str| {
+        let output = hrc_in(home.path())
+            .current_dir(work.path())
+            .args(args)
+            .arg("--json")
+            .output()
+            .expect("command should run");
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        let value: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+        assert_eq!(value["code"], code, "{args:?}: {value}");
+    };
+
+    // A commit this checkout does not have cannot be claimed from it.
+    refused(
+        &["result", &task_id, "done", "--commit", "no-such-branch"],
+        "unresolved_commit",
+    );
+
+    // Only a task has a result. A note sent to ourselves is not one.
+    let principal = principal_of(home.path(), remote.path());
+    hrc_in(home.path())
+        .args(["send", &principal, "just a note"])
+        .assert()
+        .success();
+    hrc_in(home.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+    let note = inbox_entry_of_kind(home.path(), "note");
+    let note_id = note["messageId"].as_str().expect("a message id");
+    refused(&["result", note_id, "done"], "not_a_task");
+
+    refused(
+        &["result", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "done"],
+        "no_such_message",
+    );
 }
 
 #[test]

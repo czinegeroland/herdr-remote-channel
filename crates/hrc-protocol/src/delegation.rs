@@ -172,6 +172,71 @@ pub struct ResultBody {
     /// A context package carrying the output, by its identifier.
     #[serde(rename = "contextId", skip_serializing_if = "Option::is_none")]
     pub context_id: Option<String>,
+    /// Things the result claims exist, stated so a receiver can check them.
+    ///
+    /// A reference is a claim, not an instruction. Nothing on the receiving
+    /// side fetches, checks out or applies it; the trusted review only says
+    /// whether it already resolves in the receiver's own checkout.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<Reference>,
+}
+
+/// The most references one result may carry.
+pub const MAX_REFERENCES: usize = 16;
+
+/// Something a result claims exists, in a form the receiver can check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reference {
+    /// What kind of thing `id` names. `commit` is the only kind defined.
+    ///
+    /// A string rather than a closed enum, so that a receiver meeting a kind
+    /// added later still reads the rest of the result and can say it did not
+    /// check that one, instead of refusing the whole message.
+    pub kind: String,
+    /// The identifier, in the kind's canonical form.
+    pub id: String,
+}
+
+/// The one reference kind this version defines: a Git commit.
+pub const REFERENCE_COMMIT: &str = "commit";
+
+impl Reference {
+    /// A Git commit, by its full object name.
+    pub fn commit(id: impl Into<String>) -> Self {
+        Self {
+            kind: REFERENCE_COMMIT.to_owned(),
+            id: id.into(),
+        }
+    }
+
+    /// Checks the reference's shape.
+    ///
+    /// A commit must be a full, lowercase object name — forty hex digits for
+    /// SHA-1 or sixty-four for SHA-256. An abbreviation is refused because it
+    /// can resolve to a different object in a different repository, and a
+    /// check that passed by matching the wrong commit would be worse than no
+    /// check. A kind this version does not define is only length-bounded.
+    pub fn validate(&self) -> Result<()> {
+        bounded("references.kind", &self.kind, true)?;
+        bounded("references.id", &self.id, true)?;
+
+        if self.kind == REFERENCE_COMMIT {
+            let expected_bytes = if self.id.len() == 64 { 32 } else { 20 };
+            let hex = self
+                .id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+
+            if !hex || self.id.len() != expected_bytes * 2 {
+                return Err(ProtocolError::Hex {
+                    field: "references.id",
+                    expected_bytes,
+                });
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Checks one bounded text field.
@@ -233,6 +298,17 @@ impl ResultBody {
             // An assignee reports a result or a failure. Declaring it
             // *completed* is the requester's judgement, not theirs.
             return Err(ProtocolError::DerivedMismatch { field: "state" });
+        }
+
+        if self.references.len() > MAX_REFERENCES {
+            return Err(ProtocolError::MessageTooLarge {
+                size: self.references.len(),
+                limit: MAX_REFERENCES,
+            });
+        }
+
+        for reference in &self.references {
+            reference.validate()?;
         }
 
         Ok(())
@@ -413,6 +489,7 @@ mod tests {
             state: DelegationState::Completed,
             summary: "done".into(),
             context_id: None,
+            references: Vec::new(),
         };
         assert!(overreach.validate().is_err());
 
@@ -421,8 +498,72 @@ mod tests {
             state: DelegationState::ResultPendingReview,
             summary: "here is what I found".into(),
             context_id: Some("ctx-2".into()),
+            references: vec![Reference::commit("3f2a91c0".repeat(5))],
         }
         .validate()
         .unwrap();
+    }
+
+    fn result_with(references: Vec<Reference>) -> ResultBody {
+        ResultBody {
+            task_id: "01ARZ3".into(),
+            state: DelegationState::ResultPendingReview,
+            summary: "the fix is on main".into(),
+            context_id: None,
+            references,
+        }
+    }
+
+    #[test]
+    fn a_result_without_references_keeps_its_original_shape() {
+        // Existing senders and receivers must see the same bytes: the field
+        // is omitted, not written as an empty list.
+        let encoded = canonical::to_canonical_json(&result_with(Vec::new())).unwrap();
+        assert!(!encoded.contains("references"), "{encoded}");
+
+        let decoded: ResultBody =
+            serde_json::from_str(r#"{"state":"result_pending_review","summary":"s","taskId":"t"}"#)
+                .unwrap();
+        assert!(decoded.references.is_empty());
+    }
+
+    #[test]
+    fn a_commit_reference_must_be_a_full_lowercase_object_name() {
+        let sha1 = "a".repeat(40);
+        let sha256 = "b".repeat(64);
+        result_with(vec![Reference::commit(&sha1), Reference::commit(&sha256)])
+            .validate()
+            .unwrap();
+
+        // An abbreviation could match a different object elsewhere.
+        for bad in [
+            "3f2a91c",
+            &"A".repeat(40),
+            &"g".repeat(40),
+            &"a".repeat(41),
+            "",
+        ] {
+            assert!(
+                result_with(vec![Reference::commit(bad)])
+                    .validate()
+                    .is_err(),
+                "{bad:?} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reference_of_an_unknown_kind_is_carried_rather_than_refused() {
+        let later = Reference {
+            kind: "ci_run".into(),
+            id: "12345".into(),
+        };
+        result_with(vec![later]).validate().unwrap();
+    }
+
+    #[test]
+    fn a_result_carries_a_bounded_number_of_references() {
+        let many = vec![Reference::commit("c".repeat(40)); MAX_REFERENCES + 1];
+        assert!(result_with(many).validate().is_err());
     }
 }

@@ -28,7 +28,7 @@ pub fn success(as_json: bool, command: &str, value: &Value) {
         "audit" => render_audit(value),
         "invite create" | "invite list" | "invite revoke" => render_invite(value),
         "join" | "join pending" => render_join(value),
-        "send" | "ask" | "reply" => render_sent(value),
+        "send" | "ask" | "reply" | "result" => render_sent(value),
         "inbox" => render_inbox(value),
         "members" => render_members(value),
         "device list" => render_devices(value),

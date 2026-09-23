@@ -97,6 +97,7 @@ mod herdr;
 mod identity;
 mod membership;
 mod read;
+mod references;
 mod send;
 mod sync;
 
