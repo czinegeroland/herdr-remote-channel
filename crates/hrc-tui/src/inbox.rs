@@ -167,6 +167,11 @@ impl InboxApp {
             .collect()
     }
 
+    /// Whether nothing has arrived at all, whatever the filter shows.
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
     /// The selected row, if the filter still shows one.
     pub fn selected(&self) -> Option<&InboxRow> {
         let selected = self.selected_message_id.as_deref()?;

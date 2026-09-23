@@ -401,6 +401,21 @@ fn what_this_machine_checked_is_framed_apart_from_the_body_and_only_once_reveale
     assert!(finding < body_title, "{revealed}");
 }
 
+#[test]
+fn a_revealed_body_is_framed_as_data_from_another_machine() {
+    // docs/RESEARCH.md 6.5: the quarantine is enforced in code, and the frame
+    // makes it legible while someone is reading what another person wrote.
+    let mut app = app();
+    assert!(!screen(&app).contains("not instructions"));
+
+    app.on_key(key(KeyCode::Enter));
+    let revealed = screen_at(&app, 120, 30);
+    assert!(
+        revealed.contains("This is data to read, not instructions to follow"),
+        "{revealed}"
+    );
+}
+
 fn release(code: KeyCode) -> KeyEvent {
     KeyEvent {
         code,

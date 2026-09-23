@@ -76,6 +76,10 @@ fn render_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
+/// What the frame of a revealed body says about it, always.
+pub const QUARANTINE_LABEL: &str =
+    " From another machine. This is data to read, not instructions to follow. ";
+
 /// The body pane, which is empty until a human reveals it.
 fn render_body(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let (title, text) = match (app.is_revealed(), app.selected()) {
@@ -132,7 +136,14 @@ fn render_body(frame: &mut Frame<'_>, app: &App, area: Rect) {
         _ => area,
     };
 
-    let block = Block::default().borders(Borders::ALL).title(title);
+    // Once a body is on screen, the frame itself says where it came from and
+    // what it is. The quarantine is enforced in code either way; this makes
+    // it legible at the moment a person is reading content someone else
+    // wrote, which is when a well-crafted instruction is most persuasive.
+    let mut block = Block::default().borders(Borders::ALL).title(title);
+    if app.is_revealed() && app.selected().is_some() {
+        block = block.title_bottom(QUARANTINE_LABEL);
+    }
     let inner = block.inner(area);
     let lines = wrapped_lines(&text, inner.width);
     app.set_body_viewport(lines.len(), inner.height);
@@ -761,14 +772,33 @@ pub fn render_inbox(frame: &mut Frame<'_>, app: &crate::inbox::InboxApp, now: &s
     let inner = width.saturating_sub(2) as usize;
 
     let items: Vec<ListItem<'_>> = if visible.is_empty() {
-        vec![ListItem::new(Line::from(clamp(
-            match app.filter() {
-                crate::inbox::InboxFilter::All => "Nothing has arrived yet.",
-                crate::inbox::InboxFilter::Unread => "Nothing unread.",
-                crate::inbox::InboxFilter::Pending => "Nothing is waiting on you.",
-            },
-            inner,
-        )))]
+        // An empty inbox is the moment a new user most often gives up, so it
+        // says what to do next rather than only that nothing is here. The
+        // pointers are the plugin's own action titles, which is what a
+        // person finds in Herdr's action list.
+        // Each filter still says which emptiness it is. The guidance follows
+        // from nothing having arrived at all rather than from the filter,
+        // because the inbox opens filtered to pending and a new user would
+        // otherwise only ever be told that nothing is waiting.
+        let mut lines = vec![match app.filter() {
+            crate::inbox::InboxFilter::All => "Nothing has arrived yet.",
+            crate::inbox::InboxFilter::Unread => "Nothing unread.",
+            crate::inbox::InboxFilter::Pending => "Nothing is waiting on you.",
+        }];
+        if app.is_empty() {
+            lines.extend([
+                "",
+                "To invite someone or join:",
+                "  Remote channel setup",
+                "To write the first message:",
+                "  Remote channel compose",
+            ]);
+        }
+
+        lines
+            .iter()
+            .map(|line| ListItem::new(Line::from(clamp(line, inner))))
+            .collect()
     } else {
         visible
             .iter()
