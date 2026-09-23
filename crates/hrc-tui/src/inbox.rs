@@ -113,63 +113,16 @@ const UNKNOWN_AGE: &str = "  ?";
 /// days-from-civil, and adding a dependency to print `2m` in a sidebar would
 /// be the larger change.
 pub fn age(arrival_at: &str, now: &str) -> String {
-    let (Some(arrived), Some(current)) = (epoch_seconds(arrival_at), epoch_seconds(now)) else {
+    let (Some(arrived), Some(current)) = (
+        hrc_core::time::epoch_seconds(arrival_at),
+        hrc_core::time::epoch_seconds(now),
+    ) else {
         return UNKNOWN_AGE.to_owned();
     };
 
     // A row that claims to have arrived in the future is a clock that moved,
     // not a negative age.
-    let seconds = current.saturating_sub(arrived).max(0);
-
-    match seconds {
-        0..=59 => format!("{seconds}s"),
-        60..=3599 => format!("{}m", seconds / 60),
-        3600..=86_399 => format!("{}h", seconds / 3600),
-        _ => format!("{}d", seconds / 86_400),
-    }
-}
-
-/// A duration short enough to sit on a border.
-fn elapsed(seconds: u64) -> String {
-    match seconds {
-        0..=59 => format!("{seconds}s ago"),
-        60..=3599 => format!("{}m ago", seconds / 60),
-        3600..=86_399 => format!("{}h ago", seconds / 3600),
-        _ => format!("{}d ago", seconds / 86_400),
-    }
-}
-
-/// Seconds since the Unix epoch for one `YYYY-MM-DDTHH:MM:SSZ` timestamp.
-fn epoch_seconds(timestamp: &str) -> Option<i64> {
-    let bytes = timestamp.as_bytes();
-    if bytes.len() != 20 || bytes[4] != b'-' || bytes[10] != b'T' || bytes[19] != b'Z' {
-        return None;
-    }
-
-    let field = |from: usize, to: usize| timestamp.get(from..to)?.parse::<i64>().ok();
-
-    let (year, month, day) = (field(0, 4)?, field(5, 7)?, field(8, 10)?);
-    let (hour, minute, second) = (field(11, 13)?, field(14, 16)?, field(17, 19)?);
-
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return None;
-    }
-
-    Some(days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second)
-}
-
-/// Days since 1970-01-01 for a proleptic Gregorian date.
-///
-/// Howard Hinnant's `days_from_civil`, which is the standard way to do this
-/// without a calendar library and is exact for every year this code will
-/// ever see.
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let year = if month <= 2 { year - 1 } else { year };
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let year_of_era = year - era * 400;
-    let day_of_year = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
+    hrc_core::time::short_duration(current.saturating_sub(arrived).max(0) as u64)
 }
 
 /// The inbox side view.
@@ -396,7 +349,7 @@ impl InboxApp {
             parts.push(format!("{} unanswered", health.unanswered));
         }
         parts.push(match health.synced_seconds_ago {
-            Some(seconds) => format!("synced {}", elapsed(seconds)),
+            Some(seconds) => format!("synced {} ago", hrc_core::time::short_duration(seconds)),
             None => "never synced".to_owned(),
         });
 

@@ -59,13 +59,13 @@ fn a_channel_that_never_synced_says_so_rather_than_claiming_zero_seconds() {
 
 #[test]
 fn elapsed_time_is_coarse_but_never_misleading() {
-    assert_eq!(elapsed(0), "0s");
-    assert_eq!(elapsed(59), "59s");
-    assert_eq!(elapsed(60), "1m");
-    assert_eq!(elapsed(3599), "59m");
-    assert_eq!(elapsed(3600), "1h");
-    assert_eq!(elapsed(86_399), "23h");
-    assert_eq!(elapsed(86_400), "1d");
+    assert_eq!(hrc_core::time::short_duration(0), "0s");
+    assert_eq!(hrc_core::time::short_duration(59), "59s");
+    assert_eq!(hrc_core::time::short_duration(60), "1m");
+    assert_eq!(hrc_core::time::short_duration(3599), "59m");
+    assert_eq!(hrc_core::time::short_duration(3600), "1h");
+    assert_eq!(hrc_core::time::short_duration(86_399), "23h");
+    assert_eq!(hrc_core::time::short_duration(86_400), "1d");
 }
 
 #[test]

@@ -367,7 +367,7 @@ fn expiry() -> Result<String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| CliError::Entropy)?;
 
-    Ok(crate::commands::rfc3339_from(
+    Ok(hrc_core::time::rfc3339_from(
         now.as_secs() as i64 + AUTHORIZATION_LIFETIME_SECONDS,
     ))
 }

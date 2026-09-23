@@ -139,8 +139,8 @@ moves.
 | PR | Scope | Kind | Behaviour change | Status |
 |---|---|---|---|---|
 | R1 | Fix D1: the broker resolves the message's real channel name | Defect | Provenance banner names the channel | Merged in #87 |
-| R2 | Fix D2: `hrc doctor` exits non-zero when a check fails | Defect | Exit code only | In review |
-| R3 | S3: one `hrc_core::time` module; the CLI, the TUI and the sidebar use it | Structural | None | Planned |
+| R2 | Fix D2: `hrc doctor` exits non-zero when a check fails | Defect | Exit code only | Merged in #88 |
+| R3 | S3: one `hrc_core::time` module; the CLI, the TUI and the sidebar use it | Structural | None | In review |
 | R4 | S2: typed `whoami` and `members` results; the CLI serializes them at the edge and the TUI drivers stop parsing JSON | Structural | None | Planned |
 | R5 | S4 + S7: move the daemon and its broker to `commands/daemon.rs`, add one conversion helper, delete the unreachable broker stubs | Structural | None | Planned |
 | R6 | S1: split the rest of `commands.rs` into `commands/{identity,channel,enrol,membership,sync,compose,context,read,diagnostics,herdr}.rs`, re-exported so no caller changes | Structural | None | Planned |
