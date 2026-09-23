@@ -156,8 +156,8 @@ moves.
 | R1 | Fix D1: the broker resolves the message's real channel name | Defect | Provenance banner names the channel | Merged in #87 |
 | R2 | Fix D2: `hrc doctor` exits non-zero when a check fails | Defect | Exit code only | Merged in #88 |
 | R3 | S3: one `hrc_core::time` module; the CLI, the TUI and the sidebar use it | Structural | None | Merged in #89 |
-| R4 | S2: typed `whoami` and `members` results; the CLI serializes them at the edge and the TUI drivers stop parsing JSON | Defect (D3) + structural | Screens and daemon read the principal, not the device key | In review |
-| R5 | S4 + S7: move the daemon and its broker to `commands/daemon.rs`, add one conversion helper, delete the unreachable broker stubs | Structural | None | Planned |
+| R4 | S2: typed `whoami` and `members` results; the CLI serializes them at the edge and the TUI drivers stop parsing JSON | Defect (D3) + structural | Screens and daemon read the principal, not the device key | Merged in #90 |
+| R5 | S4: move the daemon and its broker to `commands/serve.rs` and add one conversion helper. S7 deferred, see section 3.6 | Structural | None | In review |
 | R6 | S1: split the rest of `commands.rs` into `commands/{identity,channel,enrol,membership,sync,compose,context,read,diagnostics,herdr}.rs`, re-exported so no caller changes | Structural | None | Planned |
 | R7 | S6: split `commands/review.rs` into one module per screen under `commands/screens/` | Structural | None | Planned |
 | R8 | S5: split `hrc-storage/src/lib.rs` into modules by table area, keeping one `impl Database` spread across them | Structural | None | Planned |
@@ -208,6 +208,22 @@ private and now needed across modules it becomes `pub(super)`, never
 `pub`.
 
 ---
+
+### 3.6 What R5 did not do, and why
+
+R5 was planned to delete the two unreachable broker stubs of finding S7. It
+does not. `record_draft` and `observe` are required methods of
+`hrc_core::rpc::Broker`, because the agent-safe protocol advertises `draft`
+and `wait`; the daemon answers both with `unimplemented` before its broker
+exists, and the CLI implements both directly against storage. Deleting the
+stubs therefore means one of two protocol changes: implement `draft` and
+`wait` in the daemon over the functions the CLI already uses, or remove
+them from the agent-safe protocol. Either is a change to what the daemon
+promises, not a move, so it is recorded here rather than done inside a
+refactor that promises to change nothing.
+
+The module is `serve.rs` rather than the planned `daemon.rs`, because
+`commands::daemon` is already the name of the function that runs it.
 
 ## 4. Acceptance
 
