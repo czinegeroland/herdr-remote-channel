@@ -48,6 +48,10 @@ fn main() -> std::process::ExitCode {
             report(cli.json, error.code(), &path, &error.to_string(), None);
             code(error.exit_code())
         }
+        Err(Failure::Unhealthy(report)) => {
+            render::success(cli.json, &path, &report);
+            code(exit::FAILURE)
+        }
         Err(Failure::NotShipped { milestone }) => {
             let message = format!("`hrc {path}` is not implemented yet; it ships in {milestone}");
             report(cli.json, "unimplemented", &path, &message, Some(milestone));
@@ -124,6 +128,11 @@ enum Failure {
     },
     /// The command needs the trusted human interface.
     AuthorizationRequired,
+    /// The command ran and its report says something is wrong.
+    ///
+    /// The report is printed exactly as a success would print it, because a
+    /// person needs to read which check failed; only the exit code differs.
+    Unhealthy(Value),
 }
 
 impl From<CliError> for Failure {
@@ -164,7 +173,17 @@ fn run(cli: &Cli, _path: &str) -> std::result::Result<Value, Failure> {
         Command::Whoami => commands::whoami(&context).map_err(Failure::from),
         Command::Channels => commands::channels(&context).map_err(Failure::from),
         Command::Status => commands::status(&context).map_err(Failure::from),
-        Command::Doctor => commands::doctor(&context).map_err(Failure::from),
+        // A failed check is a failed command. Until docs/REFACTOR.md R2 this
+        // printed `unhealthy` and exited 0, so a script or an agent branching
+        // on the exit code was told everything passed.
+        Command::Doctor => {
+            let diagnosis = commands::diagnose(&context)?;
+            if diagnosis.healthy {
+                Ok(diagnosis.report)
+            } else {
+                Err(Failure::Unhealthy(diagnosis.report))
+            }
+        }
         Command::Audit(args) => {
             commands::audit(&context, args.since.as_deref()).map_err(Failure::from)
         }

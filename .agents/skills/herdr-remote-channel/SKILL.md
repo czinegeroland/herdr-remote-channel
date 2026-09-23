@@ -352,7 +352,9 @@ history is prohibited. Report what `hrc status` says and stop.
 ## Diagnosing problems
 
 Start with `hrc doctor`. It reports every check rather than stopping at the
-first failure, so read the whole list.
+first failure, so read the whole list. It exits 1 when any check fails and
+still prints every check — on a machine that has never run `hrc init` that is
+the expected answer, not a crash, and the failing check says what comes next.
 
 | Symptom | Likely cause |
 |---|---|

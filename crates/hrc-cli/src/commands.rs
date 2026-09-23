@@ -2906,7 +2906,7 @@ pub fn status(context: &Context) -> Result<Value> {
 /// Every check reports its own result rather than the command stopping at
 /// the first failure: a user diagnosing a broken installation wants the
 /// whole picture, not one symptom at a time.
-pub fn doctor(context: &Context) -> Result<Value> {
+pub fn diagnose(context: &Context) -> Result<Diagnosis> {
     let paths = &context.paths;
     let mut checks = Vec::new();
     let mut healthy = true;
@@ -2960,11 +2960,31 @@ pub fn doctor(context: &Context) -> Result<Value> {
         Err(error) => record("device_keys", false, error.to_string()),
     }
 
-    Ok(json!({
-        "status": if healthy { "ok" } else { "unhealthy" },
-        "healthy": healthy,
-        "checks": checks,
-    }))
+    Ok(Diagnosis {
+        report: json!({
+            "status": if healthy { "ok" } else { "unhealthy" },
+            "healthy": healthy,
+            "checks": checks,
+        }),
+        healthy,
+    })
+}
+
+/// What `hrc doctor` found.
+///
+/// `healthy` is carried beside the report rather than read back out of it,
+/// so the exit code cannot drift from the checks because a JSON key was
+/// renamed (`docs/REFACTOR.md` S2).
+pub struct Diagnosis {
+    /// The report `hrc doctor` prints.
+    pub report: Value,
+    /// Whether every check passed.
+    pub healthy: bool,
+}
+
+/// `hrc doctor`'s report, for callers that only want what it says.
+pub fn doctor(context: &Context) -> Result<Value> {
+    diagnose(context).map(|diagnosis| diagnosis.report)
 }
 
 /// `hrc audit`: show the local audit log.
