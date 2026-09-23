@@ -224,6 +224,13 @@ are theirs alone:
 - **The invite secret.** Never put it in `--json` output, a commit, a log, an
   issue, or a chat message. Show the user how to hand it over through a
   channel *they* choose, and tell them it expires and works once.
+
+`hrc invite create` also prints a join link, `<repository>#hrc-join`, labelled
+`Join this remote channel` in Herdr. It is safe to send anywhere: it names the
+channel and nothing secret. The invitee Ctrl-clicks it in any Herdr pane and
+the setup pane opens on the join step, where they still type the code
+themselves. Tell the person inviting to send the link and the code
+separately, and never put the code into the link.
 - **The safety phrase.** After a join, both people compare a phrase out of
   band and the joiner is approved by the administrator, interactively. You
   cannot confirm that the phrases match, so never say they do.
