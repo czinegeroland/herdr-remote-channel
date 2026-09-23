@@ -136,16 +136,16 @@ Ordered so that each PR is small, independently mergeable, and leaves
 `main` green. Defects first, then the pieces the moves depend on, then the
 moves.
 
-| PR | Scope | Kind | Behaviour change |
-|---|---|---|---|
-| R1 | Fix D1: the broker resolves the message's real channel name | Defect | Provenance banner names the channel |
-| R2 | Fix D2: `hrc doctor` exits non-zero when a check fails | Defect | Exit code only |
-| R3 | S3: one `hrc_core::time` module; the CLI, the TUI and the sidebar use it | Structural | None |
-| R4 | S2: typed `whoami` and `members` results; the CLI serializes them at the edge and the TUI drivers stop parsing JSON | Structural | None |
-| R5 | S4 + S7: move the daemon and its broker to `commands/daemon.rs`, add one conversion helper, delete the unreachable broker stubs | Structural | None |
-| R6 | S1: split the rest of `commands.rs` into `commands/{identity,channel,enrol,membership,sync,compose,context,read,diagnostics,herdr}.rs`, re-exported so no caller changes | Structural | None |
-| R7 | S6: split `commands/review.rs` into one module per screen under `commands/screens/` | Structural | None |
-| R8 | S5: split `hrc-storage/src/lib.rs` into modules by table area, keeping one `impl Database` spread across them | Structural | None |
+| PR | Scope | Kind | Behaviour change | Status |
+|---|---|---|---|---|
+| R1 | Fix D1: the broker resolves the message's real channel name | Defect | Provenance banner names the channel | In review |
+| R2 | Fix D2: `hrc doctor` exits non-zero when a check fails | Defect | Exit code only | Planned |
+| R3 | S3: one `hrc_core::time` module; the CLI, the TUI and the sidebar use it | Structural | None | Planned |
+| R4 | S2: typed `whoami` and `members` results; the CLI serializes them at the edge and the TUI drivers stop parsing JSON | Structural | None | Planned |
+| R5 | S4 + S7: move the daemon and its broker to `commands/daemon.rs`, add one conversion helper, delete the unreachable broker stubs | Structural | None | Planned |
+| R6 | S1: split the rest of `commands.rs` into `commands/{identity,channel,enrol,membership,sync,compose,context,read,diagnostics,herdr}.rs`, re-exported so no caller changes | Structural | None | Planned |
+| R7 | S6: split `commands/review.rs` into one module per screen under `commands/screens/` | Structural | None | Planned |
+| R8 | S5: split `hrc-storage/src/lib.rs` into modules by table area, keeping one `impl Database` spread across them | Structural | None | Planned |
 
 ### 3.1 R1 — the channel on the provenance banner
 

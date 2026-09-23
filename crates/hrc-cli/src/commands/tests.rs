@@ -1548,3 +1548,27 @@ fn daemon_tick_degrades_one_channel_without_skipping_the_rest() {
             .any(|channel| channel["channelId"] == "bad-channel" && channel["status"] == "error")
     );
 }
+
+#[test]
+fn the_provenance_banner_names_the_channel_a_message_came_from() {
+    // Decision R1 of docs/REFACTOR.md. Until this test, nothing constructed
+    // a `DaemonBroker`, which is how the banner on every approved delivery
+    // came to say `local channel` whatever channel the body arrived on.
+    let (_directory, context, _channel_id, principal) = messaging_home();
+    let sent = send(&context, &principal, "which channel was this?", None).unwrap();
+    sync_once(&context).unwrap();
+
+    let broker = DaemonBroker::new(&context).unwrap();
+    let message_id = sent["messageId"].as_str().unwrap();
+
+    assert!(
+        broker.pending(message_id).is_some(),
+        "the message should be held for a decision"
+    );
+    assert_eq!(broker.channel_local_name(message_id), "Test channel");
+    assert_eq!(
+        broker.channel_local_name("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+        "an unknown channel",
+        "a message the broker does not hold is not guessed at"
+    );
+}

@@ -370,10 +370,20 @@ trusted "$bob" preview_pending "{\"message_id\": \"$message_id\"}" >/dev/null \
 # chooses what happens to the content: `deliver_to_agent` releases it to the
 # agent they named, which is the whole point of the prompt gate, while
 # `keep_in_inbox` leaves it quarantined for a person to handle by hand.
-trusted "$bob" approve \
-    "{\"message_id\": \"$message_id\", \"decision\": {\"action\": \"deliver_to_agent\", \"agent\": \"reviewer\"}, \"expires_at\": \"$expires\"}" \
-    >/dev/null || die "approve failed"
-ok "approved, and released to the agent the human named"
+delivered="$(trusted "$bob" approve \
+    "{\"message_id\": \"$message_id\", \"decision\": {\"action\": \"deliver_to_agent\", \"agent\": \"reviewer\"}, \"expires_at\": \"$expires\"}")" \
+    || die "approve failed"
+
+# The provenance banner is what tells the agent this text came from another
+# machine, and it names the channel. It said `local channel` on every
+# delivery until docs/REFACTOR.md R1, because nothing tested past the
+# daemon's broker. This is that seam, end to end.
+printf '%s' "$delivered" | grep -q 'Channel: channel' \
+    || die "the provenance banner does not name the channel: $delivered"
+if printf '%s' "$delivered" | grep -q 'local channel'; then
+    die "the provenance banner still carries the placeholder: $delivered"
+fi
+ok "approved, released to the agent the human named, under a banner naming the channel"
 
 step "now the agent can read exactly what was released"
 released="$(python3 "$here/trusted-call.py" "$bob/run/hrc-agent.sock" show_approved \
