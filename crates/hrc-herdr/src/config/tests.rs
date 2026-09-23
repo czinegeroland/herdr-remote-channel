@@ -124,3 +124,12 @@ fn the_pane_token_can_be_turned_off_on_its_own() {
     assert!(!config.window_title);
     assert!(problems.is_empty());
 }
+
+#[test]
+fn a_delivery_waits_for_a_working_agent_unless_told_not_to() {
+    assert!(Config::default().wait_for_idle);
+
+    let (config, problems) = parse(r#"{"delivery": {"wait_for_idle": false}}"#);
+    assert!(!config.wait_for_idle);
+    assert!(problems.is_empty(), "{problems:?}");
+}

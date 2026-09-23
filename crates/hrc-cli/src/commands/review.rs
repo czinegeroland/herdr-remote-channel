@@ -130,13 +130,18 @@ pub fn review(context: &Context, message_id: Option<&str>, agent: &str) -> Resul
     // a body handed to a local session before the trusted path accepted the
     // decision would be a delivery the audit log does not know about.
     let delivered = delivery.map(|(message_id, target)| {
-        hand_to_herdr(
+        let waited = settle(&target);
+        let mut delivered = hand_to_herdr(
             &target,
             bodies
                 .get(&message_id)
                 .map(String::as_str)
                 .unwrap_or_default(),
-        )
+        );
+        if let Some(waited) = waited {
+            delivered["waitedForIdle"] = json!(waited);
+        }
+        delivered
     });
 
     Ok(json!({
@@ -202,6 +207,49 @@ fn departed(target: &str) -> Option<CliError> {
             reason: "it is no longer there",
         }),
     }
+}
+
+/// The longest an approved delivery waits for a working agent.
+///
+/// After this it is delivered anyway. The person approved it to that agent,
+/// agents queue input typed mid-turn, and an approval that silently never
+/// arrived would be worse than one that arrived during a long turn.
+const IDLE_WAIT: Duration = Duration::from_secs(10 * 60);
+
+/// Holds an approved delivery while its destination is mid-turn.
+///
+/// `None` when there was nothing to wait for: the agent was not working,
+/// waiting is turned off, or Herdr could not be asked. Otherwise whether it
+/// settled before [`IDLE_WAIT`] ran out.
+///
+/// The screen has closed by now, so this writes to the pane directly, and
+/// says what closing it would mean: the decision is already recorded, and
+/// the only thing lost is the hand-over (docs/RESEARCH.md 5.4).
+fn settle(target: &str) -> Option<bool> {
+    if !super::plugin_config().0.wait_for_idle {
+        return None;
+    }
+
+    let mut host = crate::herdr_host::Host::connect().ok()?;
+    let agent = host
+        .destinations()
+        .ok()?
+        .into_iter()
+        .find(|agent| agent.local_target() == target)?;
+
+    if !agent.is_working() {
+        return None;
+    }
+
+    eprintln!(
+        "Approved. {} is working, so this is queued and delivers when it is idle \
+         (in {} minutes at the latest).\n\
+         Closing this pane now leaves the message approved but not delivered.",
+        agent.label(),
+        IDLE_WAIT.as_secs() / 60,
+    );
+
+    Some(host.wait_until_settled(target, IDLE_WAIT).is_ok())
 }
 
 /// Hands approved text to the chosen local session.

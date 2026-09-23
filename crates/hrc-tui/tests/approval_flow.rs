@@ -416,6 +416,20 @@ fn a_revealed_body_is_framed_as_data_from_another_machine() {
     );
 }
 
+#[test]
+fn a_working_destination_says_it_will_wait_before_anyone_approves() {
+    // docs/RESEARCH.md 5.4: the wait is stated up front, in the title the
+    // person reads while deciding, not discovered after the fact.
+    let busy = hrc_herdr::LocalAgent::new("w1:p2", "reviewer").when_working(true);
+    let free = hrc_herdr::LocalAgent::new("w1:p3", "writer");
+
+    assert_eq!(
+        App::destination_label(&busy),
+        "reviewer (working; waits until it is idle)"
+    );
+    assert_eq!(App::destination_label(&free), "writer");
+}
+
 fn release(code: KeyCode) -> KeyEvent {
     KeyEvent {
         code,

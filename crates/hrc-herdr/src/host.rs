@@ -108,6 +108,25 @@ pub fn agent_prompt(id: &str, target: &str, text: &str) -> String {
     )
 }
 
+/// The agent states that end a wait for an approved delivery.
+///
+/// Idle and done are what the wait is for. Blocked ends it too, because a
+/// blocked agent refuses a prompt outright and waiting longer would only
+/// delay saying so.
+pub const SETTLED: [&str; 3] = ["idle", "done", "blocked"];
+
+/// Waits, on the server, until an agent stops working.
+///
+/// Bounded by `timeout_ms`, after which Herdr answers with a `timeout`
+/// error. The caller's socket read must be allowed at least that long.
+pub fn agent_wait(id: &str, target: &str, timeout_ms: u64) -> String {
+    request(
+        id,
+        "agent.wait",
+        json!({ "target": target, "until": SETTLED, "timeout_ms": timeout_ms }),
+    )
+}
+
 /// Raises one notification through Herdr.
 ///
 /// `sound` is `request` for something that needs the person now and `none`
@@ -371,13 +390,15 @@ fn destination(entry: &Value, current_pane: Option<&str>) -> Option<LocalAgent> 
         .and_then(Value::as_bool)
         .unwrap_or(false)
         && entry.get("agent_status").and_then(Value::as_str) != Some("blocked");
+    let working = entry.get("agent_status").and_then(Value::as_str) == Some("working");
 
     Some(
         LocalAgent::new(pane_id, label)
             .with_target(target)
             .in_workspace(text(entry, "workspace_id"))
             .as_current(current)
-            .when_ready(ready),
+            .when_ready(ready)
+            .when_working(working),
     )
 }
 

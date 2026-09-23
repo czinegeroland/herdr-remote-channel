@@ -39,6 +39,8 @@ pub struct LocalAgent {
     current: bool,
     /// Whether Herdr says it can take input right now.
     ready: bool,
+    /// Whether Herdr says it is in the middle of a turn.
+    working: bool,
 }
 
 impl LocalAgent {
@@ -57,6 +59,7 @@ impl LocalAgent {
             workspace_id: None,
             current: false,
             ready: true,
+            working: false,
         }
     }
 
@@ -88,6 +91,13 @@ impl LocalAgent {
         self
     }
 
+    /// Records whether Herdr says it is in the middle of a turn.
+    #[must_use]
+    pub fn when_working(mut self, working: bool) -> Self {
+        self.working = working;
+        self
+    }
+
     /// What a local delivery is addressed to.
     ///
     /// Named for what it must not be used for, like [`Self::local_pane_id`].
@@ -112,6 +122,17 @@ impl LocalAgent {
     /// understand than one that says why it cannot be chosen.
     pub fn is_ready(&self) -> bool {
         self.ready
+    }
+
+    /// Whether Herdr said it is in the middle of a turn.
+    ///
+    /// Such an agent can take input -- a prompt typed into a working agent is
+    /// queued by most of them -- but content landing mid-turn arrives too
+    /// late to inform what the turn is doing and interrupts whoever is
+    /// watching it. The review holds an approved delivery until it is idle
+    /// (docs/RESEARCH.md 5.4).
+    pub fn is_working(&self) -> bool {
+        self.working
     }
 
     /// The pane this agent occupies, for local delivery only.

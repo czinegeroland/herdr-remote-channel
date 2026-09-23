@@ -106,6 +106,36 @@ impl Host {
         host::accepted(&line, &id, "agent_prompted").map_err(Unreachable::Host)
     }
 
+    /// Waits until an agent stops working, for at most `longest`.
+    ///
+    /// The server does the waiting and answers when the agent settles or
+    /// when `longest` runs out, so the socket's read timeout is lifted for
+    /// this one exchange and restored afterwards. `Ok` means it settled;
+    /// anything else, a timeout included, means it did not.
+    pub fn wait_until_settled(
+        &mut self,
+        target: &str,
+        longest: Duration,
+    ) -> Result<(), Unreachable> {
+        let id = self.identifier();
+        let stream = self.reader.get_ref();
+        stream
+            .set_recv_timeout(Some(longest + TIMEOUT))
+            .map_err(Unreachable::Io)?;
+
+        let millis = u64::try_from(longest.as_millis()).unwrap_or(u64::MAX);
+        let answered = self.exchange(&id, host::agent_wait(&id, target, millis));
+
+        self.reader
+            .get_ref()
+            .set_recv_timeout(Some(TIMEOUT))
+            .map_err(Unreachable::Io)?;
+
+        host::result(&answered?, &id)
+            .map(|_| ())
+            .map_err(Unreachable::Host)
+    }
+
     /// Raises one notification through Herdr.
     ///
     /// The answer says whether it was shown and why not when it was not, but
