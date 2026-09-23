@@ -150,13 +150,33 @@ impl InboxScreen {
         self.spawn_review(Some(message_id));
     }
 
+    /// Asks Herdr to open the thread pane on one message's thread.
+    ///
+    /// Same rule as the review popup: only a well-formed ULID reaches the
+    /// host's command line, and anything else is refused with a line saying
+    /// so rather than opened on something else.
+    fn open_thread(&mut self, message_id: &str) {
+        if !hrc_protocol::is_ulid(message_id) {
+            self.status("That message has a malformed identifier, so its thread cannot be opened.");
+            return;
+        }
+
+        self.spawn_pane(hrc_herdr::open_thread(message_id), "thread view");
+    }
+
     /// Runs `herdr plugin pane open`, reporting a refusal rather than hiding it.
     fn spawn_review(&mut self, message_id: Option<&str>) {
-        let herdr = std::env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_owned());
         let arguments = match message_id {
             Some(message_id) => hrc_herdr::open_review(message_id),
             None => hrc_herdr::open_review_list(),
         };
+        self.spawn_pane(arguments, "review popup");
+    }
+
+    /// Runs one `herdr plugin pane open`, reporting a refusal rather than
+    /// hiding it.
+    fn spawn_pane(&mut self, arguments: Vec<String>, what: &str) {
+        let herdr = std::env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_owned());
 
         match std::process::Command::new(&herdr)
             .args(&arguments)
@@ -174,7 +194,7 @@ impl InboxScreen {
                 let reason = String::from_utf8_lossy(&output.stderr);
                 let reason = reason.trim();
                 self.status(&format!(
-                    "Herdr did not open the review popup{}{}",
+                    "Herdr did not open the {what}{}{}",
                     if reason.is_empty() { "" } else { ": " },
                     reason
                 ));
@@ -208,6 +228,10 @@ impl hrc_tui::Screen for InboxScreen {
                 self.open_review(&message_id);
                 // Deliberately not propagated. The only outcome that ends the
                 // side view is leaving it.
+                None
+            }
+            Some(hrc_tui::InboxOutcome::Thread { message_id }) => {
+                self.open_thread(&message_id);
                 None
             }
             Some(hrc_tui::InboxOutcome::Quit) => Some(hrc_tui::InboxOutcome::Quit),

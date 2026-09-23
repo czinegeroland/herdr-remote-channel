@@ -999,3 +999,49 @@ fn clamp(value: &str, width: usize) -> String {
 
     characters[..width - 1].iter().collect::<String>() + "…"
 }
+
+/// The thread screen: one frame, every entry in reading order.
+///
+/// Headings are bold and bodies are indented beneath them, so the structure
+/// survives without colour (PRD section 27).
+pub fn render_thread(frame: &mut Frame<'_>, app: &crate::thread::ThreadApp) {
+    let area = frame.area();
+    let [body, status] = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(clamp(app.title(), body.width.saturating_sub(4) as usize));
+    let inner = block.inner(body);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if app.entries().is_empty() {
+        lines.push(Line::from("Nothing in this thread yet."));
+    }
+    for (index, entry) in app.entries().iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(Span::styled(
+            entry.heading.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        for line in wrapped_lines(&entry.body, inner.width.saturating_sub(2)) {
+            let mut spans = vec![Span::raw("  ")];
+            spans.extend(line.spans);
+            lines.push(Line::from(spans));
+        }
+    }
+
+    app.set_viewport(lines.len(), inner.height);
+    frame.render_widget(
+        Paragraph::new(lines).scroll((app.scroll(), 0)).block(block),
+        body,
+    );
+    frame.render_widget(
+        Paragraph::new(clamp(
+            "j/k/PgUp/PgDn: scroll   g/G: top/end   q: close",
+            status.width as usize,
+        )),
+        status,
+    );
+}

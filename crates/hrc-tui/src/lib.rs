@@ -28,6 +28,7 @@ pub mod members;
 pub mod passphrase;
 pub mod run;
 pub mod setup;
+pub mod thread;
 pub mod view;
 
 // Re-exported so a [`Screen`] can be implemented outside this crate. The
@@ -47,7 +48,8 @@ pub use members::{Member, MemberDevice, MemberOutcome, MembersApp};
 pub use passphrase::{PassphraseApp, PassphraseOutcome};
 pub use run::{Screen, Ticking, run, run_ticking};
 pub use setup::{SetupApp, SetupOutcome, SetupStep};
+pub use thread::{ThreadApp, ThreadEntry};
 pub use view::{
     render, render_compose, render_context, render_inbox, render_joins, render_members,
-    render_passphrase, render_setup,
+    render_passphrase, render_setup, render_thread,
 };
