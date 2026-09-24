@@ -155,6 +155,7 @@ pub fn command_path(command: &Command) -> String {
             TaskAction::Accept { .. } => "task accept".into(),
             TaskAction::Decline { .. } => "task decline".into(),
             TaskAction::Progress { .. } => "task progress".into(),
+            TaskAction::Cancel { .. } => "task cancel".into(),
         },
         Command::Context(context) => match context.action {
             ContextAction::Draft { .. } => "context draft".into(),

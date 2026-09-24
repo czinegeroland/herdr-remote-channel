@@ -250,6 +250,9 @@ fn run(cli: &Cli, _path: &str) -> std::result::Result<Value, Failure> {
             args.context.as_deref(),
         )
         .map_err(Failure::from),
+        Command::Task(cli::TaskCommand {
+            action: cli::TaskAction::Cancel { task_id, note },
+        }) => commands::task_cancel(&context, task_id, note.as_deref()).map_err(Failure::from),
         Command::Task(task) => {
             use hrc_protocol::{DelegationState, MessageKind};
             let (task_id, kind, state, note) = match &task.action {
@@ -278,6 +281,7 @@ fn run(cli: &Cli, _path: &str) -> std::result::Result<Value, Failure> {
                     },
                     note,
                 ),
+                cli::TaskAction::Cancel { .. } => unreachable!("matched above"),
             };
             commands::task_report(&context, task_id, kind, state, note.as_deref())
                 .map_err(Failure::from)

@@ -307,7 +307,8 @@ pub struct TaskCommand {
     pub action: TaskAction,
 }
 
-/// Where a task stands, as its assignee reports it.
+/// Where a task stands, as its assignee reports it, or its withdrawal by
+/// the person who asked.
 #[derive(Debug, Subcommand)]
 pub enum TaskAction {
     /// Take the task on.
@@ -323,6 +324,14 @@ pub enum TaskAction {
         /// The task, by the message identifier it arrived as.
         task_id: String,
         /// Why, for the requester.
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Withdraw a task you delegated. Best effort: it cannot undo work.
+    Cancel {
+        /// The task, by the message identifier it was sent as.
+        task_id: String,
+        /// Why, for the assignee.
         #[arg(long)]
         note: Option<String>,
     },
