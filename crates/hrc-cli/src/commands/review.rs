@@ -416,6 +416,9 @@ async fn collect_pending(
 
     let mut client = connect(endpoint).await?;
     let mut items = Vec::new();
+    // Found once, and only if a result needs it: asking Herdr which agent the
+    // person is working with costs a round trip nothing else here needs.
+    let checkout = std::cell::OnceCell::new();
     for (message_id, view) in waiting {
         let previewed: Value = client
             .call(&TrustedRequest::PreviewPending {
@@ -434,7 +437,12 @@ async fn collect_pending(
         // A result's commit references are checked against this machine's
         // checkout here, in the trusted process, and shown beside the body
         // rather than inside it.
-        let local_checks = super::references::local_checks(&view.kind, body);
+        let local_checks = if view.kind == hrc_protocol::MessageKind::Result.as_str() {
+            let root = checkout.get_or_init(super::references::checkout_root);
+            super::references::local_checks(&view.kind, body, root.as_deref())
+        } else {
+            Vec::new()
+        };
 
         items.push(PendingItem {
             message_id,

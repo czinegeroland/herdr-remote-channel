@@ -106,13 +106,37 @@ pub(crate) fn check_commit(root: &Path, id: &str) -> CommitCheck {
 /// the screen draws them in a frame of their own for that reason. A message
 /// of any other kind gets none.
 ///
-/// The checkout asked is the one the review is running in, which is where a
-/// person would look for the commit themselves.
-pub(crate) fn local_checks(kind: &str, body: &str) -> Vec<String> {
-    match std::env::current_dir() {
-        Ok(root) => local_checks_with(kind, body, |id| check_commit(&root, id)),
-        Err(_) => local_checks_with(kind, body, |_| CommitCheck::NoCheckout),
+/// `root` is the checkout to ask, or `None` when there is none to ask; see
+/// [`checkout_root`] for how the review finds it.
+pub(crate) fn local_checks(kind: &str, body: &str, root: Option<&Path>) -> Vec<String> {
+    match root {
+        Some(root) => local_checks_with(kind, body, |id| check_commit(root, id)),
+        None => local_checks_with(kind, body, |_| CommitCheck::NoCheckout),
     }
+}
+
+/// The checkout a result's commits are checked against.
+///
+/// Under Herdr, every plugin command runs in the plugin's own directory,
+/// which is a clone of this project and exactly the wrong repository to ask
+/// about someone else's work. So there it is the directory Herdr reports for
+/// the agent the person is working with; with none, nothing is checked. On a
+/// plain terminal it is the directory `hrc review` was run from, which is
+/// where that person is.
+pub(crate) fn checkout_root() -> Option<std::path::PathBuf> {
+    if std::env::var_os(hrc_herdr::host::SOCKET_ENV).is_none() {
+        return std::env::current_dir().ok();
+    }
+
+    let agents = crate::herdr_host::Host::connect()
+        .and_then(|mut host| host.destinations())
+        .ok()?;
+    agents
+        .iter()
+        .find(|agent| agent.is_current())
+        .or_else(|| agents.first())
+        .and_then(|agent| agent.local_cwd())
+        .map(std::path::PathBuf::from)
 }
 
 /// [`local_checks`] with the checkout question supplied, so the wording can
@@ -162,7 +186,7 @@ pub(crate) fn local_checks_with(
                     "commit {short}: CLAIMED BUT NOT FOUND in this checkout (fetching may bring it)"
                 ),
                 CommitCheck::NoCheckout => {
-                    format!("commit {short}: not checked, this is not running in a Git checkout")
+                    format!("commit {short}: not checked, there is no Git checkout here to ask")
                 }
             }
         })
