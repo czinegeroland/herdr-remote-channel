@@ -8,7 +8,7 @@
 
 use crate::cli::{
     Command, ContextAction, ContextCommand, DeviceAction, HerdrAction, InviteAction, JoinAction,
-    MemberAction, Visibility,
+    MemberAction, TaskAction, Visibility,
 };
 
 /// What the process should do with a parsed command.
@@ -108,7 +108,9 @@ fn milestone(command: &Command) -> &'static str {
 
         Command::Review(_) | Command::Approve(_) | Command::Herdr(_) => "M3",
 
-        Command::Delegate(_) | Command::TaskResult(_) | Command::Rollover => "M4",
+        Command::Delegate(_) | Command::TaskResult(_) | Command::Task(_) | Command::Rollover => {
+            "M4"
+        }
         Command::Context(_) => "M4",
     }
 }
@@ -149,6 +151,11 @@ pub fn command_path(command: &Command) -> String {
         Command::Reply(_) => "reply".into(),
         Command::Delegate(_) => "delegate".into(),
         Command::TaskResult(_) => "result".into(),
+        Command::Task(task) => match task.action {
+            TaskAction::Accept { .. } => "task accept".into(),
+            TaskAction::Decline { .. } => "task decline".into(),
+            TaskAction::Progress { .. } => "task progress".into(),
+        },
         Command::Context(context) => match context.action {
             ContextAction::Draft { .. } => "context draft".into(),
             ContextAction::Preview { .. } => "context preview".into(),

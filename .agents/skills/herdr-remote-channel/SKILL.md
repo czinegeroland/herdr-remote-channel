@@ -274,6 +274,18 @@ A delegation request is a *request*. HRC never executes anything on the
 other machine: the remote human decides whether to act, and their agent only
 sees it if they approve it.
 
+When someone delegates a task to you, say where it stands in its thread:
+
+```bash
+hrc task accept <task-message-id> --note "<anything they should know>"
+hrc task decline <task-message-id> --note "<why>"
+hrc task progress <task-message-id> working
+hrc task progress <task-message-id> blocked --note "<what you need from them>"
+```
+
+Declining is final. Accept or decline only what the user has agreed to take
+on; these are statements to another person, not bookkeeping.
+
 When you have finished a task someone delegated, report it in the task's
 thread:
 

@@ -285,6 +285,37 @@ impl ProgressBody {
     }
 }
 
+impl ProgressBody {
+    /// Checks the body against the message kind it travels as.
+    ///
+    /// `task_accept`, `task_decline` and `progress` share this body, because
+    /// each reports one state of one task with an optional note. What the
+    /// kind promises and what the body says must agree: a `task_accept` whose
+    /// body says `declined` is a message that means two things, and a
+    /// receiver would have to pick which to believe.
+    pub fn validate_as(&self, kind: crate::MessageKind) -> Result<()> {
+        use crate::MessageKind;
+
+        bounded("taskId", &self.task_id, true)?;
+        bounded("note", &self.note, false)?;
+
+        let agrees = match kind {
+            MessageKind::TaskAccept => self.state == DelegationState::Accepted,
+            MessageKind::TaskDecline => self.state == DelegationState::Declined,
+            MessageKind::Progress => {
+                return self.validate();
+            }
+            _ => false,
+        };
+
+        if agrees {
+            Ok(())
+        } else {
+            Err(ProtocolError::DerivedMismatch { field: "state" })
+        }
+    }
+}
+
 impl ResultBody {
     /// Checks the invariants a receiver must not assume.
     pub fn validate(&self) -> Result<()> {
@@ -565,5 +596,48 @@ mod tests {
     fn a_result_carries_a_bounded_number_of_references() {
         let many = vec![Reference::commit("c".repeat(40)); MAX_REFERENCES + 1];
         assert!(result_with(many).validate().is_err());
+    }
+
+    #[test]
+    fn a_lifecycle_body_must_agree_with_the_kind_it_travels_as() {
+        use crate::MessageKind;
+
+        let report = |state| ProgressBody {
+            task_id: "01ARZ3".into(),
+            state,
+            note: String::new(),
+        };
+
+        report(DelegationState::Accepted)
+            .validate_as(MessageKind::TaskAccept)
+            .unwrap();
+        report(DelegationState::Declined)
+            .validate_as(MessageKind::TaskDecline)
+            .unwrap();
+        report(DelegationState::NeedsInput)
+            .validate_as(MessageKind::Progress)
+            .unwrap();
+
+        assert!(
+            report(DelegationState::Declined)
+                .validate_as(MessageKind::TaskAccept)
+                .is_err()
+        );
+        assert!(
+            report(DelegationState::Accepted)
+                .validate_as(MessageKind::TaskDecline)
+                .is_err()
+        );
+        assert!(
+            report(DelegationState::Completed)
+                .validate_as(MessageKind::Progress)
+                .is_err(),
+            "progress cannot conclude a task"
+        );
+        assert!(
+            report(DelegationState::Accepted)
+                .validate_as(MessageKind::Note)
+                .is_err()
+        );
     }
 }

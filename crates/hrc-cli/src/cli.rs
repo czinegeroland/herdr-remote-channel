@@ -67,6 +67,8 @@ pub enum Command {
     /// Report the outcome of a task someone delegated to you.
     #[command(name = "result")]
     TaskResult(TaskResultArgs),
+    /// Accept, decline, or report progress on a task someone delegated to you.
+    Task(TaskCommand),
     /// Build, preview, and send explicit context packages.
     Context(ContextCommand),
     /// List inbox entries.
@@ -296,6 +298,55 @@ pub struct DelegateArgs {
     /// When the requester stops waiting, for example `7d`.
     #[arg(long, value_name = "DURATION")]
     pub due: Option<String>,
+}
+
+/// `hrc task ...`
+#[derive(Debug, Args)]
+pub struct TaskCommand {
+    #[command(subcommand)]
+    pub action: TaskAction,
+}
+
+/// Where a task stands, as its assignee reports it.
+#[derive(Debug, Subcommand)]
+pub enum TaskAction {
+    /// Take the task on.
+    Accept {
+        /// The task, by the message identifier it arrived as.
+        task_id: String,
+        /// Anything the requester should know.
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Refuse the task. It cannot be reopened afterwards.
+    Decline {
+        /// The task, by the message identifier it arrived as.
+        task_id: String,
+        /// Why, for the requester.
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Say how the work is going.
+    Progress {
+        /// The task, by the message identifier it arrived as.
+        task_id: String,
+        /// `working` while it is under way, `blocked` when you need the
+        /// requester.
+        #[arg(value_enum)]
+        state: ProgressState,
+        /// What the requester should know.
+        #[arg(long)]
+        note: Option<String>,
+    },
+}
+
+/// A state progress may report. Concluding a task is `hrc result`'s job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ProgressState {
+    /// Work is under way.
+    Working,
+    /// Waiting on the requester.
+    Blocked,
 }
 
 /// Arguments of `hrc result`.

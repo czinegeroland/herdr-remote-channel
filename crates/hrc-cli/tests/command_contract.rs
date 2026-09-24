@@ -33,8 +33,9 @@ fn help_lists_the_published_command_surface() {
 
     for command in [
         "init", "whoami", "create", "channels", "status", "doctor", "rollover", "invite", "join",
-        "members", "member", "device", "send", "ask", "reply", "delegate", "result", "context",
-        "inbox", "show", "thread", "wait", "review", "approve", "sync", "daemon", "audit", "herdr",
+        "members", "member", "device", "send", "ask", "reply", "delegate", "result", "task",
+        "context", "inbox", "show", "thread", "wait", "review", "approve", "sync", "daemon",
+        "audit", "herdr",
     ] {
         assert!(
             help.contains(command),
@@ -3753,6 +3754,71 @@ fn a_result_is_refused_for_anything_but_a_task_or_an_unknown_commit() {
         &["result", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "done"],
         "no_such_message",
     );
+}
+
+#[test]
+fn an_assignee_accepts_and_reports_progress_in_the_tasks_thread() {
+    // HRC-MSG-008 and HRC-MSG-009: accept/decline and progress are exchanged
+    // as messages, never acted on, and the body must agree with its kind.
+    let (home, remote) = channel_fixture();
+    let task_id = delegated_task(home.path(), remote.path());
+
+    let report = |args: &[&str]| -> Value {
+        let output = hrc_in(home.path())
+            .args(args)
+            .arg("--json")
+            .output()
+            .expect("command should run");
+        assert!(
+            output.status.success(),
+            "{args:?} failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("stdout should be JSON")
+    };
+
+    let accepted = report(&["task", "accept", &task_id, "--note", "on it"]);
+    assert_eq!(accepted["kind"], "task_accept", "{accepted}");
+    assert_eq!(accepted["state"], "accepted", "{accepted}");
+
+    let blocked = report(&["task", "progress", &task_id, "blocked"]);
+    assert_eq!(blocked["kind"], "progress", "{blocked}");
+    assert_eq!(blocked["state"], "needs_input", "{blocked}");
+
+    hrc_in(home.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+
+    for kind in ["task_accept", "progress"] {
+        let entry = inbox_entry_of_kind(home.path(), kind);
+        assert_eq!(entry["disposition"], "quarantined", "{entry}");
+    }
+
+    // Only a task can be accepted.
+    let principal = principal_of(home.path(), remote.path());
+    hrc_in(home.path())
+        .args(["send", &principal, "just a note"])
+        .assert()
+        .success();
+    hrc_in(home.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+    let note = inbox_entry_of_kind(home.path(), "note");
+    let output = hrc_in(home.path())
+        .args([
+            "task",
+            "decline",
+            note["messageId"].as_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("command should run");
+    assert_eq!(output.status.code(), Some(2));
+    let refused: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(refused["code"], "not_a_task", "{refused}");
 }
 
 #[test]
