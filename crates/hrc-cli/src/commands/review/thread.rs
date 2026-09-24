@@ -103,8 +103,12 @@ pub(crate) fn thread_entries(
             // A message still being built has no recorded kind or recipients
             // yet, and is not in the sent facts; it appears once it is.
             if let Some(kind) = outbound.get(&place.message_id) {
+                let heading = match outbound_state(database, &place.message_id)? {
+                    Some(state) => format!("you · {kind} · {state}"),
+                    None => format!("you · {kind}"),
+                };
                 entries.push(hrc_tui::ThreadEntry {
-                    heading: format!("you · {kind}"),
+                    heading,
                     body: SENT_HERE.to_owned(),
                 });
             }
@@ -131,6 +135,28 @@ pub(crate) fn thread_entries(
     }
 
     Ok(entries)
+}
+
+/// How far a message this installation sent has got.
+///
+/// The most advanced of what the outbox recorded and what any recipient
+/// device reported, ranked the way `hrc wait` ranks them, so the thread and
+/// `hrc wait` never disagree about the same message. A receipt is a claim a
+/// recipient device made, checked on arrival against the devices the message
+/// was sealed to (section 18.2), so it is safe to show as a state.
+fn outbound_state(database: &Database, message_id: &str) -> Result<Option<String>> {
+    let mut observed: Vec<String> = database
+        .receipts_for(message_id)?
+        .into_iter()
+        .map(|receipt| receipt.state)
+        .collect();
+    if let Some(state) = database.outbox_state(message_id)? {
+        observed.push(state.as_str().to_owned());
+    }
+
+    Ok(observed
+        .into_iter()
+        .max_by_key(|state| crate::commands::read::state_rank(state)))
 }
 
 /// The message the thread pane was opened for, if Herdr passed a valid one.
