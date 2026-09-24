@@ -16,10 +16,11 @@ before changing behavior, and update it in the same pull request.
 
 ## Status
 
-Milestone M1 (secure channel foundation) is in progress. The published `hrc`
-command surface exists and the human authorization boundary is enforced;
-channel, messaging, and synchronization behavior land with their milestones.
-Section 30 of the PRD tracks the roadmap and section 31 the delivery ledger.
+Milestones M1 to M4 are delivered: a secure channel over a Git repository,
+encrypted messaging with receipts and threads, the Herdr plugin, and context
+packages with delegation. M0's specification review is still open and M5, other
+transports, has not started. Section 30 of the PRD tracks the roadmap and
+section 31 the delivery ledger, which every change updates.
 
 ## Installing
 
@@ -177,10 +178,22 @@ cargo run --quiet --bin hrc -- herdr manifest > herdr-plugin.toml
 
 | Kind | What it does |
 |---|---|
-| Startup | `hrc herdr startup` — returns the manifest and the sidebar line |
-| Action `inbox` | `hrc herdr action inbox` — the remote channel inbox, in workspace and pane contexts |
-| Pane `inbox` | `hrc herdr pane inbox` — the same inbox as a split pane |
+| Startup | `hrc herdr startup` — places the inbox split, unless configured not to |
 | Event `workspace.focused` | `hrc herdr event` — refreshes the sidebar |
+
+Every pane also has an action of the same name, so each screen can be opened
+from Herdr's action list in workspace and pane contexts.
+
+| Pane | Placement | What it is for |
+|---|---|---|
+| `inbox` — Remote channel inbox | split | Watching what arrives; `Enter` reviews a message, `t` opens its thread |
+| `review` — Remote channel review | popup | Reading a quarantined body and deciding: deliver, keep, or decline |
+| `thread` — Remote channel thread | zoomed | Reading one conversation, showing only content a human already released |
+| `compose` — Remote channel compose | popup | Writing a note, question or reply |
+| `context` — Remote channel context | popup | Previewing and disclosing a context package |
+| `setup` — Remote channel setup | popup | Creating a channel, inviting, joining |
+| `joins` — Remote channel join requests | popup | Admitting a member after the safety phrase matches |
+| `members` — Remote channel members | popup | Naming, removing, and revoking members and devices |
 
 One link handler is registered: a Ctrl-click on the join link that `hrc
 invite create` prints (`<locator>#hrc-join`) opens the setup screen on the
@@ -215,6 +228,9 @@ Herdr gives every plugin a configuration directory and names it in
   "indicator": {
     "pane_token": true,
     "window_title": false
+  },
+  "delivery": {
+    "wait_for_idle": true
   }
 }
 ```
@@ -226,6 +242,7 @@ Herdr gives every plugin a configuration directory and names it in
 | `notifications.enabled` | `true` | Whether notifications are raised. The ledger is written either way, so turning them back on does not replay what arrived while they were off |
 | `indicator.pane_token` | `true` | Whether a count is reported beside the inbox pane in Herdr's own sidebar |
 | `indicator.window_title` | `false` | Whether a count is written to the terminal window title. Off by default: the title belongs to the client, and anything else that sets it will be overwritten |
+| `delivery.wait_for_idle` | `true` | Whether an approved message to an agent in the middle of a turn waits until it is idle, for at most ten minutes, rather than landing mid-turn |
 
 Every setting is optional and a missing file is the ordinary case. A file
 that cannot be parsed, a value outside its range, and a key this build does
