@@ -2921,3 +2921,46 @@ fn unanswered_questions_are_scoped_to_one_channel() {
         Unanswered::default()
     );
 }
+
+#[test]
+fn a_thread_is_ordered_by_this_installations_clock_not_the_senders() {
+    // Section 18.2 and DEC-042: the sender chooses `createdAt`, so ordering
+    // a thread by it would let a remote peer place its message anywhere in
+    // this reading of the conversation. Here the second arrival claims to
+    // have been written years before anything else and still reads last.
+    let mut database = database();
+
+    database
+        .record_inbound(&arrival(1).message(), "2026-09-13T00:00:01Z")
+        .unwrap();
+    sent(
+        &mut database,
+        "out-1",
+        "answer",
+        Some("msg-1"),
+        "2026-09-13T00:00:02Z",
+    );
+
+    let second = arrival(2);
+    let mut backdated = second.message();
+    backdated.created_at = "2000-01-01T00:00:00Z";
+    database
+        .record_inbound(&backdated, "2026-09-13T00:00:03Z")
+        .unwrap();
+
+    let order: Vec<(String, bool)> = database
+        .thread_order(CHANNEL, "thread-1")
+        .unwrap()
+        .into_iter()
+        .map(|place| (place.message_id, place.outbound))
+        .collect();
+
+    assert_eq!(
+        order,
+        vec![
+            ("msg-1".to_owned(), false),
+            ("out-1".to_owned(), true),
+            ("msg-2".to_owned(), false),
+        ]
+    );
+}
