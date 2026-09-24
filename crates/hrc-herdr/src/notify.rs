@@ -33,6 +33,16 @@ pub enum Notification {
         /// Locally resolved channel name.
         channel_local_name: String,
     },
+    /// A result arrived for a task this installation asked for.
+    ///
+    /// The thing a requester is waiting on. A result does not name whether
+    /// it succeeded here: that is in its body, which stays quarantined.
+    NewResult {
+        /// Locally chosen display name for the verified sender.
+        sender_local_name: String,
+        /// Locally resolved channel name.
+        channel_local_name: String,
+    },
     /// Someone is waiting to be admitted.
     JoinAwaitingApproval {
         /// Locally resolved channel name.
@@ -94,6 +104,10 @@ impl Notification {
                 sender_local_name,
                 channel_local_name,
             }),
+            "result" => Some(Notification::NewResult {
+                sender_local_name,
+                channel_local_name,
+            }),
             _ => None,
         }
     }
@@ -115,6 +129,10 @@ impl Notification {
                 sender_local_name,
                 channel_local_name,
             } => format!("{sender_local_name} requested a task in {channel_local_name}"),
+            Notification::NewResult {
+                sender_local_name,
+                channel_local_name,
+            } => format!("{sender_local_name} reported a task result in {channel_local_name}"),
             Notification::JoinAwaitingApproval {
                 channel_local_name,
                 waiting,
@@ -144,6 +162,7 @@ impl Notification {
             Notification::NewQuestion { .. } => "new_question",
             Notification::NewPromptRequest { .. } => "new_prompt_request",
             Notification::NewTaskRequest { .. } => "new_task_request",
+            Notification::NewResult { .. } => "new_result",
             Notification::JoinAwaitingApproval { .. } => "join_awaiting_approval",
             Notification::FailedDelivery { .. } => "failed_delivery",
             Notification::MembershipChanged { .. } => "membership_changed",

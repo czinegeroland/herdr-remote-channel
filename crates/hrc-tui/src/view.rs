@@ -56,7 +56,9 @@ fn render_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
             let line = format!(
                 "{marker}{} [{}]{endpoint}  {} bytes",
-                item.view.sender_local_name, item.view.kind, item.view.plaintext_bytes
+                item.view.sender_local_name,
+                hrc_herdr::kind_label(&item.view.kind),
+                item.view.plaintext_bytes
             );
 
             let style = if index == app.selected_index() {
@@ -876,7 +878,7 @@ fn row_line(row: &hrc_herdr::InboxRow, selected: bool, now: &str, width: usize) 
         format!(
             "{here}{urgent} {} {} {:>4} {}",
             clamp(&row.sender_local_name, 10),
-            clamp(&row.kind, 8),
+            clamp(hrc_herdr::kind_label(&row.kind), 8),
             age,
             state
         )
@@ -884,7 +886,7 @@ fn row_line(row: &hrc_herdr::InboxRow, selected: bool, now: &str, width: usize) 
         format!(
             "{here}{urgent} {} {} {:>4}",
             clamp(&row.sender_local_name, 10),
-            clamp(&row.kind, 8),
+            clamp(hrc_herdr::kind_label(&row.kind), 8),
             age
         )
     } else if width >= 18 {

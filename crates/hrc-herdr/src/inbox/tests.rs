@@ -233,3 +233,18 @@ fn shortening_a_principal_respects_character_boundaries() {
     // thing that panics if one ever is not.
     assert_eq!(principal_display_name("ééééééééééé", None), "éééééééé~");
 }
+
+#[test]
+fn a_kind_is_shown_in_words_that_fit_its_column() {
+    for (wire, shown) in [
+        ("task_accept", "accepted"),
+        ("task_decline", "declined"),
+        ("capabilities", "caps"),
+        ("unsupported", "unknown"),
+        ("question", "question"),
+        ("result", "result"),
+    ] {
+        assert_eq!(kind_label(wire), shown);
+        assert!(shown.chars().count() <= 8, "{shown}");
+    }
+}
