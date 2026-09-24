@@ -230,6 +230,14 @@ fn every_decision_in_section_19_2_is_reachable() {
             },
         ),
         (
+            'e',
+            Outcome::EditThenDeliver {
+                message_id: "msg-1".into(),
+                agent: "reviewer-pane".into(),
+                target: "reviewer-pane".into(),
+            },
+        ),
+        (
             'i',
             Outcome::KeepInInbox {
                 message_id: "msg-1".into(),
@@ -437,6 +445,39 @@ fn a_session_that_does_not_exist_yet_says_it_will_be_started() {
         App::destination_label(&fresh),
         "a new claude session (started when you approve)"
     );
+}
+
+#[test]
+fn editing_is_a_delivery_and_is_held_to_the_same_rules() {
+    // PRD section 11.6: "Edit before delivery". Nothing before a reveal.
+    let mut app = app();
+    assert_eq!(app.on_key(key(KeyCode::Char('e'))), None);
+    assert!(app.proposed().is_none());
+
+    // The confirmation says it is an edit and where the edit will go.
+    app.on_key(key(KeyCode::Enter));
+    app.on_key(key(KeyCode::Char('e')));
+    let prompt = &app.proposed().unwrap().prompt;
+    assert!(prompt.contains("Edit this message from Alice"), "{prompt}");
+    assert!(prompt.contains("reviewer-pane"), "{prompt}");
+
+    // Only `y` confirms, as for any decision.
+    assert_eq!(app.on_key(key(KeyCode::Char('n'))), None);
+
+    // A destination that cannot take input is refused for an edit too.
+    let mut blocked = App::new(
+        vec![PendingItem {
+            message_id: "msg-1".into(),
+            view: view("Alice", "question"),
+            body: BODY.into(),
+            local_checks: Vec::new(),
+        }],
+        vec![hrc_herdr::LocalAgent::new("w1:p1", "busy").when_ready(false)],
+    );
+    blocked.on_key(key(KeyCode::Enter));
+    blocked.on_key(key(KeyCode::Char('e')));
+    assert!(blocked.proposed().is_none());
+    assert!(blocked.status().contains("cannot take input"));
 }
 
 fn release(code: KeyCode) -> KeyEvent {

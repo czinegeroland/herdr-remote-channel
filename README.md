@@ -187,7 +187,7 @@ from Herdr's action list in workspace and pane contexts.
 | Pane | Placement | What it is for |
 |---|---|---|
 | `inbox` — Remote channel inbox | split | Watching what arrives; `Enter` reviews a message, `t` opens its thread |
-| `review` — Remote channel review | popup | Reading a quarantined body and deciding: deliver, keep, or decline |
+| `review` — Remote channel review | popup | Reading a quarantined body and deciding: deliver, edit then deliver, keep, or decline with a reason |
 | `thread` — Remote channel thread | zoomed | Reading one conversation, showing only content a human already released |
 | `compose` — Remote channel compose | popup | Writing a note, question or reply |
 | `context` — Remote channel context | popup | Previewing and disclosing a context package |

@@ -32,6 +32,7 @@ use serde_json::{Value, json};
 use crate::commands::Context;
 use crate::error::{CliError, Result};
 
+mod decide;
 mod disclosure;
 mod joins;
 mod onboarding;
@@ -95,6 +96,12 @@ pub fn review(context: &Context, message_id: Option<&str>, agent: &str) -> Resul
         .iter()
         .map(|item| (item.message_id.clone(), item.body.clone()))
         .collect();
+    // Who sent each one, for a decline reason sent back to them. The
+    // verified principal from local metadata, never a name the sender chose.
+    let senders: std::collections::HashMap<String, String> = pending
+        .iter()
+        .map(|item| (item.message_id.clone(), item.view.sender_principal.clone()))
+        .collect();
 
     let mut app = App::new(pending, destinations);
     let outcome = hrc_tui::run(&mut app).map_err(|source| CliError::Io {
@@ -104,6 +111,11 @@ pub fn review(context: &Context, message_id: Option<&str>, agent: &str) -> Resul
 
     let delivery = match &outcome {
         Outcome::DeliverToAgent {
+            message_id,
+            target,
+            agent,
+        }
+        | Outcome::EditThenDeliver {
             message_id,
             target,
             agent,
@@ -134,19 +146,82 @@ pub fn review(context: &Context, message_id: Option<&str>, agent: &str) -> Resul
         return Err(gone);
     }
 
-    let Some((message_id, decision, action)) = wire_decision(outcome) else {
+    // The two choices of section 11.6 that need more than a key press are
+    // completed here, on the terminal the screen has handed back. Either can
+    // still be abandoned, and abandoning records nothing: the message stays
+    // pending, which is a state the person can act on again.
+    let decided = match outcome {
+        Outcome::EditThenDeliver {
+            message_id, agent, ..
+        } => {
+            let original = bodies.get(&message_id).cloned().unwrap_or_default();
+            let edited = decide::edit_in_editor(context, &original)?
+                .filter(|edited| decide::confirm_edit(&original, edited, &agent));
+            let Some(text) = edited else {
+                return Ok(json!({
+                    "status": "ok",
+                    "messageId": message_id,
+                    "decided": Value::Null,
+                    "reason": "the edit was not completed, so nothing was delivered and the message is still pending",
+                }));
+            };
+            Some((
+                message_id,
+                WireDecision::DeliverEdited { agent, text },
+                "deliver_edited",
+            ))
+        }
+        Outcome::Decline { message_id } => {
+            let reason = decide::decline_reason();
+            Some((message_id, WireDecision::Decline { reason }, "decline"))
+        }
+        other => wire_decision(other),
+    };
+
+    let Some((message_id, decision, action)) = decided else {
         return Ok(json!({
             "status": "ok",
             "decided": Value::Null,
         }));
     };
 
+    let reason = match &decision {
+        WireDecision::Decline { reason } => reason.clone(),
+        _ => None,
+    };
+
     let applied = runtime.block_on(apply(&endpoint, &message_id, decision))?;
+
+    // Nothing below may act on a decision the daemon did not record. Until
+    // this check existed a refused approval still handed the body over,
+    // because the hand-over read the body from the preview rather than from
+    // the daemon's answer.
+    require_trusted_success(&applied, "approve")?;
+
+    // A decline's reason goes back as the person's own reply, in the
+    // declined message's thread. Sent only after the decline is recorded,
+    // and only when they wrote one.
+    let replied = match (&reason, senders.get(&message_id)) {
+        (Some(reason), Some(sender)) => Some(
+            match super::compose(
+                context,
+                hrc_protocol::MessageKind::Note,
+                sender,
+                &format!("Declined: {reason}"),
+                Some(&message_id),
+                None,
+            ) {
+                Ok(sent) => sent,
+                Err(error) => json!({ "status": "error", "reason": error.to_string() }),
+            },
+        ),
+        _ => None,
+    };
 
     // Only after the daemon recorded the approval. The order is the point:
     // a body handed to a local session before the trusted path accepted the
     // decision would be a delivery the audit log does not know about.
-    let delivered = delivery.map(|(message_id, target, start_kind)| {
+    let delivered = delivery.map(|(_, target, start_kind)| {
         // A new session is started only now, after the approval is recorded:
         // starting one for a delivery the daemon then refused would leave an
         // agent running for nothing.
@@ -160,13 +235,11 @@ pub fn review(context: &Context, message_id: Option<&str>, agent: &str) -> Resul
             None => target,
         };
         let waited = settle(&target);
-        let mut delivered = hand_to_herdr(
-            &target,
-            bodies
-                .get(&message_id)
-                .map(String::as_str)
-                .unwrap_or_default(),
-        );
+        // What the daemon released, framed with its provenance banner
+        // (HRC-GATE-005): the original or the person's edit, whichever they
+        // approved. Never the preview body, which is unframed and would
+        // deliver the original even when the person edited it.
+        let mut delivered = hand_to_herdr(&target, applied["framed"].as_str().unwrap_or_default());
         if let Some(waited) = waited {
             delivered["waitedForIdle"] = json!(waited);
         }
@@ -179,6 +252,7 @@ pub fn review(context: &Context, message_id: Option<&str>, agent: &str) -> Resul
         "decided": action,
         "daemon": applied,
         "delivered": delivered,
+        "replied": replied,
     }))
 }
 
@@ -478,14 +552,11 @@ fn wire_decision(outcome: Outcome) -> Option<(String, WireDecision, &'static str
         Outcome::KeepInInbox { message_id } => {
             Some((message_id, WireDecision::KeepInInbox, "keep_in_inbox"))
         }
-        Outcome::Decline { message_id } => Some((
-            message_id,
-            // The screen does not collect a reason yet, and inventing one would
-            // put words in the human's mouth on a message that goes back to
-            // the sender.
-            WireDecision::Decline { reason: None },
-            "decline",
-        )),
+        // Both are completed after the screen closes, in `review`, because
+        // each needs something only the terminal can collect: an edited text
+        // and a reason. Reaching here with either would be a caller skipping
+        // that step, and nothing is decided on its behalf.
+        Outcome::EditThenDeliver { .. } | Outcome::Decline { .. } => None,
         Outcome::Quit => None,
     }
 }
@@ -677,6 +748,34 @@ fn review_target_from(value: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_edit_or_a_decline_is_never_decided_without_its_terminal_step() {
+        // Both need something the screen cannot collect: the edited text,
+        // and the optional reason. If `review` ever passed them straight to
+        // the wire, an edit would deliver the original and a decline would
+        // lose its reason, so the fallback decides nothing.
+        assert!(
+            wire_decision(Outcome::EditThenDeliver {
+                message_id: "m".into(),
+                agent: "a".into(),
+                target: "t".into(),
+            })
+            .is_none()
+        );
+        assert!(
+            wire_decision(Outcome::Decline {
+                message_id: "m".into()
+            })
+            .is_none()
+        );
+        assert!(
+            wire_decision(Outcome::KeepInInbox {
+                message_id: "m".into()
+            })
+            .is_some()
+        );
+    }
 
     #[test]
     fn a_departed_destination_is_reported_by_the_name_the_person_saw() {

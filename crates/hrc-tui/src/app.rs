@@ -65,6 +65,20 @@ pub enum Outcome {
         /// machine and is not what the audit log records.
         target: String,
     },
+    /// Edit the content, then deliver the edit (PRD section 11.6).
+    ///
+    /// The screen does not edit: a text editor is the caller's to run, once
+    /// this screen has given the terminal back. What the person confirmed
+    /// here is that they want to edit and where the result goes; the
+    /// delivery itself still waits for them to finish and confirm the edit.
+    EditThenDeliver {
+        /// The message.
+        message_id: String,
+        /// The agent the human picked, as they saw it named.
+        agent: String,
+        /// What a local delivery is addressed to. Local only.
+        target: String,
+    },
     /// Keep it in the human inbox.
     KeepInInbox {
         /// The message.
@@ -80,8 +94,7 @@ pub enum Outcome {
 }
 
 /// What the keys do once a body is on screen.
-const KEYS_REVEALED: &str =
-    "j/k/PgUp/PgDn: scroll   Tab: where to   a: deliver   i: inbox   d: decline   Esc: hide";
+const KEYS_REVEALED: &str = "j/k/PgUp/PgDn: scroll   Tab: where to   a: deliver   e: edit, then deliver   i: inbox   d: decline   Esc: hide";
 
 /// A decision awaiting confirmation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -333,7 +346,11 @@ impl App {
             // human approving something they have not been shown is the
             // failure this whole screen exists to prevent.
             KeyCode::Char('a') if self.revealed => {
-                self.propose_delivery();
+                self.propose_delivery(false);
+                None
+            }
+            KeyCode::Char('e') if self.revealed => {
+                self.propose_delivery(true);
                 None
             }
             KeyCode::Char('i') if self.revealed => {
@@ -426,7 +443,10 @@ impl App {
     /// anyway would put a confirmation in front of a person that could only
     /// fail after they answered it, and the message would be left in a state
     /// neither of them chose.
-    fn propose_delivery(&mut self) {
+    ///
+    /// `edit` proposes editing first. The same checks apply, because an
+    /// edited message goes to the same place an unedited one would.
+    fn propose_delivery(&mut self, edit: bool) {
         let Some(item) = self.items.get(self.selected) else {
             return;
         };
@@ -449,20 +469,35 @@ impl App {
         }
 
         let label = destination.label().to_owned();
-        let prompt = format!(
-            "Deliver this message from {sender} to {}? [y/N]",
-            Self::destination_label(destination)
-        );
+        let target = destination.local_target().to_owned();
+        let (prompt, outcome) = if edit {
+            (
+                format!(
+                    "Edit this message from {sender}, then deliver your edit to {}? [y/N]",
+                    Self::destination_label(destination)
+                ),
+                Outcome::EditThenDeliver {
+                    message_id,
+                    agent: label,
+                    target,
+                },
+            )
+        } else {
+            (
+                format!(
+                    "Deliver this message from {sender} to {}? [y/N]",
+                    Self::destination_label(destination)
+                ),
+                Outcome::DeliverToAgent {
+                    message_id,
+                    agent: label,
+                    target,
+                },
+            )
+        };
 
         self.status = prompt.clone();
-        self.proposed = Some(Proposed {
-            outcome: Outcome::DeliverToAgent {
-                message_id,
-                agent: label,
-                target: destination.local_target().to_owned(),
-            },
-            prompt,
-        });
+        self.proposed = Some(Proposed { outcome, prompt });
         self.focus = Focus::Confirm;
     }
 
@@ -476,6 +511,10 @@ impl App {
         let prompt = match &outcome {
             Outcome::DeliverToAgent { agent, .. } => format!(
                 "Deliver this message from {} to {agent}? [y/N]",
+                item.view.sender_local_name
+            ),
+            Outcome::EditThenDeliver { agent, .. } => format!(
+                "Edit this message from {}, then deliver your edit to {agent}? [y/N]",
                 item.view.sender_local_name
             ),
             Outcome::KeepInInbox { .. } => {
