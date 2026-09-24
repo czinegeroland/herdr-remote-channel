@@ -286,6 +286,15 @@ hrc task progress <task-message-id> blocked --note "<what you need from them>"
 Declining is final. Accept or decline only what the user has agreed to take
 on; these are statements to another person, not bookkeeping.
 
+To withdraw a task the user delegated, when they say it is no longer needed:
+
+```bash
+hrc task cancel <task-message-id> --note "<why>"
+```
+
+Withdrawal is best effort: it tells the assignee, and cannot undo anything
+they already did.
+
 When you have finished a task someone delegated, report it in the task's
 thread:
 

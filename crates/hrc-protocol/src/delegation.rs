@@ -302,6 +302,7 @@ impl ProgressBody {
         let agrees = match kind {
             MessageKind::TaskAccept => self.state == DelegationState::Accepted,
             MessageKind::TaskDecline => self.state == DelegationState::Declined,
+            MessageKind::Cancel => self.state == DelegationState::Cancelled,
             MessageKind::Progress => {
                 return self.validate();
             }
@@ -617,6 +618,14 @@ mod tests {
         report(DelegationState::NeedsInput)
             .validate_as(MessageKind::Progress)
             .unwrap();
+        report(DelegationState::Cancelled)
+            .validate_as(MessageKind::Cancel)
+            .unwrap();
+        assert!(
+            report(DelegationState::Accepted)
+                .validate_as(MessageKind::Cancel)
+                .is_err()
+        );
 
         assert!(
             report(DelegationState::Declined)

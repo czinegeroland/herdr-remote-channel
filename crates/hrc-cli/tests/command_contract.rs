@@ -3822,6 +3822,69 @@ fn an_assignee_accepts_and_reports_progress_in_the_tasks_thread() {
 }
 
 #[test]
+fn a_requester_withdraws_a_task_in_its_thread() {
+    // Section 18.2's `cancel`: best-effort withdrawal, sent by whoever
+    // asked, to whoever the task was sent to, in the task's thread.
+    let (home, remote) = channel_fixture();
+    let task_id = delegated_task(home.path(), remote.path());
+
+    let output = hrc_in(home.path())
+        .args([
+            "task",
+            "cancel",
+            &task_id,
+            "--note",
+            "no longer needed",
+            "--json",
+        ])
+        .output()
+        .expect("command should run");
+    assert!(
+        output.status.success(),
+        "cancel failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cancelled: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(cancelled["kind"], "cancel", "{cancelled}");
+    assert_eq!(cancelled["state"], "cancelled", "{cancelled}");
+
+    hrc_in(home.path())
+        .args(["sync", "--once"])
+        .assert()
+        .success();
+    let entry = inbox_entry_of_kind(home.path(), "cancel");
+    assert_eq!(entry["disposition"], "quarantined", "{entry}");
+
+    // Only a task this installation sent can be withdrawn.
+    let principal = principal_of(home.path(), remote.path());
+    let note = hrc_in(home.path())
+        .args(["send", &principal, "just a note", "--json"])
+        .output()
+        .expect("command should run");
+    let note: Value = serde_json::from_slice(&note.stdout).expect("stdout should be JSON");
+    let refused = hrc_in(home.path())
+        .args([
+            "task",
+            "cancel",
+            note["messageId"].as_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("command should run");
+    assert_eq!(refused.status.code(), Some(2));
+    let refused: Value = serde_json::from_slice(&refused.stdout).expect("stdout should be JSON");
+    assert_eq!(refused["code"], "not_a_task", "{refused}");
+
+    let unknown = hrc_in(home.path())
+        .args(["task", "cancel", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "--json"])
+        .output()
+        .expect("command should run");
+    let unknown: Value = serde_json::from_slice(&unknown.stdout).expect("stdout should be JSON");
+    assert_eq!(unknown["code"], "no_such_message", "{unknown}");
+}
+
+#[test]
 fn naming_a_context_package_in_a_delegation_discloses_nothing() {
     // `--context` points at a package the recipient may already hold. The
     // package itself travels by `hrc context send`, which is a trusted

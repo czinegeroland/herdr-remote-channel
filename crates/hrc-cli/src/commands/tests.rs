@@ -103,6 +103,43 @@ fn a_successful_send_after_a_refusal_still_arrives() {
 }
 
 #[test]
+fn a_cancel_reaches_the_assignee_in_the_tasks_thread() {
+    // The requester's task is in its outbox, not its inbox, so the thread is
+    // found there, and the assignee is found from the devices the task was
+    // sealed to through the roster.
+    let (directory, alice, channel_id, _alice_id) = messaging_home();
+    let (bob, bob_id) = admitted_peer(&alice, directory.path(), "bob");
+
+    let task = delegate(
+        &alice,
+        &bob_id,
+        "Investigate the flake",
+        "t",
+        &[],
+        None,
+        None,
+    )
+    .unwrap();
+    let task_id = task["messageId"].as_str().unwrap().to_owned();
+    let thread_id = task["threadId"].as_str().unwrap().to_owned();
+
+    let cancelled = task_cancel(&alice, &task_id, Some("found it myself")).unwrap();
+    assert_eq!(cancelled["kind"], "cancel", "{cancelled}");
+    assert_eq!(cancelled["threadId"], thread_id.as_str(), "{cancelled}");
+
+    sync_once(&bob).unwrap();
+    let bob_db = Database::open(bob.paths.database()).unwrap();
+    let cancel = bob_db
+        .inbox_entries(&channel_id)
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.kind == "cancel")
+        .expect("Bob received the cancellation");
+    assert_eq!(cancel.thread_id.as_deref(), Some(thread_id.as_str()));
+    assert_eq!(cancel.in_reply_to.as_deref(), Some(task_id.as_str()));
+}
+
+#[test]
 fn private_conversations_and_receipts_do_not_block_other_recipients() {
     let (directory, alice, channel_id, alice_id) = messaging_home();
     let (bob, bob_id) = admitted_peer(&alice, directory.path(), "bob");

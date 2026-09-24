@@ -75,19 +75,29 @@ pub(super) fn compose_body(
         // A reply continues the thread of what it answers, so the thread is
         // read from local state rather than chosen: a sender that picked its
         // own would be able to attach a reply to any conversation.
+        //
+        // A message this installation sent is looked up too, for a follow-up
+        // to its own message such as cancelling a task it delegated. Its
+        // thread is the one recorded when it was written here.
         Some(message_id) => {
-            let entry = database
+            let received = database
                 .inbox_entries(&channel.channel_id)?
                 .into_iter()
                 .find(|entry| entry.message_id == message_id)
-                .ok_or_else(|| CliError::NoSuchMessage {
-                    message_id: message_id.to_owned(),
-                })?;
+                .map(|entry| entry.thread_id.unwrap_or_else(|| message_id.to_owned()));
+            let thread_id = match received {
+                Some(thread_id) => thread_id,
+                None => database
+                    .sent_messages(&channel.channel_id)?
+                    .into_iter()
+                    .find(|sent| sent.message_id == message_id)
+                    .map(|sent| sent.thread_id)
+                    .ok_or_else(|| CliError::NoSuchMessage {
+                        message_id: message_id.to_owned(),
+                    })?,
+            };
 
-            (
-                entry.thread_id.unwrap_or_else(|| message_id.to_owned()),
-                Some(message_id.to_owned()),
-            )
+            (thread_id, Some(message_id.to_owned()))
         }
         None => (message_id.clone(), None),
     };
@@ -415,6 +425,84 @@ pub fn task_report(
     )?;
 
     sent["state"] = json!(state.as_str());
+    Ok(sent)
+}
+
+/// `hrc task cancel`: withdraw a task this installation delegated.
+///
+/// Best effort, as section 18.2 says of `cancel`: it tells the assignee the
+/// request is withdrawn, and cannot stop anything they already did. Sent in
+/// the task's thread to the principal the task was addressed to, which is
+/// resolved from the devices the task was sealed to through the signed
+/// roster rather than remembered as a name, so it cannot drift from who
+/// actually received it.
+pub fn task_cancel(context: &Context, task_id: &str, note: Option<&str>) -> Result<Value> {
+    let database = Database::open(context.paths.database())?;
+    let channel = only_channel(&database)?;
+
+    let sent = database
+        .sent_messages(&channel.channel_id)?
+        .into_iter()
+        .find(|sent| sent.message_id == task_id)
+        .ok_or_else(|| CliError::NoSuchMessage {
+            message_id: task_id.to_owned(),
+        })?;
+
+    if sent.kind != hrc_protocol::MessageKind::Task.as_str() {
+        return Err(CliError::NotATask {
+            message_id: task_id.to_owned(),
+            kind: sent.kind,
+        });
+    }
+
+    let transport = GitTransport::open(
+        context.paths.channel_transport(&channel.channel_id),
+        &channel.transport_locator,
+    )?;
+    transport.sync_from_remote()?;
+    let (roster, _) = load_roster(&transport, &channel.channel_id)?;
+
+    let mut principals: Vec<String> = sent
+        .recipient_device_ids
+        .iter()
+        .filter_map(|device| {
+            roster
+                .device(device)
+                .map(|device| device.principal_id.clone())
+        })
+        .collect();
+    principals.sort();
+    principals.dedup();
+
+    // A task is addressed to one principal. None left means every device it
+    // was sealed to has since left the roster, and there is nobody to tell.
+    let [assignee] = principals.as_slice() else {
+        return Err(CliError::TaskRecipientGone {
+            message_id: task_id.to_owned(),
+        });
+    };
+
+    let body = hrc_protocol::ProgressBody {
+        task_id: task_id.to_owned(),
+        state: hrc_protocol::DelegationState::Cancelled,
+        note: note.unwrap_or_default().to_owned(),
+    };
+    body.validate_as(hrc_protocol::MessageKind::Cancel)?;
+
+    let mut sent = compose_body(
+        context,
+        hrc_protocol::MessageKind::Cancel,
+        assignee,
+        serde_json::to_value(&body).map_err(|_| {
+            CliError::Core(hrc_core::CoreError::MalformedMessage {
+                reason: "the cancellation could not be serialized".into(),
+            })
+        })?,
+        Some(task_id),
+        None,
+    )?;
+
+    sent["state"] = json!(body.state.as_str());
     Ok(sent)
 }
 

@@ -213,6 +213,13 @@ pub enum CliError {
         kind: String,
     },
 
+    /// A task's recipient is no longer in the channel.
+    #[error("nobody the task {message_id} was sent to is still in this channel")]
+    TaskRecipientGone {
+        /// The task.
+        message_id: String,
+    },
+
     /// A commit named in a result does not resolve in this checkout.
     #[error("`{revision}` does not name a commit in this checkout")]
     UnresolvedCommit {
@@ -263,6 +270,7 @@ impl CliError {
             CliError::InvalidContextSource { .. } => "invalid_context_source",
             CliError::NotATask { .. } => "not_a_task",
             CliError::UnresolvedCommit { .. } => "unresolved_commit",
+            CliError::TaskRecipientGone { .. } => "task_recipient_gone",
         }
     }
 
@@ -285,6 +293,7 @@ impl CliError {
             | CliError::InvalidContextSource { .. }
             | CliError::NotATask { .. }
             | CliError::UnresolvedCommit { .. }
+            | CliError::TaskRecipientGone { .. }
             | CliError::UnknownHerdrTarget { .. } => exit::USAGE,
             CliError::Io { .. }
             | CliError::Storage(_)
