@@ -140,7 +140,8 @@ herdr plugin pane open --plugin herdr-remote-channel --entrypoint <id> --focus
 ```
 
 Add `--placement split --direction right` for the inbox, which is a side view
-someone keeps open; the others are popups and need no placement. The
+someone keeps open, and `--placement zoomed` for the thread, which wants the
+whole screen; the others are popups and need no placement. The
 entrypoint is the id in the table below, not the title. Use `$HERDR_BIN_PATH`
 when it is set, which is how a plugin command reaches the Herdr that launched
 it.
@@ -157,6 +158,7 @@ inside it is theirs.
 | `compose` | `Remote channel compose` | Writing a note, question or reply, and sending it |
 | `context` | `Remote channel context` | Disclosing a context package |
 | `inbox` | `Remote channel inbox` | Watching what arrives, and reaching review from it |
+| `thread` | `Remote channel thread` | Reading one conversation top to bottom; shows only content a human already released, and decides nothing |
 
 The inbox opens on its own when Herdr starts, once a channel exists. Open it
 yourself when someone asks where it is, or after setting a channel up — they

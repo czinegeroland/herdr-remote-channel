@@ -162,7 +162,7 @@ fn enter_asks_to_review_exactly_the_selected_message() {
 }
 
 #[test]
-fn no_key_produces_anything_but_a_review_request_or_a_quit() {
+fn no_key_produces_anything_but_a_review_request_a_thread_or_a_quit() {
     // The point of this test is not that these particular keys are inert. It
     // is that `InboxOutcome` has no variant that could approve, decline,
     // reveal, or deliver, so no key handler change can make one — the type
@@ -182,7 +182,9 @@ fn no_key_produces_anything_but_a_review_request_or_a_quit() {
     ] {
         match app.on_key(key(code)) {
             None => {}
-            Some(InboxOutcome::Quit) | Some(InboxOutcome::Review { .. }) => {
+            Some(InboxOutcome::Quit)
+            | Some(InboxOutcome::Review { .. })
+            | Some(InboxOutcome::Thread { .. }) => {
                 panic!("{code:?} should not reach an outcome")
             }
         }
@@ -686,5 +688,18 @@ fn an_empty_inbox_says_what_to_do_next_in_the_plugins_own_words() {
             manifest.contains(&format!("title = \"{title}\"")),
             "the manifest has no action titled {title}"
         );
+    }
+}
+
+#[test]
+fn t_opens_the_selected_messages_thread() {
+    let mut app = app();
+    let selected = app.selected_message_id().map(str::to_owned);
+
+    match app.on_key(key(KeyCode::Char('t'))) {
+        Some(InboxOutcome::Thread { message_id }) => {
+            assert_eq!(Some(message_id), selected);
+        }
+        other => panic!("expected a thread request, got {other:?}"),
     }
 }

@@ -74,6 +74,12 @@ title = "Remote channel review"
 contexts = ["workspace", "pane"]
 command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "action", "review"]
 
+[[actions]]
+id = "thread"
+title = "Remote channel thread"
+contexts = ["workspace", "pane"]
+command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "action", "thread"]
+
 [[events]]
 on = "workspace.focused"
 command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "event"]
@@ -131,6 +137,12 @@ placement = "popup"
 width = "80%"
 height = "80%"
 command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "pane", "review"]
+
+[[panes]]
+id = "thread"
+title = "Remote channel thread"
+placement = "zoomed"
+command = ["node", "node_modules/herdr-remote-channel/bin.js", "herdr", "pane", "thread"]
 
 [[link_handlers]]
 id = "join"

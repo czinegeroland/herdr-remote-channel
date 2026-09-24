@@ -273,6 +273,65 @@ fn delegation_content_survives_trusted_preview_and_approved_delivery() {
 }
 
 #[test]
+fn a_thread_shows_released_content_and_the_metadata_of_everything_else() {
+    // docs/RESEARCH.md 6.4. The thread pane follows the rule `hrc show`
+    // follows: content only where a human released it.
+    use crate::commands::review::{AWAITING, SENT_HERE, thread_entries};
+
+    let (_directory, context, channel_id, principal) = messaging_home();
+    let asked = ask(&context, &principal, "RELEASED_QUESTION", None).unwrap();
+    let question_id = asked["messageId"].as_str().unwrap().to_owned();
+    sync_once(&context).unwrap();
+    let answered = reply(&context, &question_id, "WITHHELD_ANSWER").unwrap();
+    sync_once(&context).unwrap();
+    let thread_id = answered["threadId"].as_str().unwrap().to_owned();
+
+    let database = Database::open(context.paths.database()).unwrap();
+    let before = thread_entries(&database, &channel_id, &thread_id).unwrap();
+    let text: String = before
+        .iter()
+        .map(|entry| format!("{}\n{}\n", entry.heading, entry.body))
+        .collect();
+    assert!(!text.contains("RELEASED_QUESTION"), "{text}");
+    assert!(!text.contains("WITHHELD_ANSWER"), "{text}");
+    assert!(text.contains(AWAITING), "{text}");
+    assert!(text.contains(SENT_HERE), "{text}");
+
+    let ledger = Mutex::new(hrc_core::rpc::ContextAuthorizationLedger::new());
+    let preview = handle_trusted_request(
+        &context,
+        &ledger,
+        TrustedRequest::PreviewPending {
+            message_id: question_id.clone(),
+        },
+    );
+    assert_eq!(preview["status"], "ok", "{preview}");
+    let approved = handle_trusted_request(
+        &context,
+        &ledger,
+        TrustedRequest::Approve {
+            message_id: question_id.clone(),
+            decision: hrc_core::rpc::WireDecision::DeliverToAgent {
+                agent: "reviewer".into(),
+            },
+            expires_at: "2099-01-01T00:00:00Z".into(),
+        },
+    );
+    assert_eq!(approved["status"], "ok", "{approved}");
+
+    let after = thread_entries(&database, &channel_id, &thread_id).unwrap();
+    let text: String = after
+        .iter()
+        .map(|entry| format!("{}\n{}\n", entry.heading, entry.body))
+        .collect();
+    assert!(text.contains("RELEASED_QUESTION"), "{text}");
+    assert!(
+        !text.contains("WITHHELD_ANSWER"),
+        "the answer was never approved: {text}"
+    );
+}
+
+#[test]
 fn wait_returns_the_advanced_report_when_earlier_milestones_are_reached() {
     let (_directory, context, channel_id, principal) = messaging_home();
     let sent = send(

@@ -37,6 +37,7 @@ mod joins;
 mod onboarding;
 mod roster;
 mod side_view;
+mod thread;
 mod writing;
 
 pub use disclosure::*;
@@ -44,6 +45,9 @@ pub use joins::*;
 pub use onboarding::*;
 pub use roster::*;
 pub use side_view::*;
+#[cfg(test)]
+pub(crate) use thread::{AWAITING, SENT_HERE, thread_entries};
+pub use thread::{thread_target, thread_view};
 pub use writing::*;
 
 /// How long an approval authorization stays usable.

@@ -49,7 +49,8 @@ pub use inbox::{
 };
 pub use indicator::Indicator;
 pub use manifest::{
-    Manifest, PLUGIN_ID, REVIEW_TARGET_ENV, manifest, open_review, open_review_list,
+    Manifest, PLUGIN_ID, REVIEW_TARGET_ENV, THREAD_TARGET_ENV, manifest, open_review,
+    open_review_list, open_thread,
 };
 pub use notify::{Coalesced, Notification, coalesce};
 pub use pane::Pane;

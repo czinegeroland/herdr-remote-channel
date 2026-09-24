@@ -41,6 +41,11 @@ pub const PLUGIN_ID: &str = "herdr-remote-channel";
 /// the process table of the machine, which is the opposite of quarantine.
 pub const REVIEW_TARGET_ENV: &str = "HRC_REVIEW_MESSAGE";
 
+/// The environment variable that carries the message whose thread the
+/// thread pane opens on. Same rules as [`REVIEW_TARGET_ENV`]: an identifier,
+/// never content, set on that one process.
+pub const THREAD_TARGET_ENV: &str = "HRC_THREAD_MESSAGE";
+
 /// The GitHub repository the agent skill is installed from.
 ///
 /// `skills add` takes `owner/repo` and has no flag for a tag or a commit, so
@@ -282,6 +287,30 @@ pub fn open_review(message_id: &str) -> Vec<String> {
     .collect()
 }
 
+/// The argv that asks Herdr to open the thread pane on one message's thread.
+///
+/// `message_id` must already be a well-formed ULID, for the same reason as
+/// [`open_review`]: it is the only thing this puts on a host command line.
+pub fn open_thread(message_id: &str) -> Vec<String> {
+    [
+        "plugin",
+        "pane",
+        "open",
+        "--plugin",
+        PLUGIN_ID,
+        "--entrypoint",
+        crate::pane::Pane::Thread.as_str(),
+        "--placement",
+        "zoomed",
+        "--focus",
+        "--env",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .chain(std::iter::once(format!("{THREAD_TARGET_ENV}={message_id}")))
+    .collect()
+}
+
 /// The argv that asks Herdr to open the review popup with nothing selected.
 ///
 /// The fallback when a row's identifier cannot be handed to the host. A
@@ -323,6 +352,7 @@ fn pane_title(pane: crate::pane::Pane) -> String {
         crate::pane::Pane::Joins => "Remote channel join requests".to_owned(),
         crate::pane::Pane::Members => "Remote channel members".to_owned(),
         crate::pane::Pane::Review => "Remote channel review".to_owned(),
+        crate::pane::Pane::Thread => "Remote channel thread".to_owned(),
     }
 }
 
@@ -428,12 +458,15 @@ pub fn manifest() -> Manifest {
                     | crate::pane::Pane::Joins
                     | crate::pane::Pane::Members
                     | crate::pane::Pane::Review => "popup".to_owned(),
+                    // A conversation is the one thing that wants the whole
+                    // screen and wants to stay open while someone reads it.
+                    crate::pane::Pane::Thread => "zoomed".to_owned(),
                 },
                 // Sized only where the host reads it. A width on a split
                 // pane is not a smaller split, it is a field the manifest
                 // schema does not define there.
                 width: match pane {
-                    crate::pane::Pane::Inbox => None,
+                    crate::pane::Pane::Inbox | crate::pane::Pane::Thread => None,
                     crate::pane::Pane::Setup
                     | crate::pane::Pane::Compose
                     | crate::pane::Pane::Context
@@ -442,7 +475,7 @@ pub fn manifest() -> Manifest {
                     | crate::pane::Pane::Review => Some("80%".to_owned()),
                 },
                 height: match pane {
-                    crate::pane::Pane::Inbox => None,
+                    crate::pane::Pane::Inbox | crate::pane::Pane::Thread => None,
                     crate::pane::Pane::Setup
                     | crate::pane::Pane::Compose
                     | crate::pane::Pane::Context

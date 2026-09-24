@@ -285,6 +285,11 @@ pub fn herdr_pane(context: &Context, pane: &str) -> Result<Value> {
         // The inbox. Interactive when a person is at the terminal, and the
         // same rows as JSON when something else is reading them.
         hrc_herdr::Pane::Inbox => review::inbox(context),
+
+        // One conversation, read-only. The inbox opens it on the selected
+        // message with the identifier in an environment variable, as it does
+        // the review popup.
+        hrc_herdr::Pane::Thread => review::thread_view(context, review::thread_target().as_deref()),
     }
 }
 

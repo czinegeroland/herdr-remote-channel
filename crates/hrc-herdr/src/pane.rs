@@ -36,11 +36,17 @@ pub enum Pane {
     /// visible right now" a question about history rather than about which
     /// pane is open.
     Review,
+    /// One conversation, read top to bottom (docs/RESEARCH.md 6.4).
+    ///
+    /// Read-only. It shows content a human already released and the metadata
+    /// of everything else, and no decision is reachable from it: reading a
+    /// quarantined body stays the review popup's job.
+    Thread,
 }
 
 impl Pane {
     /// Every pane, in the order the manifest declares them.
-    pub const ALL: [Pane; 7] = [
+    pub const ALL: [Pane; 8] = [
         Pane::Inbox,
         Pane::Setup,
         Pane::Compose,
@@ -48,6 +54,7 @@ impl Pane {
         Pane::Joins,
         Pane::Members,
         Pane::Review,
+        Pane::Thread,
     ];
 
     /// The name used on the command line and in the manifest.
@@ -60,6 +67,7 @@ impl Pane {
             Pane::Joins => "joins",
             Pane::Members => "members",
             Pane::Review => "review",
+            Pane::Thread => "thread",
         }
     }
 

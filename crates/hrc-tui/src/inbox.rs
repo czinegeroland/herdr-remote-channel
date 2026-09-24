@@ -77,6 +77,11 @@ pub enum InboxOutcome {
         /// The stored identifier of the selected row.
         message_id: String,
     },
+    /// Open the thread the selected message belongs to.
+    Thread {
+        /// The stored identifier of the selected row.
+        message_id: String,
+    },
     /// Close the side view.
     Quit,
 }
@@ -91,7 +96,8 @@ pub enum InboxOutcome {
 const KEYS: &str = "Enter review \u{b7} p/u/a filter \u{b7} ? keys";
 
 /// The full list, once someone asks for it.
-const KEYS_FULL: &str = "Enter: review  R: refresh  p: pending  u: unread  a: all  q: close";
+const KEYS_FULL: &str =
+    "Enter: review  t: thread  R: refresh  p: pending  u: unread  a: all  q: close";
 
 /// Shown between asking for a reload and the reload finishing.
 const REFRESHING: &str = "Refreshing...";
@@ -298,6 +304,15 @@ impl InboxApp {
                 };
                 None
             }
+            KeyCode::Char('t') => match self.selected_message_id() {
+                Some(message_id) => Some(InboxOutcome::Thread {
+                    message_id: message_id.to_owned(),
+                }),
+                None => {
+                    self.status = "Nothing selected.".to_owned();
+                    None
+                }
+            },
             KeyCode::Enter => match self.selected_message_id() {
                 Some(message_id) => Some(InboxOutcome::Review {
                     message_id: message_id.to_owned(),
