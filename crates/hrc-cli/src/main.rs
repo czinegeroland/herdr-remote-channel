@@ -250,6 +250,38 @@ fn run(cli: &Cli, _path: &str) -> std::result::Result<Value, Failure> {
             args.context.as_deref(),
         )
         .map_err(Failure::from),
+        Command::Task(task) => {
+            use hrc_protocol::{DelegationState, MessageKind};
+            let (task_id, kind, state, note) = match &task.action {
+                cli::TaskAction::Accept { task_id, note } => (
+                    task_id,
+                    MessageKind::TaskAccept,
+                    DelegationState::Accepted,
+                    note,
+                ),
+                cli::TaskAction::Decline { task_id, note } => (
+                    task_id,
+                    MessageKind::TaskDecline,
+                    DelegationState::Declined,
+                    note,
+                ),
+                cli::TaskAction::Progress {
+                    task_id,
+                    state,
+                    note,
+                } => (
+                    task_id,
+                    MessageKind::Progress,
+                    match state {
+                        cli::ProgressState::Working => DelegationState::InProgress,
+                        cli::ProgressState::Blocked => DelegationState::NeedsInput,
+                    },
+                    note,
+                ),
+            };
+            commands::task_report(&context, task_id, kind, state, note.as_deref())
+                .map_err(Failure::from)
+        }
         Command::Wait(args) => commands::wait(
             &context,
             &args.message_id,

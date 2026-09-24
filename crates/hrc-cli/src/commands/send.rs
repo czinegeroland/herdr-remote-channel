@@ -327,23 +327,7 @@ pub fn task_result(
     commits: &[String],
     context_id: Option<&str>,
 ) -> Result<Value> {
-    let database = Database::open(context.paths.database())?;
-    let channel = only_channel(&database)?;
-
-    let task = database
-        .inbox_entries(&channel.channel_id)?
-        .into_iter()
-        .find(|entry| entry.message_id == task_id)
-        .ok_or_else(|| CliError::NoSuchMessage {
-            message_id: task_id.to_owned(),
-        })?;
-
-    if task.kind != hrc_protocol::MessageKind::Task.as_str() {
-        return Err(CliError::NotATask {
-            message_id: task_id.to_owned(),
-            kind: task.kind,
-        });
-    }
+    let task = delegated_task(context, task_id)?;
 
     // Resolved in the checkout the command runs in, which is the one the
     // person reporting the result is working in.
@@ -392,6 +376,70 @@ pub fn task_result(
             .collect::<Vec<_>>()
     );
     Ok(sent)
+}
+
+/// `hrc task accept|decline|progress`: report where a task someone gave
+/// you stands.
+///
+/// Sent to whoever asked, in the task's thread, like a result. The body is
+/// `{taskId, state, note}` and must agree with the kind it travels as, so a
+/// `task_accept` cannot say `declined`. Concluding a task is `hrc result`'s
+/// job, and judging it complete is the requester's.
+pub fn task_report(
+    context: &Context,
+    task_id: &str,
+    kind: hrc_protocol::MessageKind,
+    state: hrc_protocol::DelegationState,
+    note: Option<&str>,
+) -> Result<Value> {
+    let task = delegated_task(context, task_id)?;
+
+    let body = hrc_protocol::ProgressBody {
+        task_id: task_id.to_owned(),
+        state,
+        note: note.unwrap_or_default().to_owned(),
+    };
+    body.validate_as(kind)?;
+
+    let mut sent = compose_body(
+        context,
+        kind,
+        &task.sender_principal,
+        serde_json::to_value(&body).map_err(|_| {
+            CliError::Core(hrc_core::CoreError::MalformedMessage {
+                reason: "the task report could not be serialized".into(),
+            })
+        })?,
+        Some(task_id),
+        None,
+    )?;
+
+    sent["state"] = json!(state.as_str());
+    Ok(sent)
+}
+
+/// The task a report or result is about: a `task` this installation
+/// received, by the message identifier it arrived as.
+fn delegated_task(context: &Context, task_id: &str) -> Result<hrc_storage::InboxEntry> {
+    let database = Database::open(context.paths.database())?;
+    let channel = only_channel(&database)?;
+
+    let task = database
+        .inbox_entries(&channel.channel_id)?
+        .into_iter()
+        .find(|entry| entry.message_id == task_id)
+        .ok_or_else(|| CliError::NoSuchMessage {
+            message_id: task_id.to_owned(),
+        })?;
+
+    if task.kind != hrc_protocol::MessageKind::Task.as_str() {
+        return Err(CliError::NotATask {
+            message_id: task_id.to_owned(),
+            kind: task.kind,
+        });
+    }
+
+    Ok(task)
 }
 
 /// Milliseconds since the Unix epoch, for a message identifier.
