@@ -349,6 +349,46 @@ fn a_thread_shows_released_content_and_the_metadata_of_everything_else() {
 }
 
 #[test]
+fn an_edited_approval_releases_the_edit_framed_and_never_the_original() {
+    // PRD section 11.6 and HRC-GATE-005. The review hands Herdr exactly what
+    // the daemon released, so what the daemon releases has to be the edit,
+    // inside the provenance banner, and not the text that arrived.
+    let (_directory, context, _channel_id, principal) = messaging_home();
+    let asked = ask(&context, &principal, "ORIGINAL_WORDING", None).unwrap();
+    let message_id = asked["messageId"].as_str().unwrap().to_owned();
+    sync_once(&context).unwrap();
+
+    let ledger = Mutex::new(hrc_core::rpc::ContextAuthorizationLedger::new());
+    let preview = handle_trusted_request(
+        &context,
+        &ledger,
+        TrustedRequest::PreviewPending {
+            message_id: message_id.clone(),
+        },
+    );
+    assert_eq!(preview["status"], "ok", "{preview}");
+
+    let approved = handle_trusted_request(
+        &context,
+        &ledger,
+        TrustedRequest::Approve {
+            message_id: message_id.clone(),
+            decision: hrc_core::rpc::WireDecision::DeliverEdited {
+                agent: "reviewer".into(),
+                text: "EDITED_WORDING".into(),
+            },
+            expires_at: "2099-01-01T00:00:00Z".into(),
+        },
+    );
+    assert_eq!(approved["status"], "ok", "{approved}");
+
+    let framed = approved["framed"].as_str().expect("the released content");
+    assert!(framed.starts_with("[REMOTE HRC MESSAGE]"), "{framed}");
+    assert!(framed.contains("EDITED_WORDING"), "{framed}");
+    assert!(!framed.contains("ORIGINAL_WORDING"), "{framed}");
+}
+
+#[test]
 fn wait_returns_the_advanced_report_when_earlier_milestones_are_reached() {
     let (_directory, context, channel_id, principal) = messaging_home();
     let sent = send(
