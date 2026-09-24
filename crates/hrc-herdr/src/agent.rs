@@ -41,6 +41,9 @@ pub struct LocalAgent {
     ready: bool,
     /// Whether Herdr says it is in the middle of a turn.
     working: bool,
+    /// The agent kind to start, when this destination is a session that
+    /// does not exist yet (decision DEC-111).
+    start_kind: Option<String>,
 }
 
 impl LocalAgent {
@@ -60,7 +63,36 @@ impl LocalAgent {
             current: false,
             ready: true,
             working: false,
+            start_kind: None,
         }
+    }
+
+    /// A session that does not exist yet: a fresh agent of `kind`, started
+    /// beside the current pane once a delivery to it is approved.
+    ///
+    /// `None` when the kind is not shaped like one. Kinds come from the
+    /// local Herdr, never from the channel, but they end up on a label and in
+    /// a host request, so the shape is checked rather than assumed.
+    pub fn new_session(kind: &str) -> Option<Self> {
+        let valid = !kind.is_empty()
+            && kind.len() <= 32
+            && kind
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+        if !valid {
+            return None;
+        }
+
+        Some(Self {
+            pane_id: String::new(),
+            label: format!("a new {kind} session"),
+            target: String::new(),
+            workspace_id: None,
+            current: false,
+            ready: true,
+            working: false,
+            start_kind: Some(kind.to_owned()),
+        })
     }
 
     /// Sets what `agent.prompt` is addressed to.
@@ -133,6 +165,11 @@ impl LocalAgent {
     /// (docs/RESEARCH.md 5.4).
     pub fn is_working(&self) -> bool {
         self.working
+    }
+
+    /// The agent kind to start, when this destination does not exist yet.
+    pub fn starts_new(&self) -> Option<&str> {
+        self.start_kind.as_deref()
     }
 
     /// The pane this agent occupies, for local delivery only.

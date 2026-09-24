@@ -27,6 +27,12 @@ use hrc_herdr::host;
 /// modal popup the person cannot dismiss.
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long a freshly started agent may take to become ready for input.
+///
+/// Herdr's own default is thirty seconds; a first run of some agents
+/// installs or updates itself, so this allows twice that.
+const START_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// What went wrong reaching Herdr.
 #[derive(Debug)]
 pub enum Unreachable {
@@ -134,6 +140,44 @@ impl Host {
         host::result(&answered?, &id)
             .map(|_| ())
             .map_err(Unreachable::Host)
+    }
+
+    /// The agent kinds this Herdr can start, in its own order.
+    pub fn startable_kinds(&mut self) -> Result<Vec<String>, Unreachable> {
+        let id = self.identifier();
+        let line = self.exchange(&id, host::agent_manifests(&id))?;
+        host::manifest_kinds(&line, &id).map_err(Unreachable::Host)
+    }
+
+    /// Starts a fresh agent of `kind` in a new pane beside `beside`, and
+    /// returns the name a delivery addresses it by.
+    ///
+    /// Herdr waits for the agent to be ready for input before answering, so
+    /// the read timeout is lifted for that exchange, as for a wait.
+    pub fn start_session(
+        &mut self,
+        kind: &str,
+        name: &str,
+        beside: Option<&str>,
+    ) -> Result<String, Unreachable> {
+        let id = self.identifier();
+        let line = self.exchange(&id, host::split_pane(&id, beside))?;
+        let pane_id = host::split_pane_id(&line, &id).map_err(Unreachable::Host)?;
+
+        let id = self.identifier();
+        self.reader
+            .get_ref()
+            .set_recv_timeout(Some(START_TIMEOUT + TIMEOUT))
+            .map_err(Unreachable::Io)?;
+        let millis = u64::try_from(START_TIMEOUT.as_millis()).unwrap_or(u64::MAX);
+        let answered = self.exchange(&id, host::agent_start(&id, name, kind, &pane_id, millis));
+        self.reader
+            .get_ref()
+            .set_recv_timeout(Some(TIMEOUT))
+            .map_err(Unreachable::Io)?;
+
+        host::accepted(&answered?, &id, "agent_started").map_err(Unreachable::Host)?;
+        Ok(name.to_owned())
     }
 
     /// Raises one notification through Herdr.

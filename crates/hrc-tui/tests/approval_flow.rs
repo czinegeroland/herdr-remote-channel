@@ -430,6 +430,15 @@ fn a_working_destination_says_it_will_wait_before_anyone_approves() {
     assert_eq!(App::destination_label(&free), "writer");
 }
 
+#[test]
+fn a_session_that_does_not_exist_yet_says_it_will_be_started() {
+    let fresh = hrc_herdr::LocalAgent::new_session("claude").unwrap();
+    assert_eq!(
+        App::destination_label(&fresh),
+        "a new claude session (started when you approve)"
+    );
+}
+
 fn release(code: KeyCode) -> KeyEvent {
     KeyEvent {
         code,
