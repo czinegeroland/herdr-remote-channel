@@ -44,6 +44,12 @@ pub struct LocalAgent {
     /// The agent kind to start, when this destination is a session that
     /// does not exist yet (decision DEC-111).
     start_kind: Option<String>,
+    /// The directory the agent is working in, when Herdr said.
+    ///
+    /// Local-only. Used to find the checkout a result's commits are checked
+    /// against, because a plugin command itself runs in the plugin's own
+    /// directory, which is the wrong repository to ask.
+    cwd: Option<String>,
 }
 
 impl LocalAgent {
@@ -64,6 +70,7 @@ impl LocalAgent {
             ready: true,
             working: false,
             start_kind: None,
+            cwd: None,
         }
     }
 
@@ -92,6 +99,7 @@ impl LocalAgent {
             ready: true,
             working: false,
             start_kind: Some(kind.to_owned()),
+            cwd: None,
         })
     }
 
@@ -121,6 +129,18 @@ impl LocalAgent {
     pub fn when_ready(mut self, ready: bool) -> Self {
         self.ready = ready;
         self
+    }
+
+    /// Records the directory Herdr says the agent is working in.
+    #[must_use]
+    pub fn working_in(mut self, cwd: Option<String>) -> Self {
+        self.cwd = cwd;
+        self
+    }
+
+    /// The directory the agent is working in, for local checks only.
+    pub fn local_cwd(&self) -> Option<&str> {
+        self.cwd.as_deref()
     }
 
     /// Records whether Herdr says it is in the middle of a turn.

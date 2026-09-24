@@ -461,7 +461,11 @@ fn destination(entry: &Value, current_pane: Option<&str>) -> Option<LocalAgent> 
             .in_workspace(text(entry, "workspace_id"))
             .as_current(current)
             .when_ready(ready)
-            .when_working(working),
+            .when_working(working)
+            // Where the agent's shell is now, falling back to where the pane
+            // started; either is the person's project, unlike this process's
+            // own directory.
+            .working_in(text(entry, "foreground_cwd").or_else(|| text(entry, "cwd"))),
     )
 }
 

@@ -402,3 +402,22 @@ fn a_new_session_is_split_beside_without_taking_focus_and_started_by_name() {
     assert_eq!(start["params"]["pane_id"], "w1:p9");
     assert_eq!(start["params"]["timeout_ms"], 60_000);
 }
+
+#[test]
+fn an_agent_carries_the_directory_it_is_working_in() {
+    // A plugin command runs in the plugin's own directory, so a result's
+    // commits are checked against the agent's instead. The shell's current
+    // directory wins over where the pane started.
+    let mut moved = info(Some("reviewer"), "w1:p1", true, "idle");
+    moved["cwd"] = json!("/work/started-here");
+    moved["foreground_cwd"] = json!("/work/project");
+    let mut started = info(Some("writer"), "w1:p2", true, "idle");
+    started["cwd"] = json!("/work/other");
+    let unknown = info(Some("tester"), "w1:p3", true, "idle");
+
+    let destinations = agents(&listing(vec![moved, started, unknown]), "req-1", None).unwrap();
+
+    assert_eq!(destinations[0].local_cwd(), Some("/work/project"));
+    assert_eq!(destinations[1].local_cwd(), Some("/work/other"));
+    assert_eq!(destinations[2].local_cwd(), None);
+}
