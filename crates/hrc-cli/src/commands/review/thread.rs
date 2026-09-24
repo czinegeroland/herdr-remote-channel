@@ -71,6 +71,13 @@ pub fn thread_view(context: &Context, target: Option<&str>) -> Result<Value> {
 }
 
 /// Every message in one thread, in reading order.
+///
+/// The order is this installation's own: when each message arrived here or
+/// was written here, from [`Database::thread_order`]. It is never the
+/// sender-chosen creation time or anything derived from it, such as a ULID
+/// identifier's time prefix, because that would let a remote peer place its
+/// message anywhere in this reading of the conversation (section 18.2,
+/// decision DEC-042).
 pub(crate) fn thread_entries(
     database: &Database,
     channel_id: &str,
@@ -78,14 +85,35 @@ pub(crate) fn thread_entries(
 ) -> Result<Vec<hrc_tui::ThreadEntry>> {
     let aliases = database.principal_aliases(channel_id)?;
 
-    // Sorted by message identifier where it is a ULID, whose leading
-    // characters are its creation time, so replies interleave with what they
-    // answer. An inbound identifier is sender-chosen and only checked for
-    // shape, so this orders the reading and decides nothing else; one that is
-    // not a ULID sorts after the rest, in arrival order.
-    let mut keyed: Vec<((bool, String, u64), hrc_tui::ThreadEntry)> = Vec::new();
+    let inbound: std::collections::HashMap<String, hrc_storage::InboxEntry> = database
+        .thread_entries(channel_id, thread_id)?
+        .into_iter()
+        .map(|entry| (entry.message_id.clone(), entry))
+        .collect();
+    let outbound: std::collections::HashMap<String, String> = database
+        .sent_messages(channel_id)?
+        .into_iter()
+        .filter(|sent| sent.thread_id == thread_id)
+        .map(|sent| (sent.message_id, sent.kind))
+        .collect();
 
-    for entry in database.thread_entries(channel_id, thread_id)? {
+    let mut entries = Vec::new();
+    for place in database.thread_order(channel_id, thread_id)? {
+        if place.outbound {
+            // A message still being built has no recorded kind or recipients
+            // yet, and is not in the sent facts; it appears once it is.
+            if let Some(kind) = outbound.get(&place.message_id) {
+                entries.push(hrc_tui::ThreadEntry {
+                    heading: format!("you · {kind}"),
+                    body: SENT_HERE.to_owned(),
+                });
+            }
+            continue;
+        }
+
+        let Some(entry) = inbound.get(&place.message_id) else {
+            continue;
+        };
         let sender = hrc_herdr::principal_display_name(
             &entry.sender_principal,
             aliases.get(&entry.sender_principal).map(String::as_str),
@@ -96,40 +124,13 @@ pub(crate) fn thread_entries(
             None => NOT_RELEASED.to_owned(),
         };
 
-        keyed.push((
-            order_key(&entry.message_id, entry.arrival_sequence),
-            hrc_tui::ThreadEntry {
-                heading: format!("{sender} · {}", entry.kind),
-                body,
-            },
-        ));
+        entries.push(hrc_tui::ThreadEntry {
+            heading: format!("{sender} · {}", entry.kind),
+            body,
+        });
     }
 
-    for sent in database
-        .sent_messages(channel_id)?
-        .into_iter()
-        .filter(|sent| sent.thread_id == thread_id)
-    {
-        keyed.push((
-            order_key(&sent.message_id, u64::MAX),
-            hrc_tui::ThreadEntry {
-                heading: format!("you · {}", sent.kind),
-                body: SENT_HERE.to_owned(),
-            },
-        ));
-    }
-
-    keyed.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(keyed.into_iter().map(|(_, entry)| entry).collect())
-}
-
-/// Where a message sorts: ULIDs by their time-ordered text, the rest after.
-fn order_key(message_id: &str, arrival: u64) -> (bool, String, u64) {
-    if hrc_protocol::is_ulid(message_id) {
-        (false, message_id.to_owned(), arrival)
-    } else {
-        (true, String::new(), arrival)
-    }
+    Ok(entries)
 }
 
 /// The message the thread pane was opened for, if Herdr passed a valid one.

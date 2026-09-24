@@ -118,6 +118,15 @@ pub struct InboxEntry {
     pub disposition: String,
 }
 
+/// One message's place in a thread, by this installation's own clock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadPlace {
+    /// The message.
+    pub message_id: String,
+    /// Whether this installation sent it.
+    pub outbound: bool,
+}
+
 /// Questions with no answer, counted in both directions.
 ///
 /// Two numbers rather than one, because they ask different things of a
@@ -341,6 +350,39 @@ impl Database {
     /// else's reading of the conversation.
     pub fn thread_entries(&self, channel_id: &str, thread_id: &str) -> Result<Vec<InboxEntry>> {
         self.query_inbox(channel_id, Some(thread_id))
+    }
+
+    /// The messages of one thread in the order this installation saw them.
+    ///
+    /// Inbound messages by when they arrived here and outbound ones by when
+    /// they were written here -- both this machine's clock. Never by the
+    /// sender's `createdAt`: a remote peer chooses that, and ordering by it
+    /// would let them place a message anywhere in someone else's reading of
+    /// the conversation (section 18.2, decision DEC-042). Ties within one
+    /// second fall back to arrival and device sequence, which are also
+    /// local.
+    pub fn thread_order(&self, channel_id: &str, thread_id: &str) -> Result<Vec<ThreadPlace>> {
+        let mut statement = self.connection.prepare(
+            "SELECT message_id, 0 AS outbound, received_at AS local_at,
+                    arrival_sequence AS sequence
+             FROM inbox
+             WHERE channel_id = ?1 AND thread_id = ?2 AND arrival_sequence IS NOT NULL
+             UNION ALL
+             SELECT message_id, 1, created_at, device_sequence
+             FROM outbox
+             WHERE channel_id = ?1 AND thread_id = ?2
+             ORDER BY local_at, outbound, sequence",
+        )?;
+
+        let rows = statement.query_map(params![channel_id, thread_id], |row| {
+            Ok(ThreadPlace {
+                message_id: row.get(0)?,
+                outbound: row.get::<_, i64>(1)? == 1,
+            })
+        })?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// Shared inbox query, optionally narrowed to one thread.
