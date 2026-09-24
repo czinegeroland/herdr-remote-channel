@@ -119,6 +119,10 @@ fn every_rendered_notification_names_its_channel_and_nothing_else_remote() {
             sender_local_name: "Alice".to_owned(),
             channel_local_name: "Team".to_owned(),
         },
+        Notification::NewResult {
+            sender_local_name: "Alice".to_owned(),
+            channel_local_name: "Team".to_owned(),
+        },
         Notification::JoinAwaitingApproval {
             channel_local_name: "Team".to_owned(),
             waiting: 1,
@@ -135,8 +139,8 @@ fn every_rendered_notification_names_its_channel_and_nothing_else_remote() {
         },
     ];
 
-    // Section 23.3 lists seven notification reasons and this is all of them.
-    assert_eq!(notifications.len(), 7);
+    // Section 23.3 lists eight notification reasons and this is all of them.
+    assert_eq!(notifications.len(), 8);
 
     for notification in &notifications {
         let rendered = notification.render();
@@ -299,4 +303,21 @@ fn a_coalesced_notice_carries_no_body_or_attachment_name() {
     let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
     keys.sort_unstable();
     assert_eq!(keys, vec!["covers", "text", "urgent"]);
+}
+
+#[test]
+fn a_task_result_tells_the_requester_without_saying_how_it_went() {
+    // What a requester is waiting on. Whether it succeeded is in the body,
+    // which stays quarantined, so the notice says only that one arrived.
+    let raised = Notification::for_message(&row("result", false)).expect("a result is notified");
+    assert!(matches!(raised, Notification::NewResult { .. }));
+    assert!(!raised.is_urgent());
+    assert_eq!(raised.kind(), "new_result");
+
+    for quiet in ["task_accept", "task_decline", "progress"] {
+        assert!(
+            Notification::for_message(&row(quiet, false)).is_none(),
+            "{quiet}"
+        );
+    }
 }

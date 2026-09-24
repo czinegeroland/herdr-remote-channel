@@ -425,5 +425,20 @@ impl InboxView {
     }
 }
 
+/// A message kind as a row shows it, in eight characters or fewer.
+///
+/// The wire names are for machines: `task_accept` clamped to a column is
+/// `task_ac…`, which a person has to decode. This is display only; the JSON
+/// an agent reads and everything stored keep the wire name.
+pub fn kind_label(kind: &str) -> &str {
+    match kind {
+        "task_accept" => "accepted",
+        "task_decline" => "declined",
+        "capabilities" => "caps",
+        "unsupported" => "unknown",
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests;

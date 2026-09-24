@@ -45,7 +45,8 @@ pub use config::{Config, ConfigProblem};
 pub use event::{HostEvent, Reaction, reaction_to};
 pub use host::HostError;
 pub use inbox::{
-    InboxDisposition, InboxRow, InboxView, agent_view, channel_display_name, principal_display_name,
+    InboxDisposition, InboxRow, InboxView, agent_view, channel_display_name, kind_label,
+    principal_display_name,
 };
 pub use indicator::Indicator;
 pub use manifest::{
