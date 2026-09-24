@@ -62,3 +62,23 @@ fn only_the_human_chosen_label_is_disclosable() {
     assert!(!agent.disclosable_label().contains("pane"));
     assert_eq!(agent.local_pane_id(), "pane-7f3a");
 }
+
+#[test]
+fn a_new_session_is_offered_by_kind_and_only_for_a_well_formed_one() {
+    // Decision DEC-111. Kinds come from the local Herdr, but they reach a
+    // label and a host request, so a malformed one is not offered.
+    let session = LocalAgent::new_session("claude").expect("a well-formed kind");
+    assert_eq!(session.starts_new(), Some("claude"));
+    assert_eq!(session.label(), "a new claude session");
+    assert!(session.is_ready(), "starting it is what the approval does");
+    assert!(!session.is_working());
+
+    for bad in ["", "claude code", "claude;rm", "../x", &"k".repeat(33)] {
+        assert!(
+            LocalAgent::new_session(bad).is_none(),
+            "{bad:?} was offered"
+        );
+    }
+
+    assert_eq!(LocalAgent::new("w1:p1", "reviewer").starts_new(), None);
+}

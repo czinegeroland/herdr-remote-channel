@@ -108,6 +108,69 @@ pub fn agent_prompt(id: &str, target: &str, text: &str) -> String {
     )
 }
 
+/// Asks which agent kinds this Herdr knows how to start.
+pub fn agent_manifests(id: &str) -> String {
+    request(id, "server.agent_manifests", json!({}))
+}
+
+/// The agent kinds in an `agent_manifest_status` answer, in Herdr's order.
+///
+/// Anything else, or an entry without a kind, yields fewer kinds rather
+/// than an error: offering no new session is the fallback, not a failure.
+pub fn manifest_kinds(line: &str, expected_id: &str) -> Result<Vec<String>, HostError> {
+    let result = result(line, expected_id)?;
+    if result.get("type").and_then(Value::as_str) != Some("agent_manifest_status") {
+        return Err(HostError::Unexpected);
+    }
+
+    let mut kinds: Vec<String> = result
+        .get("manifests")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|manifest| text(manifest, "agent"))
+        .collect();
+    kinds.dedup();
+    Ok(kinds)
+}
+
+/// Splits a new pane beside `target`, without taking focus.
+///
+/// Focus stays where the person is: the new session is a destination for
+/// content they approved, not a change of what they are looking at.
+pub fn split_pane(id: &str, target: Option<&str>) -> String {
+    request(
+        id,
+        "pane.split",
+        json!({ "direction": "right", "focus": false, "target_pane_id": target }),
+    )
+}
+
+/// The pane a `pane.split` created.
+pub fn split_pane_id(line: &str, expected_id: &str) -> Result<String, HostError> {
+    let result = result(line, expected_id)?;
+    if result.get("type").and_then(Value::as_str) != Some("pane_info") {
+        return Err(HostError::Unexpected);
+    }
+
+    result
+        .get("pane")
+        .and_then(|pane| text(pane, "pane_id"))
+        .ok_or(HostError::Unexpected)
+}
+
+/// Starts an agent of `kind` in an existing pane, under `name`.
+///
+/// `timeout_ms` bounds how long Herdr waits for the agent to become ready
+/// for input; the schema allows more than 3,000 and at most 300,000.
+pub fn agent_start(id: &str, name: &str, kind: &str, pane_id: &str, timeout_ms: u64) -> String {
+    request(
+        id,
+        "agent.start",
+        json!({ "name": name, "kind": kind, "pane_id": pane_id, "timeout_ms": timeout_ms }),
+    )
+}
+
 /// The agent states that end a wait for an approved delivery.
 ///
 /// Idle and done are what the wait is for. Blocked ends it too, because a

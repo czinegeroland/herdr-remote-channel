@@ -351,3 +351,54 @@ fn the_window_title_carries_only_the_title() {
     let cleared: Value = serde_json::from_str(&clear_window_title("1")).unwrap();
     assert_eq!(cleared["method"], "client.window_title.clear");
 }
+
+#[test]
+fn the_startable_kinds_are_read_from_the_manifest_status() {
+    let answer = json!({
+        "id": "req-4",
+        "result": {
+            "type": "agent_manifest_status",
+            "manifests": [
+                { "agent": "claude", "source": "builtin", "source_kind": "builtin", "local_override_shadowing_remote": false },
+                { "source": "builtin", "source_kind": "builtin", "local_override_shadowing_remote": false },
+                { "agent": "codex", "source": "builtin", "source_kind": "builtin", "local_override_shadowing_remote": false },
+            ],
+        },
+    })
+    .to_string();
+
+    assert_eq!(
+        manifest_kinds(&answer, "req-4").unwrap(),
+        vec!["claude".to_owned(), "codex".to_owned()]
+    );
+
+    let wrong =
+        json!({ "id": "req-4", "result": { "type": "agent_list", "agents": [] } }).to_string();
+    assert_eq!(manifest_kinds(&wrong, "req-4"), Err(HostError::Unexpected));
+}
+
+#[test]
+fn a_new_session_is_split_beside_without_taking_focus_and_started_by_name() {
+    let split: Value = serde_json::from_str(split_pane("req-5", Some("w1:p1")).trim_end()).unwrap();
+    assert_eq!(split["method"], "pane.split");
+    assert_eq!(split["params"]["direction"], "right");
+    assert_eq!(split["params"]["focus"], false);
+    assert_eq!(split["params"]["target_pane_id"], "w1:p1");
+
+    let created = json!({
+        "id": "req-5",
+        "result": { "type": "pane_info", "pane": { "pane_id": "w1:p9" } },
+    })
+    .to_string();
+    assert_eq!(split_pane_id(&created, "req-5").unwrap(), "w1:p9");
+
+    let start: Value = serde_json::from_str(
+        agent_start("req-6", "hrc-claude-1", "claude", "w1:p9", 60_000).trim_end(),
+    )
+    .unwrap();
+    assert_eq!(start["method"], "agent.start");
+    assert_eq!(start["params"]["name"], "hrc-claude-1");
+    assert_eq!(start["params"]["kind"], "claude");
+    assert_eq!(start["params"]["pane_id"], "w1:p9");
+    assert_eq!(start["params"]["timeout_ms"], 60_000);
+}

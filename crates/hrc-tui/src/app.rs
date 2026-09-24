@@ -201,6 +201,10 @@ impl App {
             None => agent.label().to_owned(),
         };
 
+        if agent.starts_new().is_some() {
+            return format!("{named} (started when you approve)");
+        }
+
         // Said before the decision rather than discovered after it: a
         // person approving into a busy agent should know it will not land
         // straight away (docs/RESEARCH.md 5.4).

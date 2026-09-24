@@ -90,6 +90,7 @@ pub fn review(context: &Context, message_id: Option<&str>, agent: &str) -> Resul
     // declining still work, and delivering refuses instead of failing after
     // the person has confirmed it.
     let destinations = destinations(agent);
+    let offered = destinations.clone();
     let bodies: std::collections::HashMap<String, String> = pending
         .iter()
         .map(|item| (item.message_id.clone(), item.body.clone()))
@@ -103,8 +104,20 @@ pub fn review(context: &Context, message_id: Option<&str>, agent: &str) -> Resul
 
     let delivery = match &outcome {
         Outcome::DeliverToAgent {
-            message_id, target, ..
-        } => Some((message_id.clone(), target.clone())),
+            message_id,
+            target,
+            agent,
+        } => Some((
+            message_id.clone(),
+            target.clone(),
+            // A session that does not exist yet has no target to check or
+            // address, so it is recognised by the entry the person chose
+            // (decision DEC-111).
+            offered
+                .iter()
+                .find(|offer| offer.label() == agent && offer.local_target() == target)
+                .and_then(|offer| offer.starts_new().map(str::to_owned)),
+        )),
         _ => None,
     };
 
@@ -115,7 +128,7 @@ pub fn review(context: &Context, message_id: Option<&str>, agent: &str) -> Resul
     // message would sit approved with nothing holding it. Nothing has been
     // recorded yet at this point, so refusing here leaves it pending —
     // which is the state a person can act on again.
-    if let Some((_, target)) = &delivery
+    if let Some((_, target, None)) = &delivery
         && let Some(gone) = departed(target)
     {
         return Err(gone);
@@ -133,7 +146,19 @@ pub fn review(context: &Context, message_id: Option<&str>, agent: &str) -> Resul
     // Only after the daemon recorded the approval. The order is the point:
     // a body handed to a local session before the trusted path accepted the
     // decision would be a delivery the audit log does not know about.
-    let delivered = delivery.map(|(message_id, target)| {
+    let delivered = delivery.map(|(message_id, target, start_kind)| {
+        // A new session is started only now, after the approval is recorded:
+        // starting one for a delivery the daemon then refused would leave an
+        // agent running for nothing.
+        let target = match start_kind {
+            Some(kind) => match start_session(&kind) {
+                Ok(name) => name,
+                Err(reason) => {
+                    return json!({ "handedOver": false, "reason": reason });
+                }
+            },
+            None => target,
+        };
         let waited = settle(&target);
         let mut delivered = hand_to_herdr(
             &target,
@@ -165,19 +190,35 @@ pub fn review(context: &Context, message_id: Option<&str>, agent: &str) -> Resul
 /// impossible. It is marked not ready, because nothing has confirmed
 /// anything can receive there.
 fn destinations(fallback: &str) -> Vec<hrc_herdr::LocalAgent> {
-    let listed = crate::herdr_host::Host::connect()
-        .and_then(|mut host| host.destinations())
+    let mut host = crate::herdr_host::Host::connect().ok();
+    let listed = host
+        .as_mut()
+        .and_then(|host| host.destinations().ok())
         .unwrap_or_default();
 
+    // Sessions that do not exist yet come after the ones that do, one per
+    // agent kind this Herdr can start (decision DEC-111). Which kind is the
+    // person's choice, made here like any other destination, rather than a
+    // default this screen picks for them.
+    let startable: Vec<hrc_herdr::LocalAgent> = host
+        .as_mut()
+        .and_then(|host| host.startable_kinds().ok())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|kind| hrc_herdr::LocalAgent::new_session(kind))
+        .collect();
+
     if !listed.is_empty() {
-        return listed;
+        return listed.into_iter().chain(startable).collect();
     }
 
-    vec![
+    std::iter::once(
         hrc_herdr::LocalAgent::new(fallback, fallback)
             .as_current(true)
             .when_ready(false),
-    ]
+    )
+    .chain(startable)
+    .collect()
 }
 
 /// Why a chosen destination can no longer receive, if it cannot.
@@ -211,6 +252,29 @@ fn departed(target: &str) -> Option<CliError> {
             reason: "it is no longer there",
         }),
     }
+}
+
+/// Starts a fresh agent of `kind` beside the pane this runs in.
+///
+/// The name is fixed wording plus a time-derived suffix: nothing a sender
+/// wrote, and distinct enough that two sessions started a minute apart do
+/// not collide on Herdr's unique live names.
+fn start_session(kind: &str) -> std::result::Result<String, String> {
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() % 2_176_782_336)
+        .unwrap_or_default();
+    let name = format!("hrc-{kind}-{suffix:x}");
+
+    crate::herdr_host::Host::connect()
+        .and_then(|mut host| {
+            host.start_session(
+                kind,
+                &name,
+                crate::herdr_host::Host::calling_pane().as_deref(),
+            )
+        })
+        .map_err(|error| format!("could not start a new {kind} session: {error}"))
 }
 
 /// The longest an approved delivery waits for a working agent.
