@@ -329,6 +329,23 @@ fn a_thread_shows_released_content_and_the_metadata_of_everything_else() {
         !text.contains("WITHHELD_ANSWER"),
         "the answer was never approved: {text}"
     );
+
+    // This installation's own messages say how far they got, in the words
+    // `hrc wait` uses, and never what they said.
+    let sent_question = after
+        .iter()
+        .find(|entry| entry.heading.starts_with("you · question"))
+        .expect("the question this installation sent");
+    let state = sent_question
+        .heading
+        .rsplit(" · ")
+        .next()
+        .unwrap_or_default();
+    assert!(
+        ["published", "delivered", "read", "accepted"].contains(&state),
+        "{}",
+        sent_question.heading
+    );
 }
 
 #[test]
